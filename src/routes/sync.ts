@@ -1,8 +1,9 @@
 import { Hono, type Context } from 'hono';
 import { and, eq, gt } from 'drizzle-orm';
+import { z } from 'zod';
 import { db } from '../database/db.js';
 import { users, userLibrary, readingHistory, readingSessions } from '../database/schema.js';
-import { requireAuth } from '../middleware/auth.js';
+import { verifySubject } from '../middleware/auth.js';
 
 export const syncRouter = new Hono();
 
@@ -17,6 +18,64 @@ export const syncRouter = new Hono();
 // ==========================================
 
 export const CLIENT_CLOCK_SKEW_MS = 5 * 60 * 1000;
+
+// ---- Input validation (zod). Malformed outbox payloads must fail as 400
+// (client drops the op) — never 500 (client would retry forever).
+const userSchema = z.object({
+  externalId: z.string().min(1).max(255),
+  email: z.string().max(255).optional(),
+  name: z.string().max(100).optional()
+});
+const libraryRowSchema = z.object({
+  novelId: z.union([z.string(), z.number()]),
+  sourceId: z.string().max(100).nullable().optional(),
+  categoryIds: z.array(z.string()).optional(),
+  lastReadChapterId: z.number().nullable().optional(),
+  lastReadChapterNumber: z.number().nullable().optional(),
+  lastReadChapterTitle: z.string().max(255).nullable().optional(),
+  progressPercent: z.number().optional(),
+  lastReadAt: z.string().nullable().optional(),
+  addedAt: z.string().nullable().optional(),
+  updatedAt: z.number().optional(),
+  deletedAt: z.number().nullable().optional()
+});
+const historyRowSchema = z.object({
+  novelId: z.union([z.string(), z.number()]),
+  novelTitle: z.string().max(255).optional(),
+  novelCover: z.string().optional(),
+  novelAuthor: z.string().max(150).optional(),
+  category: z.string().max(100).optional(),
+  sourceId: z.string().max(100).nullable().optional(),
+  chapterId: z.number(),
+  chapterNumber: z.number().optional(),
+  chapterTitle: z.string().max(255).optional(),
+  progressPercent: z.number().optional(),
+  readDay: z.string().max(10).optional(),
+  readAt: z.number().optional(),
+  updatedAt: z.number().optional()
+});
+const sessionRowSchema = z.object({
+  clientSessionId: z.string().min(1).max(64),
+  novelId: z.union([z.string(), z.number()]).optional(),
+  chapterId: z.number().optional(),
+  seconds: z.number().optional(),
+  words: z.number().optional(),
+  minuteOfDay: z.number().optional(),
+  readDay: z.string().max(10).optional(),
+  genre: z.string().max(100).optional(),
+  ts: z.number().optional()
+});
+const pushSchema = z.object({
+  user: userSchema,
+  deviceId: z.string().max(100).optional(),
+  library: z.array(libraryRowSchema).max(5000).optional(),
+  history: z.array(historyRowSchema).max(5000).optional(),
+  sessions: z.array(sessionRowSchema).max(5000).optional()
+});
+const pullSchema = z.object({
+  user: userSchema,
+  since: z.number().optional()
+});
 
 const clampTs = (ts: number, now: number): number =>
   ts > now + CLIENT_CLOCK_SKEW_MS ? now : ts;
@@ -65,18 +124,23 @@ const dateOrNull = (v: unknown): Date | null => {
 
 // POST /api/v1/sync/push
 syncRouter.post('/push', async (c) => {
-  if (process.env.SYNC_OPEN === 'false') {
-    const gate = await requireAuthFetch(c);
-    if (gate) return gate;
+  const authedSub = await authedSubject(c);
+  if (process.env.SYNC_OPEN === 'false' && !authedSub) {
+    return c.json({ error: 'unauthorized: valid Bearer token required' }, 401);
   }
-  const body = await c.req.json().catch(() => null);
-  const externalId = typeof body?.user?.externalId === 'string' ? body.user.externalId : '';
-  if (!externalId) return c.json({ error: 'user.externalId is required' }, 400);
+  const parsed = pushSchema.safeParse(await c.req.json().catch(() => null));
+  if (!parsed.success) return c.json({ error: 'invalid push payload', issues: parsed.error.issues }, 400);
+  const body = parsed.data;
+  const externalId = body.user.externalId;
+  // Owner policy: an authenticated caller may only sync its own identity.
+  if (authedSub && authedSub !== externalId) {
+    return c.json({ error: 'forbidden: token identity does not match user.externalId' }, 403);
+  }
   const now = Date.now();
   const user = await provisionUser(externalId, body.user?.email, body.user?.name);
 
   let appliedLibrary = 0;
-  for (const e of Array.isArray(body.library) ? body.library : []) {
+  for (const e of body.library ?? []) {
     const novelId = String(e.novelId ?? '');
     if (!novelId) continue;
     const updatedAt = clampTs(num(e.updatedAt, now), now);
@@ -124,7 +188,7 @@ syncRouter.post('/push', async (c) => {
   }
 
   let appliedHistory = 0;
-  for (const e of Array.isArray(body.history) ? body.history : []) {
+  for (const e of body.history ?? []) {
     const novelId = String(e.novelId ?? '');
     const chapterId = num(e.chapterId, -1);
     if (!novelId || chapterId < 0) continue;
@@ -165,7 +229,7 @@ syncRouter.post('/push', async (c) => {
   }
 
   let appliedSessions = 0;
-  for (const e of Array.isArray(body.sessions) ? body.sessions : []) {
+  for (const e of body.sessions ?? []) {
     const key = typeof e.clientSessionId === 'string' ? e.clientSessionId : '';
     if (!key) continue;
     const r = await db
@@ -192,13 +256,18 @@ syncRouter.post('/push', async (c) => {
 
 // POST /api/v1/sync/pull
 syncRouter.post('/pull', async (c) => {
-  if (process.env.SYNC_OPEN === 'false') {
-    const gate = await requireAuthFetch(c);
-    if (gate) return gate;
+  const authedSub = await authedSubject(c);
+  if (process.env.SYNC_OPEN === 'false' && !authedSub) {
+    return c.json({ error: 'unauthorized: valid Bearer token required' }, 401);
   }
-  const body = await c.req.json().catch(() => null);
-  const externalId = typeof body?.user?.externalId === 'string' ? body.user.externalId : '';
-  if (!externalId) return c.json({ error: 'user.externalId is required' }, 400);
+  const parsed = pullSchema.safeParse(await c.req.json().catch(() => null));
+  if (!parsed.success) return c.json({ error: 'invalid pull payload', issues: parsed.error.issues }, 400);
+  const body = parsed.data;
+  const externalId = body.user.externalId;
+  // Owner policy: an authenticated caller may only sync its own identity.
+  if (authedSub && authedSub !== externalId) {
+    return c.json({ error: 'forbidden: token identity does not match user.externalId' }, 403);
+  }
   const since = num(body?.since, 0);
   const user = await provisionUser(externalId, body.user?.email, body.user?.name);
 
@@ -278,13 +347,8 @@ syncRouter.post('/stats', async (c) => {
   return c.json({ success: true, library: lib.length, history: hist.length, sessions: sess.length, serverNow: Date.now() });
 });
 
-// Optional gate: with SYNC_OPEN=false the caller must present a valid Bearer
-// JWT (mobile userAccount.token). Returns a rejection Response, else null.
-async function requireAuthFetch(c: Context): Promise<Response | null> {
-  let nextCalled = false;
-  const out = await requireAuth(c, async () => {
-    nextCalled = true;
-  });
-  if (nextCalled) return null;
-  return out ?? c.json({ error: 'unauthorized' }, 401);
+// Subject of the caller's token when one is presented (null = anonymous).
+// Used for the owner policy without forcing auth on open deployments.
+async function authedSubject(c: Context): Promise<string | null> {
+  return verifySubject(c.req.header('Authorization'));
 }

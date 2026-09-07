@@ -4,6 +4,7 @@ import { serveStatic } from '@hono/node-server/serve-static';
 import { cors } from 'hono/cors';
 import { logger } from 'hono/logger';
 import { prettyJSON } from 'hono/pretty-json';
+import { requestId } from 'hono/request-id';
 import { novelsRouter } from './routes/novels.js';
 import { chaptersRouter, chaptersTimelineRouter } from './routes/chapters.js';
 import { uploadRouter } from './routes/upload.js';
@@ -13,14 +14,23 @@ import path from 'path';
 
 const app = new Hono();
 
-// Middlewares
+// Middlewares — order matters: identify → log → accept CORS → format.
+// CORS runs before anything that can reject so preflights never hit formatting.
+app.use('*', requestId());
 app.use('*', logger());
-app.use('*', prettyJSON());
 app.use('*', cors({
   origin: '*',
   allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowHeaders: ['Content-Type', 'Authorization']
 }));
+app.use('*', prettyJSON());
+
+// Single error envelope: thrown errors exit as {error} JSON (with the
+// request id for log correlation), never as HTML stacks.
+app.onError((err, c) => {
+  console.error(`[${c.get('requestId') ?? 'no-id'}]`, err);
+  return c.json({ error: 'internal server error', requestId: c.get('requestId') ?? null }, 500);
+});
 
 // Serve Static Uploads
 app.use('/uploads/*', serveStatic({
