@@ -8,6 +8,7 @@ import { novelsRouter } from './routes/novels.js';
 import { chaptersRouter, chaptersTimelineRouter } from './routes/chapters.js';
 import { uploadRouter } from './routes/upload.js';
 import { authRouter } from './routes/auth.js';
+import { syncRouter } from './routes/sync.js';
 import path from 'path';
 
 const app = new Hono();
@@ -38,6 +39,7 @@ app.get('/health', (c) => {
 
 // Mount Routes
 app.route('/api/v1/auth', authRouter);
+app.route('/api/v1/sync', syncRouter);
 app.route('/api/v1/novels', novelsRouter);
 app.route('/api/v1/novels', chaptersRouter);
 app.route('/api/v1/chapters', chaptersTimelineRouter);
@@ -58,7 +60,10 @@ app.get('/api/v1', (c) => {
       chapterContent: '/api/v1/novels/:novelId/chapters/:chapterNumber',
       chapterTimeline: 'POST /api/v1/chapters/timeline',
       todayChapters: 'GET /api/v1/chapters/today',
-      uploadCover: 'POST /api/v1/upload/cover'
+      uploadCover: 'POST /api/v1/upload/cover',
+      syncPush: 'POST /api/v1/sync/push',
+      syncPull: 'POST /api/v1/sync/pull',
+      syncStats: 'POST /api/v1/sync/stats'
     }
   });
 });
