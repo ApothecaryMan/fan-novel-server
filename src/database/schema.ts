@@ -123,6 +123,15 @@ export const readingSessions = pgTable('reading_sessions', {
   sessionsUserClientIdx: uniqueIndex('sessions_user_client_idx').on(table.userId, table.clientSessionId)
 }));
 
+// 8. أغلفة الروايات (DB blob fallback when no object storage is bound).
+// Covers average ~200KB; 0.5GB Neon holds ~2500 of them. Replaced by R2 when bound.
+export const coverBlobs = pgTable('cover_blobs', {
+  filename: varchar('filename', { length: 255 }).primaryKey(),
+  mime: varchar('mime', { length: 50 }).notNull(),
+  dataBase64: text('data_base64').notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull()
+});
+
 // Helper function for serial primary key type
 function serial(name: string) {
   return integer(name).generatedAlwaysAsIdentity();

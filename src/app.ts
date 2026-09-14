@@ -10,7 +10,9 @@ import { uploadRouter } from './routes/upload.js';
 import { authRouter } from './routes/auth.js';
 import { syncRouter } from './routes/sync.js';
 import { rateLimit } from './middleware/rateLimit.js';
-import { checkDb, initDb, isDbAvailable } from './database/db.js';
+import { checkDb, db, initDb, isDbAvailable, noteDbFailure } from './database/db.js';
+import { coverBlobs } from './database/schema.js';
+import { eq } from 'drizzle-orm';
 import { getEnv, isWorkersRuntime } from './config/env.js';
 
 export function createApp() {
@@ -40,22 +42,39 @@ export function createApp() {
     return c.json({ error: 'internal server error', requestId: c.get('requestId') ?? null }, 500);
   });
 
-  // Local static uploads only exist on Node. On Workers covers come from the COVERS R2 binding.
+  // Cover serving: R2 binding → Postgres blob → local disk (Node) → 404.
+  // One GET route on both runtimes; falls through with next() on miss.
+  app.get('/uploads/covers/:filename', async (c, next) => {
+    const name = c.req.param('filename');
+    if (!/^[\w.-]+\.(png|jpg|jpeg|webp|gif)$/i.test(name)) return c.json({ error: 'invalid filename' }, 400);
+    // 1. R2 binding when present (Workers).
+    const bucket = (globalThis as any).__WORKER_BINDINGS__?.COVERS as
+      | { get: (k: string) => Promise<{ body: ReadableStream; httpMetadata?: { contentType?: string } } | null> }
+      | undefined;
+    if (bucket) {
+      const obj = await bucket.get(`covers/${name}`);
+      if (obj) {
+        const type = obj.httpMetadata?.contentType ?? 'image/png';
+        return new Response(obj.body, { headers: { 'Content-Type': type, 'Cache-Control': 'public, max-age=31536000, immutable' } });
+      }
+    }
+    // 2. Postgres blob fallback.
+    if (isDbAvailable()) {
+      try {
+        const rows = await db.select().from(coverBlobs).where(eq(coverBlobs.filename, name)).limit(1);
+        if (rows[0]) {
+          const bin = Buffer.from(rows[0].dataBase64, 'base64');
+          return new Response(bin as unknown as BodyInit, { headers: { 'Content-Type': rows[0].mime, 'Cache-Control': 'public, max-age=86400' } });
+        }
+      } catch (err) {
+        console.error('[covers] db read failed', err); noteDbFailure();
+      }
+    }
+    await next();
+  });
+  // 3. Local disk (Node only; Workers has no filesystem).
   if (!isWorkersRuntime()) {
     app.use('/uploads/*', serveStatic({ root: './' }));
-  } else {
-    app.get('/uploads/covers/:filename', async (c) => {
-      const name = c.req.param('filename');
-      if (!/^[\w.-]+\.(png|jpg|jpeg|webp|gif)$/i.test(name)) return c.json({ error: 'invalid filename' }, 400);
-      const bucket = (globalThis as any).__WORKER_BINDINGS__?.COVERS as
-        | { get: (k: string) => Promise<{ body: ReadableStream; httpMetadata?: { contentType?: string } } | null> }
-        | undefined;
-      if (!bucket) return c.json({ error: 'cover storage not configured' }, 501);
-      const obj = await bucket.get(`covers/${name}`);
-      if (!obj) return c.json({ error: 'not found' }, 404);
-      const type = obj.httpMetadata?.contentType ?? 'image/png';
-      return new Response(obj.body, { headers: { 'Content-Type': type, 'Cache-Control': 'public, max-age=31536000, immutable' } });
-    });
   }
 
   app.get('/health', async (c) => {
