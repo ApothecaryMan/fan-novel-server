@@ -12,7 +12,8 @@ NODE_ENV = "production"
 #   DATABASE_URL  — Neon pooled connection string (https, no Hyperdrive needed; neon-http driver)
 #   JWT_SECRET    — long random string
 #
-# Optional R2 binding for cover uploads (else POST /upload/cover returns 501 on Workers):
+# Optional R2 binding for cover uploads (private bucket, served via GET /uploads/covers/*).
+# Uncomment after creating the bucket (dashboard R2 -> enable -> create `fan-novel-covers`):
 # [[r2_buckets]]
 # binding = "COVERS"
 # bucket_name = "fan-novel-covers"

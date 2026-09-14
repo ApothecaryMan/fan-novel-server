@@ -82,3 +82,9 @@ export function getEnv(): Env {
 export function isWorkersRuntime(): boolean {
   return typeof (globalThis as any).__WORKER_ENV__ !== 'undefined';
 }
+
+export function getWorkerBinding<T = unknown>(name: string): T | null {
+  const w = typeof globalThis !== 'undefined' ? (globalThis as any).__WORKER_BINDINGS__ : undefined;
+  const v = w?.[name];
+  return (v ?? null) as T | null;
+}

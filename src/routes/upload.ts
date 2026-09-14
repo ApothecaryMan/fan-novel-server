@@ -2,11 +2,31 @@ import { Hono } from 'hono';
 import path from 'path';
 import crypto from 'crypto';
 import { requireAuth } from '../middleware/auth.js';
-import { getEnv, isWorkersRuntime } from '../config/env.js';
+import { getEnv, getWorkerBinding, isWorkersRuntime } from '../config/env.js';
 
 export const uploadRouter = new Hono();
 
 const ALLOWED = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif']);
+const ALLOWED_EXT: Record<string, string> = {
+  'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp', 'image/gif': '.gif',
+};
+
+interface R2BucketLike {
+  put: (key: string, body: ArrayBuffer | Uint8Array, opts?: { httpMetadata?: { contentType?: string } }) => Promise<unknown>;
+  get: (key: string) => Promise<{ body: ReadableStream; httpMetadata?: { contentType?: string } } | null>;
+}
+
+function coversBucket(): R2BucketLike | null {
+  return getWorkerBinding<R2BucketLike>('COVERS');
+}
+
+async function uploadToBinding(buffer: Buffer, filename: string, mime: string): Promise<string | null> {
+  const bucket = coversBucket();
+  if (!bucket) return null;
+  await bucket.put(`covers/${filename}`, buffer, { httpMetadata: { contentType: mime } });
+  // Served back through this same Worker (no public bucket needed).
+  return `/uploads/covers/${filename}`;
+}
 
 async function uploadToR2(buffer: Buffer, filename: string, mime: string): Promise<string | null> {
   const env = getEnv();
@@ -42,17 +62,22 @@ uploadRouter.post('/cover', async (c, next) => {
     const buffer = Buffer.from(await file.arrayBuffer());
     if (buffer.length > maxBytes) return c.json({ success: false, error: `حجم الصورة يتجاوز ${getEnv().UPLOAD_MAX_MB}MB` }, 413);
 
-    let ext = '.png';
-    if (file.type === 'image/jpeg') ext = '.jpg';
-    else if (file.type === 'image/webp') ext = '.webp';
-    else if (file.type === 'image/gif') ext = '.gif';
-    const filename = `${Date.now()}_${crypto.randomBytes(6).toString('hex')}${ext}`;
+    const filename = `${Date.now()}_${crypto.randomBytes(6).toString('hex')}${ALLOWED_EXT[file.type] ?? '.png'}`;
 
+    // 1. Workers R2 binding (private bucket, served via GET below).
+    const bound = await uploadToBinding(buffer, filename, file.type).catch((err) => {
+      console.error('[upload] binding failed', err);
+      return null;
+    });
+    if (bound) return c.json({ success: true, message: 'تم رفع صورة الغلاف بنجاح', url: bound, filename });
+
+    // 2. S3-compatible endpoint (R2 API token / any S3).
     const remote = await uploadToR2(buffer, filename, file.type);
     if (remote) return c.json({ success: true, message: 'تم رفع صورة الغلاف بنجاح', url: remote, filename });
 
+    // 3. Local disk (Node only).
     if (isWorkersRuntime()) {
-      return c.json({ success: false, error: 'cover storage not configured (R2 required on Workers)' }, 501);
+      return c.json({ success: false, error: 'cover storage not configured (bind COVERS R2 bucket)' }, 501);
     }
     const { promises: fs } = await import('node:fs');
     const dir = path.resolve(process.cwd(), 'uploads', 'covers');

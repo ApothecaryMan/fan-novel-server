@@ -40,9 +40,22 @@ export function createApp() {
     return c.json({ error: 'internal server error', requestId: c.get('requestId') ?? null }, 500);
   });
 
-  // Local static uploads only exist on Node. On Workers there is no disk (use R2).
+  // Local static uploads only exist on Node. On Workers covers come from the COVERS R2 binding.
   if (!isWorkersRuntime()) {
     app.use('/uploads/*', serveStatic({ root: './' }));
+  } else {
+    app.get('/uploads/covers/:filename', async (c) => {
+      const name = c.req.param('filename');
+      if (!/^[\w.-]+\.(png|jpg|jpeg|webp|gif)$/i.test(name)) return c.json({ error: 'invalid filename' }, 400);
+      const bucket = (globalThis as any).__WORKER_BINDINGS__?.COVERS as
+        | { get: (k: string) => Promise<{ body: ReadableStream; httpMetadata?: { contentType?: string } } | null> }
+        | undefined;
+      if (!bucket) return c.json({ error: 'cover storage not configured' }, 501);
+      const obj = await bucket.get(`covers/${name}`);
+      if (!obj) return c.json({ error: 'not found' }, 404);
+      const type = obj.httpMetadata?.contentType ?? 'image/png';
+      return new Response(obj.body, { headers: { 'Content-Type': type, 'Cache-Control': 'public, max-age=31536000, immutable' } });
+    });
   }
 
   app.get('/health', async (c) => {

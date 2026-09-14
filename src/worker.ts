@@ -18,6 +18,7 @@ export interface WorkerBindings {
 export default {
   async fetch(request: Request, bindings: WorkerBindings): Promise<Response> {
     setWorkerEnv(bindings as unknown as Record<string, unknown>);
+    (globalThis as any).__WORKER_BINDINGS__ = bindings;
     const app = createApp();
     return app.fetch(request, bindings);
   },
