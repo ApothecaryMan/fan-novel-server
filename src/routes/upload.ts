@@ -1,14 +1,10 @@
 import { Hono } from 'hono';
-import { promises as fs } from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import { requireAuth } from '../middleware/auth.js';
-import { getEnv } from '../config/env.js';
+import { getEnv, isWorkersRuntime } from '../config/env.js';
 
 export const uploadRouter = new Hono();
-
-const UPLOADS_DIR = path.resolve(process.cwd(), 'uploads', 'covers');
-fs.mkdir(UPLOADS_DIR, { recursive: true }).catch(console.error);
 
 const ALLOWED = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif']);
 
@@ -55,7 +51,13 @@ uploadRouter.post('/cover', async (c, next) => {
     const remote = await uploadToR2(buffer, filename, file.type);
     if (remote) return c.json({ success: true, message: 'تم رفع صورة الغلاف بنجاح', url: remote, filename });
 
-    await fs.writeFile(path.join(UPLOADS_DIR, filename), buffer);
+    if (isWorkersRuntime()) {
+      return c.json({ success: false, error: 'cover storage not configured (R2 required on Workers)' }, 501);
+    }
+    const { promises: fs } = await import('node:fs');
+    const dir = path.resolve(process.cwd(), 'uploads', 'covers');
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(path.join(dir, filename), buffer);
     return c.json({ success: true, message: 'تم رفع صورة الغلاف بنجاح', url: `/uploads/covers/${filename}`, filename });
   } catch (error: any) {
     console.error('Upload Error:', error);

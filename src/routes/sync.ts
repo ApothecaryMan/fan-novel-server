@@ -249,8 +249,8 @@ syncRouter.post('/push', async (c) => {
         ts: num(e.ts, now)
       })
       .onConflictDoNothing({ target: [readingSessions.userId, readingSessions.clientSessionId] })
-      .returning({ id: readingSessions.id });
-    if (r.length > 0) appliedSessions++;
+      .returning();
+    if ((r as unknown[]).length > 0) appliedSessions++;
   }
 
   return c.json({ success: true, applied: { library: appliedLibrary, history: appliedHistory, sessions: appliedSessions }, serverNow: now });
