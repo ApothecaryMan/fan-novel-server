@@ -11,15 +11,13 @@ Web-novel reader app with an Expo (React Native) mobile frontend and a Hono-base
 
 ---
 
-## 2. Live vs. Database — IMPORTANT DISCREPANCY
+## 2. Live vs. Database
 
 | Layer | Status |
 |-------|--------|
-| PostgreSQL schema (`src/database/schema.ts`) | **Defined but NOT wired** — no Drizzle client, no drizzle.config, no migrations |
-| Live API data | **In-memory Maps** — `NOVELS_STORE`, `CHAPTERS_STORE`, in-memory `users[]` |
-| Redis | **Configured in docker-compose but never used** in code |
-
-The API currently serves entirely from memory. **All data is lost on server restart.** The schema is a forward definition waiting to be connected.
+| Sync tables (`users`, `user_library`, `reading_history`, `reading_sessions`) | **Wired** — used by `/api/v1/sync/*` via `src/database/db.ts`; `drizzle/` migrations exist |
+| Content tables (`novels`, `chapters`) | **DB-first with memory fallback** — routes try Postgres first, fall back to `NOVELS_STORE`/`CHAPTERS_STORE` on failure (30s circuit breaker). Auth `/google` + `/me` persist to `users` by `externalId` |
+| Redis | **Configured in docker-compose but unused** in code (Upstash `REDIS_URL` reserved for phase 2 chapter cache) |
 
 ---
 

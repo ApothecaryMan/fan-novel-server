@@ -1,11 +1,14 @@
-import { pgTable, varchar, text, integer, boolean, timestamp, uuid, jsonb, uniqueIndex } from 'drizzle-orm/pg-core';
+import { pgTable, varchar, text, integer, real, boolean, timestamp, uuid, jsonb, bigint, uniqueIndex } from 'drizzle-orm/pg-core';
 
 // 1. جدول المستخدمين (Users Table)
+// externalId = stable client identity (mobile `google_<id>`). Auto-provisioned
+// on first sync so offline-first clients never need a prior signup call.
 export const users = pgTable('users', {
   id: uuid('id').defaultRandom().primaryKey(),
-  email: varchar('email', { length: 255 }).notNull().unique(),
-  username: varchar('username', { length: 100 }).notNull().unique(),
-  passwordHash: text('password_hash').notNull(),
+  externalId: varchar('external_id', { length: 255 }).unique(),
+  email: varchar('email', { length: 255 }).unique(),
+  username: varchar('username', { length: 100 }).unique(),
+  passwordHash: text('password_hash'),
   avatarUrl: text('avatar_url'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull()
@@ -55,28 +58,69 @@ export const userCategories = pgTable('user_categories', {
   createdAt: timestamp('created_at').defaultNow().notNull()
 });
 
-// 5. جدول الروايات في مكتبة المستخدم (User Library)
+// 5. مكتبة المستخدم للمزامنة (Sync mirror of mobile library_items).
+// novelId has NO foreign key on purpose: most library novels are local
+// (file:import / extensions) and never exist in the server novels table.
+// Clocks are BIGINT UTC epoch ms generated on-device (ordering authority);
+// received_at is audit/GC only and NEVER participates in LWW comparison.
 export const userLibrary = pgTable('user_library', {
   id: serial('id').primaryKey(),
   userId: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
-  novelId: varchar('novel_id', { length: 100 }).references(() => novels.id, { onDelete: 'cascade' }).notNull(),
-  categoryIds: jsonb('category_ids').$type<number[]>().default([]).notNull(),
-  isCurrentlyReading: boolean('is_currently_reading').default(true).notNull(),
-  addedAt: timestamp('added_at').defaultNow().notNull()
+  novelId: varchar('novel_id', { length: 100 }).notNull(),
+  sourceId: varchar('source_id', { length: 100 }),
+  categoryIds: jsonb('category_ids').$type<string[]>().default([]).notNull(),
+  lastReadChapterId: integer('last_read_chapter_id'),
+  lastReadChapterNumber: integer('last_read_chapter_number'),
+  lastReadChapterTitle: varchar('last_read_chapter_title', { length: 255 }),
+  progressPercent: real('progress_percent').default(0).notNull(),
+  lastReadAt: timestamp('last_read_at'),
+  addedAt: timestamp('added_at').defaultNow().notNull(),
+  updatedAt: bigint('updated_at', { mode: 'number' }).notNull(),
+  deletedAt: bigint('deleted_at', { mode: 'number' }),
+  receivedAt: timestamp('received_at').defaultNow().notNull()
 }, (table) => ({
   userLibraryIdx: uniqueIndex('user_library_idx').on(table.userId, table.novelId)
 }));
 
-// 6. جدول مزامنة موضع القراءة (Reading Progress Sync)
-export const userReadingProgress = pgTable('user_reading_progress', {
+// 6. لقطات القراءة للمزامنة (Sync mirror of mobile reading_history).
+// One "last read" row per (user, novel, chapter); merge keeps max read_at.
+export const readingHistory = pgTable('reading_history', {
   id: serial('id').primaryKey(),
   userId: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
-  novelId: varchar('novel_id', { length: 100 }).references(() => novels.id, { onDelete: 'cascade' }).notNull(),
+  novelId: varchar('novel_id', { length: 100 }).notNull(),
+  novelTitle: varchar('novel_title', { length: 255 }).default('').notNull(),
+  novelCover: text('novel_cover').default('').notNull(),
+  novelAuthor: varchar('novel_author', { length: 150 }).default('').notNull(),
+  category: varchar('category', { length: 100 }).default('').notNull(),
+  sourceId: varchar('source_id', { length: 100 }),
   chapterId: integer('chapter_id').notNull(),
-  scrollY: integer('scroll_y').default(0).notNull(),
-  updatedAt: timestamp('updated_at').defaultNow().notNull()
+  chapterNumber: integer('chapter_number').notNull(),
+  chapterTitle: varchar('chapter_title', { length: 255 }).default('').notNull(),
+  progressPercent: real('progress_percent').default(0).notNull(),
+  readDay: varchar('read_day', { length: 10 }).notNull(),
+  readAt: bigint('read_at', { mode: 'number' }).notNull(),
+  updatedAt: bigint('updated_at', { mode: 'number' }).notNull(),
+  receivedAt: timestamp('received_at').defaultNow().notNull()
 }, (table) => ({
-  userNovelProgressIdx: uniqueIndex('user_novel_progress_idx').on(table.userId, table.novelId)
+  historyUserNovelChapterIdx: uniqueIndex('history_user_novel_chapter_idx').on(table.userId, table.novelId, table.chapterId)
+}));
+
+// 7. جلسات القراءة (append-only; idempotent via client_session_id).
+export const readingSessions = pgTable('reading_sessions', {
+  id: serial('id').primaryKey(),
+  userId: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
+  clientSessionId: varchar('client_session_id', { length: 64 }).notNull(),
+  novelId: varchar('novel_id', { length: 100 }).notNull(),
+  chapterId: integer('chapter_id').notNull(),
+  seconds: integer('seconds').notNull(),
+  words: integer('words').notNull(),
+  minuteOfDay: integer('minute_of_day').notNull(),
+  readDay: varchar('read_day', { length: 10 }).notNull(),
+  genre: varchar('genre', { length: 100 }).default('').notNull(),
+  ts: bigint('ts', { mode: 'number' }).notNull(),
+  receivedAt: timestamp('received_at').defaultNow().notNull()
+}, (table) => ({
+  sessionsUserClientIdx: uniqueIndex('sessions_user_client_idx').on(table.userId, table.clientSessionId)
 }));
 
 // Helper function for serial primary key type
