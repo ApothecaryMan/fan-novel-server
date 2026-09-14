@@ -8,7 +8,7 @@ const envSchema = z.object({
   CORS_ORIGIN: z.string().default('*'),
   NODE_ENV: z.string().default('development'),
   REDIS_URL: z.string().optional(),
-  UPLOAD_MAX_MB: z.coerce.number().default(5),
+  UPLOAD_MAX_MB: z.coerce.number().default(10),
   // R2 / S3-compatible object storage (optional; falls back to local disk on Node)
   R2_ENDPOINT: z.string().optional(),
   R2_BUCKET: z.string().optional(),
@@ -67,7 +67,7 @@ export function getEnv(): Env {
     CORS_ORIGIN: e.CORS_ORIGIN ?? '*',
     NODE_ENV,
     REDIS_URL: e.REDIS_URL,
-    UPLOAD_MAX_MB: e.UPLOAD_MAX_MB ?? 5,
+    UPLOAD_MAX_MB: e.UPLOAD_MAX_MB ?? 10,
     R2_ENDPOINT: e.R2_ENDPOINT,
     R2_BUCKET: e.R2_BUCKET,
     R2_ACCESS_KEY: e.R2_ACCESS_KEY,
