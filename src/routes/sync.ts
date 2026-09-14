@@ -1,9 +1,10 @@
 import { Hono, type Context } from 'hono';
 import { and, eq, gt } from 'drizzle-orm';
 import { z } from 'zod';
-import { db } from '../database/db.js';
+import { db, isDbAvailable } from '../database/db.js';
 import { users, userLibrary, readingHistory, readingSessions } from '../database/schema.js';
 import { verifySubject } from '../middleware/auth.js';
+import { getEnv } from '../config/env.js';
 
 export const syncRouter = new Hono();
 
@@ -124,8 +125,9 @@ const dateOrNull = (v: unknown): Date | null => {
 
 // POST /api/v1/sync/push
 syncRouter.post('/push', async (c) => {
+  if (!isDbAvailable()) return c.json({ error: 'sync database not configured' }, 503);
   const authedSub = await authedSubject(c);
-  if (process.env.SYNC_OPEN === 'false' && !authedSub) {
+  if (!getEnv().syncOpen && !authedSub) {
     return c.json({ error: 'unauthorized: valid Bearer token required' }, 401);
   }
   const parsed = pushSchema.safeParse(await c.req.json().catch(() => null));
@@ -256,8 +258,9 @@ syncRouter.post('/push', async (c) => {
 
 // POST /api/v1/sync/pull
 syncRouter.post('/pull', async (c) => {
+  if (!isDbAvailable()) return c.json({ error: 'sync database not configured' }, 503);
   const authedSub = await authedSubject(c);
-  if (process.env.SYNC_OPEN === 'false' && !authedSub) {
+  if (!getEnv().syncOpen && !authedSub) {
     return c.json({ error: 'unauthorized: valid Bearer token required' }, 401);
   }
   const parsed = pullSchema.safeParse(await c.req.json().catch(() => null));
@@ -337,6 +340,7 @@ syncRouter.post('/pull', async (c) => {
 
 // GET /api/v1/sync/stats — row counts per user (debug/status UI).
 syncRouter.post('/stats', async (c) => {
+  if (!isDbAvailable()) return c.json({ error: 'sync database not configured' }, 503);
   const body = await c.req.json().catch(() => null);
   const externalId = typeof body?.user?.externalId === 'string' ? body.user.externalId : '';
   if (!externalId) return c.json({ error: 'user.externalId is required' }, 400);

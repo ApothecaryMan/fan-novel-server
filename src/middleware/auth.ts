@@ -1,10 +1,12 @@
 import type { MiddlewareHandler } from 'hono';
 import { jwtVerify, SignJWT } from 'jose';
+import { getEnv } from '../config/env.js';
 
 const DEV_SECRET = 'web-novel-dev-secret-change-me';
 
 function getSecretKey(): Uint8Array {
-  return new TextEncoder().encode(process.env.JWT_SECRET || DEV_SECRET);
+  const s = getEnv().JWT_SECRET || process.env.JWT_SECRET || DEV_SECRET;
+  return new TextEncoder().encode(s);
 }
 
 export async function signToken(user: {

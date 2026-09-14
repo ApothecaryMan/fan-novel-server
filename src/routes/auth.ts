@@ -1,106 +1,113 @@
 import { Hono } from 'hono';
+import { z } from 'zod';
+import { eq, or } from 'drizzle-orm';
+import { db, isDbAvailable, noteDbFailure } from '../database/db.js';
+import { users } from '../database/schema.js';
 import { requireAuth, signToken } from '../middleware/auth.js';
+import { getEnv } from '../config/env.js';
 
 export const authRouter = new Hono();
 
-// In-memory users store (dev only — replaced by PostgreSQL in Phase 4)
-let users: any[] = [];
+// Fallback when DB is unavailable
+const memUsers: any[] = [];
 
-/**
- * Best-effort verification of a Google idToken against Google's public
- * tokeninfo endpoint. Returns the verified email (empty when not verifiable).
- */
-async function verifyGoogleIdToken(idToken?: string): Promise<{
-  verified: boolean;
-  email?: string;
-}> {
+const googleSchema = z.object({
+  name: z.string().max(100).optional(),
+  username: z.string().max(100).optional(),
+  email: z.string().email().max(255),
+  avatarUrl: z.string().max(2000).optional(),
+  googleId: z.string().max(255).optional(),
+  idToken: z.string().optional(),
+});
+
+async function verifyGoogleIdToken(idToken?: string): Promise<{ verified: boolean; email?: string }> {
   if (!idToken) return { verified: false };
   try {
-    const res = await fetch(
-      `https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(idToken)}`
-    );
+    const res = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(idToken)}`);
     if (!res.ok) return { verified: false };
-    const info = await res.json();
+    const info: any = await res.json();
     return { verified: true, email: info.email };
   } catch {
     return { verified: false };
   }
 }
 
+function toPublic(u: any) {
+  return { id: u.externalId ?? u.id, externalId: u.externalId ?? u.id, email: u.email, name: u.username ?? u.name, username: u.username ?? u.name, avatarUrl: u.avatarUrl, role: u.role ?? 'reader', provider: 'google' };
+}
+
 // POST /api/v1/auth/google
 authRouter.post('/google', async (c) => {
-  try {
-    const body = await c.req.json();
-    const { name, username, email, avatarUrl, googleId, idToken } = body;
+  const parsed = googleSchema.safeParse(await c.req.json().catch(() => null));
+  if (!parsed.success) return c.json({ error: 'البريد الإلكتروني مطلوب لتسجيل الدخول بحساب Google', issues: parsed.error.issues }, 400);
+  const { name, username, email, avatarUrl, googleId, idToken } = parsed.data;
+  const env = getEnv();
 
-    if (!email) {
-      return c.json({ error: 'البريد الإلكتروني مطلوب لتسجيل الدخول بحساب Google' }, 400);
-    }
-
-    const isProd = process.env.NODE_ENV === 'production';
-    if (
-      isProd &&
-      (!process.env.JWT_SECRET || process.env.JWT_SECRET.startsWith('web-novel-dev-'))
-    ) {
-      return c.json(
-        { error: 'تسجيل الدخول غير مهيأ في بيئة الإنتاج: JWT_SECRET غير مضبوط' },
-        501
-      );
-    }
-
-    // When an idToken is supplied, prove it belongs to the claimed email.
-    const check = await verifyGoogleIdToken(idToken);
-    if (idToken) {
-      if (!check.verified) {
-        if (isProd) {
-          return c.json({ error: 'تعذر التحقق من هوية Google' }, 401);
-        }
-        console.warn(`[dev] idToken verification skipped for ${email}; trusting email only`);
-      } else if (check.email && check.email.toLowerCase() !== String(email).toLowerCase()) {
-        return c.json({ error: 'عدم تطابق البريد الإلكتروني في رمز Google' }, 400);
-      }
-    }
-
-    // Check if user already exists with this email
-    let user = users.find((u) => u.email === email || (googleId && u.googleId === googleId));
-
-    if (!user) {
-      user = {
-        id: `google_${googleId || Date.now()}`,
-        name,
-        username,
-        email,
-        avatarUrl,
-        role: 'vip',
-        provider: 'google',
-        createdAt: new Date().toISOString()
-      };
-      users.push(user);
-    } else {
-      // Update details
-      if (name) user.name = name;
-      if (username) user.username = username;
-      if (avatarUrl) user.avatarUrl = avatarUrl;
-      user.provider = 'google';
-    }
-
-    const token = await signToken({ id: user.id, email: user.email, role: user.role });
-
-    return c.json({
-      success: true,
-      message: 'تم تسجيل الدخول بحساب Google بنجاح',
-      user,
-      token
-    });
-  } catch (err: any) {
-    return c.json({ error: 'فشل معالجة تسجيل الدخول عبر Google', details: err.message }, 500);
+  if (env.isProd && (!env.JWT_SECRET || env.JWT_SECRET.startsWith('web-novel-dev-') || env.JWT_SECRET === 'change-me-in-production')) {
+    return c.json({ error: 'تسجيل الدخول غير مهيأ في بيئة الإنتاج: JWT_SECRET غير مضبوط' }, 501);
   }
+
+  const check = await verifyGoogleIdToken(idToken);
+  if (idToken) {
+    if (!check.verified) {
+      if (env.isProd) return c.json({ error: 'تعذر التحقق من هوية Google' }, 401);
+      console.warn(`[dev] idToken verification skipped for ${email}; trusting email only`);
+    } else if (check.email && check.email.toLowerCase() !== email.toLowerCase()) {
+      return c.json({ error: 'عدم تطابق البريد الإلكتروني في رمز Google' }, 400);
+    }
+  }
+
+  const externalId = `google_${googleId || email.toLowerCase()}`;
+  const displayName = name || username || email.split('@')[0];
+
+  if (isDbAvailable()) {
+    try {
+      const found = await db.select().from(users).where(or(eq(users.externalId, externalId), eq(users.email, email.toLowerCase()))).limit(1);
+      let row = found[0];
+      if (!row) {
+        const inserted = await db.insert(users).values({
+          externalId, email: email.toLowerCase(),
+          username: (username || displayName).slice(0, 100),
+          avatarUrl: avatarUrl ?? null,
+        }).returning();
+        row = inserted[0];
+      } else {
+        await db.update(users).set({ email: email.toLowerCase(), avatarUrl: avatarUrl ?? row.avatarUrl, updatedAt: new Date() }).where(eq(users.id, row.id));
+        row = { ...row, email: email.toLowerCase(), avatarUrl: avatarUrl ?? row.avatarUrl };
+      }
+      const token = await signToken({ id: externalId, email: row.email!, role: 'reader' });
+      return c.json({ success: true, message: 'تم تسجيل الدخول بحساب Google بنجاح', user: toPublic({ ...row, externalId }), token });
+    } catch (err) {
+      console.error('[auth] db login failed, memory fallback', err); noteDbFailure();
+    }
+  }
+
+  let user = memUsers.find((u) => u.email === email || u.externalId === externalId);
+  if (!user) {
+    user = { id: externalId, externalId, email, name: displayName, username: displayName, avatarUrl, role: 'reader', provider: 'google', createdAt: new Date().toISOString() };
+    memUsers.push(user);
+  } else {
+    if (name) user.name = name;
+    if (username) user.username = username;
+    if (avatarUrl) user.avatarUrl = avatarUrl;
+  }
+  const token = await signToken({ id: user.externalId, email: user.email, role: user.role });
+  return c.json({ success: true, message: 'تم تسجيل الدخول بحساب Google بنجاح', user, token });
 });
 
-// GET /api/v1/auth/me — authenticated: returns only the caller
-authRouter.get('/me', requireAuth, (c) => {
+// GET /api/v1/auth/me
+authRouter.get('/me', requireAuth, async (c) => {
   const payload = c.get('authUser') as { sub?: string };
-  const user = users.find((u) => u.id === payload.sub);
+  const sub = payload.sub ?? '';
+  if (isDbAvailable()) {
+    try {
+      const found = await db.select().from(users).where(eq(users.externalId, sub)).limit(1);
+      if (found[0]) return c.json({ user: toPublic(found[0]) });
+    } catch (err) {
+      console.error('[auth] db me failed', err); noteDbFailure();
+    }
+  }
+  const user = memUsers.find((u) => u.id === sub || u.externalId === sub);
   if (!user) return c.json({ error: 'المستخدم غير موجود' }, 404);
   return c.json({ user });
 });

@@ -1,9 +1,13 @@
 import { Hono } from 'hono';
-import { NOVELS_STORE } from './novels.js';
+import { z } from 'zod';
+import { and, desc, eq, gte, lte, asc } from 'drizzle-orm';
+import { db, isDbAvailable, noteDbFailure } from '../database/db.js';
+import { chapters, novels } from '../database/schema.js';
+import { NOVELS_STORE, type NovelData } from './novels.js';
+import { requireAuth } from '../middleware/auth.js';
+import { getEnv } from '../config/env.js';
 
-// chaptersRouter: novel-scoped chapter routes (mounted under /api/v1/novels)
 export const chaptersRouter = new Hono();
-// chaptersTimelineRouter: chapter aggregation routes (mounted under /api/v1/chapters)
 export const chaptersTimelineRouter = new Hono();
 
 export interface ChapterData {
@@ -25,14 +29,7 @@ export interface ChapterTimelineItem {
   timestamp: number;
   dayOfWeek: number;
   dateStr: string;
-  novel: {
-    id: string;
-    title: string;
-    author: string;
-    coverUrl: string;
-    category: string;
-    sourceId?: string;
-  };
+  novel: { id: string; title: string; author: string; coverUrl: string; category: string; sourceId?: string };
 }
 
 export interface NovelTimelineGroup {
@@ -46,331 +43,275 @@ export interface NovelTimelineGroup {
   latestChapterNumber: number;
   latestChapterTitle: string;
   latestCreatedAt: string;
-  chapters: Array<{
-    id: number;
-    chapterNumber: number;
-    title: string;
-    createdAt: string;
-  }>;
+  chapters: Array<{ id: number; chapterNumber: number; title: string; createdAt: string }>;
 }
 
-// In-Memory Database store for live chapters
 export const CHAPTERS_STORE: Map<string, ChapterData[]> = new Map();
 
-// Helper to seed initial sample chapters if store is empty.
-// NOTE: This is in-memory dev/demo data only. All data resets on server restart.
 function ensureSeedData() {
   if (CHAPTERS_STORE.size > 0) return;
-
   const now = Date.now();
   const twoHoursAgo = new Date(now - 2 * 60 * 60 * 1000).toISOString();
   const twentyMinsAgo = new Date(now - 20 * 60 * 1000).toISOString();
-
   if (!NOVELS_STORE.has('1')) {
     NOVELS_STORE.set('1', {
-      id: '1',
-      title: 'سيد الكينونة الأبدية',
-      author: 'جينغ شو',
-      category: 'فانتازيا',
-      status: 'مستمرة',
-      rating: 4.8,
-      readersCount: '12.4k',
-      totalChapters: 46,
-      coverUrl: '',
-      summary: 'في عالم تتصادم فيه قوى السحر والداو...',
-      tags: ['فانتازيا', 'مغامرات'],
-      createdAt: twoHoursAgo,
-      updatedAt: twentyMinsAgo
+      id: '1', title: 'سيد الكينونة الأبدية', author: 'جينغ شو', category: 'فانتازيا',
+      status: 'مستمرة', rating: 4.8, readersCount: '12.4k', totalChapters: 46,
+      coverUrl: '', summary: 'في عالم تتصادم فيه قوى السحر والداو...',
+      tags: ['فانتازيا', 'مغامرات'], createdAt: twoHoursAgo, updatedAt: twentyMinsAgo,
     });
   }
-
-  // Seed sample chapters for novel "1" or default demo novels
   CHAPTERS_STORE.set('1', [
-    {
-      id: 101,
-      novelId: '1',
-      chapterNumber: 45,
-      title: 'الفصل 45: استيقاظ التنين',
-      content: 'محتوى الفصل التجريبي...',
-      wordCount: 1540,
-      createdAt: twoHoursAgo
-    },
-    {
-      id: 102,
-      novelId: '1',
-      chapterNumber: 46,
-      title: 'الفصل 46: كسر القيود',
-      content: 'محتوى الفصل الثاني التجريبي...',
-      wordCount: 1820,
-      createdAt: twentyMinsAgo
-    }
+    { id: 101, novelId: '1', chapterNumber: 45, title: 'الفصل 45: استيقاظ التنين', content: 'محتوى الفصل التجريبي...', wordCount: 1540, createdAt: twoHoursAgo },
+    { id: 102, novelId: '1', chapterNumber: 46, title: 'الفصل 46: كسر القيود', content: 'محتوى الفصل الثاني التجريبي...', wordCount: 1820, createdAt: twentyMinsAgo },
   ]);
 }
 ensureSeedData();
 
+type ChapterRow = typeof chapters.$inferSelect;
+
+function rowToListItem(r: ChapterRow) {
+  return {
+    id: r.id, novelId: r.novelId, chapterNumber: r.chapterNumber, title: r.title,
+    wordCount: r.wordCount ?? 0, createdAt: r.createdAt?.toISOString() ?? new Date().toISOString(),
+  };
+}
+
+function rowToContent(r: ChapterRow) {
+  return {
+    id: r.id, novelId: r.novelId, chapterNumber: r.chapterNumber, title: r.title,
+    content: r.contentRaw ?? '', wordCount: r.wordCount ?? 0,
+    createdAt: r.createdAt?.toISOString() ?? new Date().toISOString(),
+  };
+}
+
+const addChapterSchema = z.object({
+  title: z.string().min(1).max(255),
+  content: z.string().min(1).max(500000),
+  chapterNumber: z.number().int().min(1).optional(),
+  id: z.number().int().optional(),
+});
+
+const timelineSchema = z.object({
+  novelIds: z.array(z.union([z.string(), z.number()])).optional(),
+  period: z.enum(['today', 'week', 'custom']).optional(),
+  groupBy: z.enum(['novel', 'day', 'none']).optional(),
+  limit: z.coerce.number().int().min(1).max(500).optional(),
+  since: z.coerce.number().optional(),
+  until: z.coerce.number().optional(),
+});
+
+function writeGuard() {
+  return async (c: any, next: any) => {
+    if (!getEnv().syncOpen) return requireAuth(c, next);
+    await next();
+  };
+}
+
+function toTimelineItem(ch: { id: number; chapterNumber: number; title: string; wordCount: number; createdAt: string }, novel: NovelData | undefined, novelId: string): ChapterTimelineItem {
+  const chTime = new Date(ch.createdAt).getTime();
+  const d = new Date(chTime);
+  return {
+    id: ch.id, chapterNumber: ch.chapterNumber, title: ch.title, wordCount: ch.wordCount,
+    createdAt: ch.createdAt, timestamp: chTime, dayOfWeek: d.getDay(), dateStr: d.toISOString().slice(0, 10),
+    novel: {
+      id: novelId, title: novel?.title || 'رواية بدون عنوان', author: novel?.author || 'غير معروف',
+      coverUrl: novel?.coverUrl || '', category: novel?.category || 'عام', sourceId: novel?.sourceId,
+    },
+  };
+}
+
+async function collectTimelineItems(novelIds: Set<string> | null, since: number, until?: number): Promise<ChapterTimelineItem[]> {
+  if (isDbAvailable()) {
+    try {
+      const chRows = await db
+        .select({ ch: chapters, novel: novels })
+        .from(chapters)
+        .leftJoin(novels, eq(chapters.novelId, novels.id))
+        .where(and(gte(chapters.createdAt, new Date(since)), until ? lte(chapters.createdAt, new Date(until)) : undefined))
+        .orderBy(desc(chapters.createdAt))
+        .limit(5000);
+      const items: ChapterTimelineItem[] = [];
+      for (const r of chRows) {
+        const novelId = r.ch.novelId;
+        if (novelIds && !novelIds.has(novelId)) continue;
+        const createdAt = r.ch.createdAt?.toISOString() ?? new Date().toISOString();
+        const t = new Date(createdAt).getTime();
+        const d = new Date(t);
+        items.push({
+          id: r.ch.id, chapterNumber: r.ch.chapterNumber, title: r.ch.title, wordCount: r.ch.wordCount ?? 0,
+          createdAt, timestamp: t, dayOfWeek: d.getDay(), dateStr: createdAt.slice(0, 10),
+          novel: {
+            id: novelId, title: r.novel?.title ?? 'رواية بدون عنوان', author: r.novel?.author ?? 'غير معروف',
+            coverUrl: r.novel?.coverUrl ?? '', category: r.novel?.category ?? 'عام',
+          },
+        });
+      }
+      return items;
+    } catch (err) {
+      console.error('[chapters] db timeline failed, memory fallback', err); noteDbFailure();
+    }
+  }
+  ensureSeedData();
+  const items: ChapterTimelineItem[] = [];
+  for (const [novelId, chList] of CHAPTERS_STORE.entries()) {
+    if (novelIds && !novelIds.has(novelId)) continue;
+    const novel = NOVELS_STORE.get(novelId);
+    for (const ch of chList) {
+      const t = new Date(ch.createdAt).getTime();
+      if (t >= since && (!until || t <= until)) items.push(toTimelineItem({ ...ch, wordCount: ch.wordCount ?? 0 }, novel, novelId));
+    }
+  }
+  return items.sort((a, b) => b.timestamp - a.timestamp);
+}
+
 // POST /api/v1/chapters/timeline
 chaptersTimelineRouter.post('/timeline', async (c) => {
-  ensureSeedData();
-  const body = await c.req.json().catch(() => ({}));
-  const novelIds: string[] | undefined = body.novelIds;
-  const period: 'today' | 'week' | 'custom' = body.period || 'today';
-  const groupBy: 'novel' | 'day' | 'none' = body.groupBy || 'novel';
-  const limit: number | undefined = body.limit ? Number(body.limit) : undefined;
-
+  const parsed = timelineSchema.safeParse(await c.req.json().catch(() => ({})));
+  if (!parsed.success) return c.json({ success: false, error: 'invalid timeline payload', issues: parsed.error.issues }, 400);
+  const { novelIds, period = 'today', groupBy = 'novel', limit, since: sinceRaw, until } = parsed.data;
   const now = Date.now();
-  let since = body.since != null ? Number(body.since) : undefined;
-  const until = body.until != null ? Number(body.until) : undefined;
-
+  let since = sinceRaw;
   if (since === undefined) {
-    if (period === 'week') {
-      since = now - 7 * 24 * 60 * 60 * 1000;
-    } else {
-      // 'today' default: start of local day
-      const startOfDay = new Date();
-      startOfDay.setHours(0, 0, 0, 0);
-      since = startOfDay.getTime();
-    }
+    if (period === 'week') since = now - 7 * 24 * 60 * 60 * 1000;
+    else { const s = new Date(); s.setHours(0, 0, 0, 0); since = s.getTime(); }
   }
+  const target = novelIds && novelIds.length ? new Set(novelIds.map(String)) : null;
+  const list = await collectTimelineItems(target, since, until);
 
-  const targetNovelIds = novelIds && Array.isArray(novelIds) && novelIds.length > 0
-    ? new Set(novelIds.map(String))
-    : null;
-
-  const chaptersList: ChapterTimelineItem[] = [];
-
-  for (const [novelId, chList] of CHAPTERS_STORE.entries()) {
-    if (targetNovelIds && !targetNovelIds.has(novelId)) continue;
-    const novel = NOVELS_STORE.get(novelId);
-
-    for (const ch of chList) {
-      const chTime = new Date(ch.createdAt).getTime();
-      if (chTime >= since && (!until || chTime <= until)) {
-        const d = new Date(chTime);
-        chaptersList.push({
-          id: ch.id,
-          chapterNumber: ch.chapterNumber,
-          title: ch.title,
-          wordCount: ch.wordCount,
-          createdAt: ch.createdAt,
-          timestamp: chTime,
-          dayOfWeek: d.getDay(),
-          dateStr: d.toISOString().slice(0, 10),
-          novel: {
-            id: novelId,
-            title: novel?.title || 'رواية بدون عنوان',
-            author: novel?.author || 'غير معروف',
-            coverUrl: novel?.coverUrl || '',
-            category: novel?.category || 'عام',
-            sourceId: novel?.sourceId
-          }
-        });
-      }
-    }
-  }
-
-  // Sort descending by timestamp (newest first)
-  chaptersList.sort((a, b) => b.timestamp - a.timestamp);
-
-  // 1. Group by Novel
   if (groupBy === 'novel') {
     const map = new Map<string, NovelTimelineGroup>();
-
-    for (const item of chaptersList) {
-      let group = map.get(item.novel.id);
-      if (!group) {
-        group = {
-          novelId: item.novel.id,
-          sourceId: item.novel.sourceId,
-          novelTitle: item.novel.title,
-          novelCover: item.novel.coverUrl,
-          novelAuthor: item.novel.author,
-          category: item.novel.category,
-          chapterCount: 0,
-          latestChapterNumber: item.chapterNumber,
-          latestChapterTitle: item.title,
-          latestCreatedAt: item.createdAt,
-          chapters: []
+    for (const item of list) {
+      let g = map.get(item.novel.id);
+      if (!g) {
+        g = {
+          novelId: item.novel.id, sourceId: item.novel.sourceId, novelTitle: item.novel.title,
+          novelCover: item.novel.coverUrl, novelAuthor: item.novel.author, category: item.novel.category,
+          chapterCount: 0, latestChapterNumber: item.chapterNumber, latestChapterTitle: item.title, latestCreatedAt: item.createdAt, chapters: [],
         };
-        map.set(item.novel.id, group);
+        map.set(item.novel.id, g);
       }
-      group.chapterCount += 1;
-      group.chapters.push({
-        id: item.id,
-        chapterNumber: item.chapterNumber,
-        title: item.title,
-        createdAt: item.createdAt
-      });
+      g.chapterCount += 1;
+      g.chapters.push({ id: item.id, chapterNumber: item.chapterNumber, title: item.title, createdAt: item.createdAt });
     }
-
     const groups = Array.from(map.values());
     const finalGroups = limit ? groups.slice(0, limit) : groups;
-
-    return c.json({
-      success: true,
-      total: finalGroups.length,
-      period,
-      data: finalGroups
-    });
+    return c.json({ success: true, total: finalGroups.length, period, data: finalGroups });
   }
-
-  // 2. Group by Day (for Weekly Schedule)
   if (groupBy === 'day') {
     const map = new Map<string, ChapterTimelineItem[]>();
-    for (const item of chaptersList) {
-      const dayList = map.get(item.dateStr) || [];
-      dayList.push(item);
-      map.set(item.dateStr, dayList);
+    for (const item of list) {
+      const arr = map.get(item.dateStr) || [];
+      arr.push(item);
+      map.set(item.dateStr, arr);
     }
-    const daysData = Array.from(map.entries()).map(([dateStr, items]) => ({
-      dateStr,
-      dayOfWeek: items[0]?.dayOfWeek ?? 0,
-      total: items.length,
-      chapters: items
-    }));
-
-    return c.json({
-      success: true,
-      total: daysData.length,
-      period,
-      data: daysData
-    });
+    const days = Array.from(map.entries()).map(([dateStr, items]) => ({ dateStr, dayOfWeek: items[0]?.dayOfWeek ?? 0, total: items.length, chapters: items }));
+    return c.json({ success: true, total: days.length, period, data: days });
   }
-
-  // 3. Raw List
-  const finalItems = limit ? chaptersList.slice(0, limit) : chaptersList;
-  return c.json({
-    success: true,
-    total: finalItems.length,
-    period,
-    data: finalItems
-  });
+  return c.json({ success: true, total: limit ? Math.min(limit, list.length) : list.length, period, data: limit ? list.slice(0, limit) : list });
 });
 
-// GET /api/v1/chapters/today (convenience shortcut)
-chaptersTimelineRouter.get('/today', (c) => {
-  ensureSeedData();
-  const novelIdsParam = c.req.query('novelIds');
-  const novelIds = novelIdsParam ? novelIdsParam.split(',') : undefined;
-  const startOfDay = new Date();
-  startOfDay.setHours(0, 0, 0, 0);
-
-  const targetNovelIds = novelIds && novelIds.length > 0 ? new Set(novelIds.map(String)) : null;
-  const list: ChapterTimelineItem[] = [];
-
-  for (const [novelId, chList] of CHAPTERS_STORE.entries()) {
-    if (targetNovelIds && !targetNovelIds.has(novelId)) continue;
-    const novel = NOVELS_STORE.get(novelId);
-    for (const ch of chList) {
-      const chTime = new Date(ch.createdAt).getTime();
-      if (chTime >= startOfDay.getTime()) {
-        const d = new Date(chTime);
-        list.push({
-          id: ch.id,
-          chapterNumber: ch.chapterNumber,
-          title: ch.title,
-          wordCount: ch.wordCount,
-          createdAt: ch.createdAt,
-          timestamp: chTime,
-          dayOfWeek: d.getDay(),
-          dateStr: d.toISOString().slice(0, 10),
-          novel: {
-            id: novelId,
-            title: novel?.title || 'رواية',
-            author: novel?.author || 'غير معروف',
-            coverUrl: novel?.coverUrl || '',
-            category: novel?.category || 'عام',
-            sourceId: novel?.sourceId
-          }
-        });
-      }
-    }
-  }
-
-  return c.json({
-    success: true,
-    total: list.length,
-    data: list
-  });
+// GET /api/v1/chapters/today
+chaptersTimelineRouter.get('/today', async (c) => {
+  const param = c.req.query('novelIds');
+  const target = param ? new Set(param.split(',')) : null;
+  const s = new Date(); s.setHours(0, 0, 0, 0);
+  const list = await collectTimelineItems(target, s.getTime());
+  return c.json({ success: true, total: list.length, data: list });
 });
 
-// GET /api/v1/novels/:novelId/chapters
-chaptersRouter.get('/:novelId/chapters', (c) => {
+// GET /api/v1/novels/:novelId/chapters?page&limit&order
+chaptersRouter.get('/:novelId/chapters', async (c) => {
   const novelId = c.req.param('novelId');
-  const chapters = CHAPTERS_STORE.get(novelId) || [];
+  const page = Math.max(1, Number(c.req.query('page') ?? 1) || 1);
+  const limit = Math.min(200, Math.max(1, Number(c.req.query('limit') ?? 100) || 100));
+  const order = c.req.query('order') === 'desc' ? desc(chapters.chapterNumber) : asc(chapters.chapterNumber);
 
-  return c.json({
-    success: true,
-    total: chapters.length,
-    data: chapters.map((ch) => ({
-      id: ch.id,
-      novelId: ch.novelId,
-      chapterNumber: ch.chapterNumber,
-      title: ch.title,
-      wordCount: ch.wordCount,
-      createdAt: ch.createdAt
-    }))
-  });
+  if (isDbAvailable()) {
+    try {
+      const all = await db.select().from(chapters).where(eq(chapters.novelId, novelId)).orderBy(order);
+      const total = all.length;
+      const items = all.slice((page - 1) * limit, page * limit).map(rowToListItem);
+      c.header('Cache-Control', 'public, max-age=300, stale-while-revalidate=3600');
+      return c.json({ success: true, total, data: items, pagination: { page, limit, total, totalPages: Math.max(1, Math.ceil(total / limit)) } });
+    } catch (err) {
+      console.error('[chapters] db list failed', err); noteDbFailure();
+    }
+  }
+  const all = [...(CHAPTERS_STORE.get(novelId) || [])].sort((a, b) => order === desc(chapters.chapterNumber) as any ? 0 : a.chapterNumber - b.chapterNumber);
+  const sorted = c.req.query('order') === 'desc' ? [...all].reverse() : all;
+  const total = sorted.length;
+  const items = sorted.slice((page - 1) * limit, page * limit).map((ch) => ({ id: ch.id, novelId: ch.novelId, chapterNumber: ch.chapterNumber, title: ch.title, wordCount: ch.wordCount, createdAt: ch.createdAt }));
+  return c.json({ success: true, total, data: items, pagination: { page, limit, total, totalPages: Math.max(1, Math.ceil(total / limit)) } });
 });
 
 // GET /api/v1/novels/:novelId/chapters/:chapterNumber
-chaptersRouter.get('/:novelId/chapters/:chapterNumber', (c) => {
+chaptersRouter.get('/:novelId/chapters/:chapterNumber', async (c) => {
   const { novelId, chapterNumber } = c.req.param();
   const num = parseInt(chapterNumber, 10);
-  const chapters = CHAPTERS_STORE.get(novelId) || [];
+  if (Number.isNaN(num)) return c.json({ success: false, error: 'رقم الفصل غير صالح' }, 400);
 
-  const chapter = chapters.find((ch) => ch.chapterNumber === num || ch.id === num);
-
-  if (!chapter) {
-    return c.json({ success: false, error: 'الفصل غير موجود' }, 404);
-  }
-
-  const nextChapter = chapters.find((ch) => ch.chapterNumber === num + 1);
-  const prevChapter = chapters.find((ch) => ch.chapterNumber === num - 1);
-
-  return c.json({
-    success: true,
-    data: {
-      ...chapter,
-      nextChapterId: nextChapter ? nextChapter.id : null,
-      prevChapterId: prevChapter ? prevChapter.id : null,
-      totalChapters: chapters.length
+  if (isDbAvailable()) {
+    try {
+      const rows = await db.select().from(chapters).where(and(eq(chapters.novelId, novelId), eq(chapters.chapterNumber, num))).limit(1);
+      const byId = rows[0] ?? (await db.select().from(chapters).where(and(eq(chapters.novelId, novelId), eq(chapters.id, num))).limit(1))[0];
+      if (byId) {
+        const siblings = await db.select({ chapterNumber: chapters.chapterNumber, id: chapters.id }).from(chapters).where(eq(chapters.novelId, novelId));
+        const nums = new Set(siblings.map((s) => s.chapterNumber));
+        const ids = new Map(siblings.map((s) => [s.chapterNumber, s.id] as const));
+        c.header('Cache-Control', 'public, max-age=86400, stale-while-revalidate=604800');
+        return c.json({
+          success: true,
+          data: {
+            ...rowToContent(byId),
+            nextChapterId: nums.has(byId.chapterNumber + 1) ? ids.get(byId.chapterNumber + 1) ?? null : null,
+            prevChapterId: nums.has(byId.chapterNumber - 1) ? ids.get(byId.chapterNumber - 1) ?? null : null,
+            totalChapters: siblings.length,
+          },
+        });
+      }
+    } catch (err) {
+      console.error('[chapters] db get failed', err); noteDbFailure();
     }
-  });
+  }
+  const list = CHAPTERS_STORE.get(novelId) || [];
+  const chapter = list.find((ch) => ch.chapterNumber === num || ch.id === num);
+  if (!chapter) return c.json({ success: false, error: 'الفصل غير موجود' }, 404);
+  const next = list.find((ch) => ch.chapterNumber === num + 1);
+  const prev = list.find((ch) => ch.chapterNumber === num - 1);
+  c.header('Cache-Control', 'public, max-age=86400, stale-while-revalidate=604800');
+  return c.json({ success: true, data: { ...chapter, nextChapterId: next?.id ?? null, prevChapterId: prev?.id ?? null, totalChapters: list.length } });
 });
 
-// POST /api/v1/novels/:novelId/chapters (Add chapter)
-chaptersRouter.post('/:novelId/chapters', async (c) => {
-  try {
-    const novelId = c.req.param('novelId');
-    const body = await c.req.json();
+// POST /api/v1/novels/:novelId/chapters
+chaptersRouter.post('/:novelId/chapters', writeGuard(), async (c) => {
+  const novelId = c.req.param('novelId');
+  const parsed = addChapterSchema.safeParse(await c.req.json().catch(() => null));
+  if (!parsed.success) return c.json({ success: false, error: 'عنوان ومحتوى الفصل حقول مطلوبة', issues: parsed.error.issues }, 400);
+  const body = parsed.data;
+  const wordCount = body.content.trim().split(/\s+/).length;
 
-    if (!body.title || !body.content) {
-      return c.json({ success: false, error: 'عنوان ومحتوى الفصل حقول مطلوبة' }, 400);
+  if (isDbAvailable()) {
+    try {
+      const existing = await db.select().from(chapters).where(eq(chapters.novelId, novelId));
+      const chapterNumber = body.chapterNumber ?? existing.length + 1;
+      if (existing.some((r) => r.chapterNumber === chapterNumber)) return c.json({ success: false, error: 'رقم الفصل موجود مسبقاً' }, 409);
+      const inserted = await db.insert(chapters).values({
+        novelId, chapterNumber, title: body.title, contentRaw: body.content, wordCount, createdAt: new Date(),
+      }).returning();
+      await db.update(novels).set({ totalChapters: existing.length + 1, updatedAt: new Date() }).where(eq(novels.id, novelId));
+      return c.json({ success: true, message: 'تم إضافة الفصل بنجاح', data: rowToContent(inserted[0]) }, 201);
+    } catch (err) {
+      console.error('[chapters] db insert failed', err); noteDbFailure();
     }
-
-    const currentList = CHAPTERS_STORE.get(novelId) || [];
-    const chapterNumber = body.chapterNumber || currentList.length + 1;
-    const wordCount = body.content.trim().split(/\s+/).length;
-
-    const newChapter: ChapterData = {
-      id: body.id || (currentList.length > 0 ? Math.max(...currentList.map(ch => ch.id)) + 1 : 1),
-      novelId,
-      chapterNumber,
-      title: body.title,
-      content: body.content,
-      wordCount,
-      createdAt: new Date().toISOString()
-    };
-
-    currentList.push(newChapter);
-    CHAPTERS_STORE.set(novelId, currentList);
-
-    return c.json({
-      success: true,
-      message: 'تم إضافة الفصل بنجاح',
-      data: newChapter
-    }, 201);
-  } catch (error: any) {
-    return c.json({ success: false, error: error.message || 'حدث خطأ أثناء إضافة الفصل' }, 500);
   }
+  const current = CHAPTERS_STORE.get(novelId) || [];
+  const chapterNumber = body.chapterNumber ?? current.length + 1;
+  const novel: ChapterData = {
+    id: body.id ?? (current.length ? Math.max(...current.map((ch) => ch.id)) + 1 : 1),
+    novelId, chapterNumber, title: body.title, content: body.content, wordCount, createdAt: new Date().toISOString(),
+  };
+  current.push(novel);
+  CHAPTERS_STORE.set(novelId, current);
+  return c.json({ success: true, message: 'تم إضافة الفصل بنجاح', data: novel }, 201);
 });
