@@ -2,6 +2,7 @@ node_modules/
 dist/
 .env
 *.log
+uploads/
 
 # Signed extensions repo — generated artifacts & secrets
 extensions-repo/private-key.jwk.json
