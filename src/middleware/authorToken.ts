@@ -68,11 +68,11 @@ export async function resolvePat(pat: string): Promise<PatResolution> {
     const scopes = (hit.key.scopes ?? []) as string[];
     if (!scopes.includes(PAT_SCOPE_WRITE)) return { ok: false, status: 403, error: 'نطاق الرمز لا يسمح بالنشر' };
     // Touch last-used fire-and-forget (never blocks the request).
-    void db
-      .update(authorApiKeys)
-      .set({ lastUsedAt: new Date() })
-      .where(eq(authorApiKeys.id, hit.key.id))
-      .catch(() => {});
+    // Wrapped in Promise.resolve: drizzle builders are thenables without a
+    // guaranteed .catch at runtime.
+    void Promise.resolve(
+      db.update(authorApiKeys).set({ lastUsedAt: new Date() }).where(eq(authorApiKeys.id, hit.key.id))
+    ).catch(() => {});
     return { ok: true, userExternalId: hit.user.externalId, keyId: hit.key.id };
   } catch (err) {
     console.error('[pat] resolve failed', err);
