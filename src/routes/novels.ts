@@ -4,6 +4,7 @@ import { and, desc, eq, ilike, or, sql } from 'drizzle-orm';
 import { db, isDbAvailable, noteDbFailure } from '../database/db.js';
 import { novels } from '../database/schema.js';
 import { requireAuth } from '../middleware/auth.js';
+import { ensureNovelOwner, getCaller } from '../middleware/ownership.js';
 import { getEnv } from '../config/env.js';
 
 export const novelsRouter = new Hono();
@@ -72,12 +73,37 @@ const createNovelSchema = z.object({
   coverUrl: z.string().max(2000).optional(),
   summary: z.string().max(50000).optional(),
   tags: z.union([z.array(z.string()), z.string()]).optional(),
+  kind: z.enum(['author', 'translator']).optional(),
 });
 
 function writeGuard() {
   return async (c: any, next: any) => {
     if (!getEnv().syncOpen) return requireAuth(c, next);
     await next();
+  };
+}
+
+/** Run middlewares only in closed (prod) mode; open LAN keeps legacy behavior. */
+function prodGuard(...mws: Array<(c: any, next: any) => unknown>) {
+  return async (c: any, next: any) => {
+    if (getEnv().syncOpen) {
+      await next();
+      return;
+    }
+    const dispatch = async (idx: number): Promise<Response | void> => {
+      if (idx < mws.length) {
+        // Mirror hono/compose: a middleware's returned Response finalizes the context.
+        const res = await mws[idx](c, () => dispatch(idx + 1));
+        if (res instanceof Response) {
+          c.res = res;
+          return res;
+        }
+        return;
+      }
+      await next();
+    };
+    const res = await dispatch(0);
+    if (res instanceof Response) return res;
   };
 }
 
@@ -158,11 +184,22 @@ novelsRouter.get('/:id', async (c) => {
 });
 
 // POST /api/v1/novels
-novelsRouter.post('/', writeGuard(), async (c) => {
+novelsRouter.post('/', prodGuard(requireAuth), async (c) => {
   const parsed = createNovelSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return c.json({ success: false, error: 'حقول غير صالحة', issues: parsed.error.issues }, 400);
   const body = parsed.data;
   const id = body.id || `novel_${Date.now()}`;
+  const kind = body.kind ?? 'author';
+
+  // Closed mode: require the matching grant and stamp ownership.
+  let ownerPatch: { authorUserId?: string | null; translatorUserId?: string | null } = {};
+  if (!getEnv().syncOpen) {
+    const caller = await getCaller(c);
+    if (!caller.row) return c.json({ success: false, error: 'غير مصرح: مطلوب تسجيل الدخول' }, 401);
+    const allowed = caller.isAdmin || (kind === 'author' ? Boolean(caller.row.isAuthor) : Boolean(caller.row.isTranslator));
+    if (!allowed) return c.json({ success: false, error: 'غير مسموح: تحتاج إذن ' + (kind === 'author' ? 'التأليف' : 'الترجمة') }, 403);
+    ownerPatch = kind === 'author' ? { authorUserId: caller.row.id } : { translatorUserId: caller.row.id };
+  }
 
   if (isDbAvailable()) {
     try {
@@ -181,6 +218,7 @@ novelsRouter.post('/', writeGuard(), async (c) => {
         coverUrl: body.coverUrl ?? '',
         summary: body.summary ?? '',
         tags: normalizeTags(body.tags),
+        ...ownerPatch,
         createdAt: now,
         updatedAt: now,
       });
@@ -204,7 +242,7 @@ novelsRouter.post('/', writeGuard(), async (c) => {
 });
 
 // PUT /api/v1/novels/:id
-novelsRouter.put('/:id', writeGuard(), async (c) => {
+novelsRouter.put('/:id', prodGuard(requireAuth, ensureNovelOwner()), async (c) => {
   const id = c.req.param('id');
   const body = await c.req.json().catch(() => ({}));
   const tags = body.tags !== undefined ? normalizeTags(body.tags) : undefined;
@@ -243,7 +281,7 @@ novelsRouter.put('/:id', writeGuard(), async (c) => {
 });
 
 // DELETE /api/v1/novels/:id
-novelsRouter.delete('/:id', writeGuard(), async (c) => {
+novelsRouter.delete('/:id', prodGuard(requireAuth, ensureNovelOwner()), async (c) => {
   const id = c.req.param('id');
   if (isDbAvailable()) {
     try {

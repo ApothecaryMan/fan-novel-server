@@ -9,6 +9,8 @@ import { chaptersRouter, chaptersTimelineRouter } from './routes/chapters.js';
 import { uploadRouter } from './routes/upload.js';
 import { authRouter } from './routes/auth.js';
 import { syncRouter } from './routes/sync.js';
+import { authorRouter } from './routes/author.js';
+import { adminRouter } from './routes/admin.js';
 import { rateLimit } from './middleware/rateLimit.js';
 import { checkDb, db, initDb, isDbAvailable, noteDbFailure } from './database/db.js';
 import { coverBlobs } from './database/schema.js';
@@ -30,6 +32,7 @@ export function createApp() {
 
   app.use('/api/v1/auth/*', rateLimit(30));
   app.use('/api/v1/upload/*', rateLimit(20));
+  app.use('/api/v1/admin/*', rateLimit(60));
 
   // Ensure DB is initialized (pg Pool on Node, neon-http on Workers) before routes run.
   app.use('*', async (_c, next) => {
@@ -87,6 +90,8 @@ export function createApp() {
 
   app.route('/api/v1/auth', authRouter);
   app.route('/api/v1/sync', syncRouter);
+  app.route('/api/v1/author', authorRouter);
+  app.route('/api/v1/admin', adminRouter);
   app.route('/api/v1/novels', novelsRouter);
   app.route('/api/v1/novels', chaptersRouter);
   app.route('/api/v1/chapters', chaptersTimelineRouter);
@@ -107,6 +112,11 @@ export function createApp() {
         chapterTimeline: 'POST /api/v1/chapters/timeline',
         todayChapters: 'GET /api/v1/chapters/today',
         uploadCover: 'POST /api/v1/upload/cover',
+      authorMine: 'GET /api/v1/author/mine?kind=author|translator',
+      authorRequests: 'POST /api/v1/author/requests',
+      myRequests: 'GET /api/v1/author/requests/mine',
+      adminUsers: 'GET /api/v1/admin/users',
+      adminRequests: 'GET /api/v1/admin/requests?status=pending',
         syncPush: 'POST /api/v1/sync/push',
         syncPull: 'POST /api/v1/sync/pull',
         syncStats: 'POST /api/v1/sync/stats',

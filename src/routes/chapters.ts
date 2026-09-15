@@ -5,6 +5,7 @@ import { db, isDbAvailable, noteDbFailure } from '../database/db.js';
 import { chapters, novels } from '../database/schema.js';
 import { NOVELS_STORE, type NovelData } from './novels.js';
 import { requireAuth } from '../middleware/auth.js';
+import { ensureNovelOwner } from '../middleware/ownership.js';
 import { getEnv } from '../config/env.js';
 
 export const chaptersRouter = new Hono();
@@ -105,6 +106,30 @@ function writeGuard() {
   return async (c: any, next: any) => {
     if (!getEnv().syncOpen) return requireAuth(c, next);
     await next();
+  };
+}
+
+/** Run middlewares only in closed (prod) mode; open LAN keeps legacy behavior. */
+function prodGuard(...mws: Array<(c: any, next: any) => unknown>) {
+  return async (c: any, next: any) => {
+    if (getEnv().syncOpen) {
+      await next();
+      return;
+    }
+    const dispatch = async (idx: number): Promise<Response | void> => {
+      if (idx < mws.length) {
+        // Mirror hono/compose: a middleware's returned Response finalizes the context.
+        const res = await mws[idx](c, () => dispatch(idx + 1));
+        if (res instanceof Response) {
+          c.res = res;
+          return res;
+        }
+        return;
+      }
+      await next();
+    };
+    const res = await dispatch(0);
+    if (res instanceof Response) return res;
   };
 }
 
@@ -284,7 +309,7 @@ chaptersRouter.get('/:novelId/chapters/:chapterNumber', async (c) => {
 });
 
 // POST /api/v1/novels/:novelId/chapters
-chaptersRouter.post('/:novelId/chapters', writeGuard(), async (c) => {
+chaptersRouter.post('/:novelId/chapters', prodGuard(requireAuth, ensureNovelOwner()), async (c) => {
   const novelId = c.req.param('novelId');
   const parsed = addChapterSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return c.json({ success: false, error: 'عنوان ومحتوى الفصل حقول مطلوبة', issues: parsed.error.issues }, 400);
@@ -314,4 +339,69 @@ chaptersRouter.post('/:novelId/chapters', writeGuard(), async (c) => {
   current.push(novel);
   CHAPTERS_STORE.set(novelId, current);
   return c.json({ success: true, message: 'تم إضافة الفصل بنجاح', data: novel }, 201);
+});
+
+const editChapterSchema = z.object({
+  title: z.string().min(1).max(255).optional(),
+  content: z.string().min(1).max(500000).optional(),
+});
+
+// PUT /api/v1/novels/:novelId/chapters/:chapterNumber (owner or admin)
+chaptersRouter.put('/:novelId/chapters/:chapterNumber', prodGuard(requireAuth, ensureNovelOwner()), async (c) => {
+  const { novelId, chapterNumber } = c.req.param();
+  const num = parseInt(chapterNumber, 10);
+  if (Number.isNaN(num)) return c.json({ success: false, error: 'رقم الفصل غير صالح' }, 400);
+  const parsed = editChapterSchema.safeParse(await c.req.json().catch(() => null));
+  if (!parsed.success) return c.json({ success: false, error: 'حقول غير صالحة', issues: parsed.error.issues }, 400);
+  if (!parsed.data.title && !parsed.data.content) return c.json({ success: false, error: 'لا يوجد ما يُعدَّل' }, 400);
+
+  if (isDbAvailable()) {
+    try {
+      const rows = await db.select().from(chapters)
+        .where(and(eq(chapters.novelId, novelId), eq(chapters.chapterNumber, num))).limit(1);
+      if (!rows[0]) return c.json({ success: false, error: 'الفصل غير موجود' }, 404);
+      const wordCount = parsed.data.content != null ? parsed.data.content.trim().split(/\s+/).length : undefined;
+      await db.update(chapters).set({
+        title: parsed.data.title ?? undefined,
+        contentRaw: parsed.data.content ?? undefined,
+        wordCount,
+      }).where(eq(chapters.id, rows[0].id));
+      const updated = await db.select().from(chapters).where(eq(chapters.id, rows[0].id)).limit(1);
+      return c.json({ success: true, message: 'تم تعديل الفصل بنجاح', data: rowToContent(updated[0]) });
+    } catch (err) {
+      console.error('[chapters] db update failed', err); noteDbFailure();
+    }
+  }
+  const list = CHAPTERS_STORE.get(novelId) || [];
+  const ch = list.find((x) => x.chapterNumber === num);
+  if (!ch) return c.json({ success: false, error: 'الفصل غير موجود' }, 404);
+  if (parsed.data.title) ch.title = parsed.data.title;
+  if (parsed.data.content) { ch.content = parsed.data.content; ch.wordCount = parsed.data.content.trim().split(/\s+/).length; }
+  return c.json({ success: true, message: 'تم تعديل الفصل بنجاح', data: ch });
+});
+
+// DELETE /api/v1/novels/:novelId/chapters/:chapterNumber (owner or admin)
+chaptersRouter.delete('/:novelId/chapters/:chapterNumber', prodGuard(requireAuth, ensureNovelOwner()), async (c) => {
+  const { novelId, chapterNumber } = c.req.param();
+  const num = parseInt(chapterNumber, 10);
+  if (Number.isNaN(num)) return c.json({ success: false, error: 'رقم الفصل غير صالح' }, 400);
+
+  if (isDbAvailable()) {
+    try {
+      const rows = await db.select().from(chapters)
+        .where(and(eq(chapters.novelId, novelId), eq(chapters.chapterNumber, num))).limit(1);
+      if (!rows[0]) return c.json({ success: false, error: 'الفصل غير موجود' }, 404);
+      await db.delete(chapters).where(eq(chapters.id, rows[0].id));
+      const remaining = await db.select({ id: chapters.id }).from(chapters).where(eq(chapters.novelId, novelId));
+      await db.update(novels).set({ totalChapters: remaining.length, updatedAt: new Date() }).where(eq(novels.id, novelId));
+      return c.json({ success: true, message: 'تم حذف الفصل بنجاح' });
+    } catch (err) {
+      console.error('[chapters] db delete failed', err); noteDbFailure();
+    }
+  }
+  const list = CHAPTERS_STORE.get(novelId) || [];
+  const idx = list.findIndex((x) => x.chapterNumber === num);
+  if (idx < 0) return c.json({ success: false, error: 'الفصل غير موجود' }, 404);
+  list.splice(idx, 1);
+  return c.json({ success: true, message: 'تم حذف الفصل بنجاح' });
 });
