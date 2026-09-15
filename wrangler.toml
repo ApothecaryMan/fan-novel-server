@@ -5,6 +5,11 @@ compatibility_flags = ["nodejs_compat"]
 
 [vars]
 SYNC_OPEN = "false"
+# Mobile-only for now (Expo native has no Origin check). No web domain exists yet.
+# When you have a web client, replace "*" with one of these:
+# Expo web dev: CORS_ORIGIN = "http://localhost:8081"
+# Cloudflare Pages: CORS_ORIGIN = "https://fan-novel.pages.dev"
+# Custom: CORS_ORIGIN = "https://app.fan-novel.com,https://api.fan-novel.com"
 CORS_ORIGIN = "*"
 NODE_ENV = "production"
 
