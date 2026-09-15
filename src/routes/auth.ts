@@ -4,7 +4,7 @@ import { eq, or } from 'drizzle-orm';
 import { db, isDbAvailable, noteDbFailure } from '../database/db.js';
 import { users } from '../database/schema.js';
 import { requireAuth, signToken } from '../middleware/auth.js';
-import { getEnv } from '../config/env.js';
+import { adminEmails, getEnv } from '../config/env.js';
 
 export const authRouter = new Hono();
 
@@ -33,7 +33,12 @@ async function verifyGoogleIdToken(idToken?: string): Promise<{ verified: boolea
 }
 
 function toPublic(u: any) {
-  return { id: u.externalId ?? u.id, externalId: u.externalId ?? u.id, email: u.email, name: u.username ?? u.name, username: u.username ?? u.name, avatarUrl: u.avatarUrl, role: u.role ?? 'reader', provider: 'google' };
+  return {
+    id: u.externalId ?? u.id, externalId: u.externalId ?? u.id, email: u.email,
+    name: u.username ?? u.name, username: u.username ?? u.name, avatarUrl: u.avatarUrl,
+    role: u.role ?? 'reader', isAuthor: Boolean(u.isAuthor), isTranslator: Boolean(u.isTranslator),
+    provider: 'google',
+  };
 }
 
 // POST /api/v1/auth/google
@@ -64,18 +69,22 @@ authRouter.post('/google', async (c) => {
     try {
       const found = await db.select().from(users).where(or(eq(users.externalId, externalId), eq(users.email, email.toLowerCase()))).limit(1);
       let row = found[0];
+      const bootstrapAdmin = adminEmails().includes(email.toLowerCase());
       if (!row) {
         const inserted = await db.insert(users).values({
           externalId, email: email.toLowerCase(),
           username: (username || displayName).slice(0, 100),
           avatarUrl: avatarUrl ?? null,
+          role: bootstrapAdmin ? 'admin' : 'reader',
         }).returning();
         row = inserted[0];
       } else {
-        await db.update(users).set({ email: email.toLowerCase(), avatarUrl: avatarUrl ?? row.avatarUrl, updatedAt: new Date() }).where(eq(users.id, row.id));
-        row = { ...row, email: email.toLowerCase(), avatarUrl: avatarUrl ?? row.avatarUrl };
+        const patch: Partial<typeof row> = { email: email.toLowerCase(), avatarUrl: avatarUrl ?? row.avatarUrl, updatedAt: new Date() };
+        if (bootstrapAdmin && row.role !== 'admin') patch.role = 'admin';
+        await db.update(users).set(patch).where(eq(users.id, row.id));
+        row = { ...row, ...patch };
       }
-      const token = await signToken({ id: externalId, email: row.email!, role: 'reader' });
+      const token = await signToken({ id: externalId, email: row.email!, role: row.role ?? 'reader' });
       return c.json({ success: true, message: 'تم تسجيل الدخول بحساب Google بنجاح', user: toPublic({ ...row, externalId }), token });
     } catch (err) {
       console.error('[auth] db login failed, memory fallback', err); noteDbFailure();

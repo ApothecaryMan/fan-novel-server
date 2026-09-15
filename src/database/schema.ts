@@ -10,6 +10,9 @@ export const users = pgTable('users', {
   username: varchar('username', { length: 100 }).unique(),
   passwordHash: text('password_hash'),
   avatarUrl: text('avatar_url'),
+  role: varchar('role', { length: 20 }).default('reader').notNull(), // 'reader' | 'admin'
+  isAuthor: boolean('is_author').default(false).notNull(),
+  isTranslator: boolean('is_translator').default(false).notNull(),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull()
 });
@@ -30,6 +33,8 @@ export const novels = pgTable('novels', {
   coverUrl: text('cover_url').notNull(),
   summary: text('summary').notNull(),
   featuredRank: integer('featured_rank'),
+  authorUserId: uuid('author_user_id').references(() => users.id, { onDelete: 'set null' }),
+  translatorUserId: uuid('translator_user_id').references(() => users.id, { onDelete: 'set null' }),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull()
 });
@@ -131,6 +136,20 @@ export const coverBlobs = pgTable('cover_blobs', {
   dataBase64: text('data_base64').notNull(),
   createdAt: timestamp('created_at').defaultNow().notNull()
 });
+
+// 8. طلبات الأذونات (author/translator grant requests; admin approves).
+export const roleRequests = pgTable('role_requests', {
+  id: serial('id').primaryKey(),
+  userId: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
+  kind: varchar('kind', { length: 20 }).notNull(), // 'author' | 'translator'
+  status: varchar('status', { length: 20 }).default('pending').notNull(), // 'pending' | 'approved' | 'rejected'
+  note: varchar('note', { length: 500 }),
+  decidedBy: uuid('decided_by').references(() => users.id, { onDelete: 'set null' }),
+  decidedAt: timestamp('decided_at'),
+  createdAt: timestamp('created_at').defaultNow().notNull()
+}, (table) => ({
+  userKindPendingIdx: uniqueIndex('user_kind_pending_idx').on(table.userId, table.kind, table.status)
+}));
 
 // Helper function for serial primary key type
 function serial(name: string) {

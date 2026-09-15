@@ -11,6 +11,7 @@ NODE_ENV = "production"
 # Required secrets (wrangler secret put):
 #   DATABASE_URL  — Neon pooled connection string (https, no Hyperdrive needed; neon-http driver)
 #   JWT_SECRET    — long random string
+#   ADMIN_EMAILS  — comma-separated admin emails (auto-promote on login)
 #
 # Optional R2 binding for cover uploads (private bucket, served via GET /uploads/covers/*).
 # Uncomment after creating the bucket (dashboard R2 -> enable -> create `fan-novel-covers`):

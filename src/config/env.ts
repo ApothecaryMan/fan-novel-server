@@ -15,6 +15,7 @@ const envSchema = z.object({
   R2_ACCESS_KEY: z.string().optional(),
   R2_SECRET_KEY: z.string().optional(),
   R2_PUBLIC_URL: z.string().optional(),
+  ADMIN_EMAILS: z.string().default(''),
 });
 
 export type Env = z.infer<typeof envSchema> & {
@@ -50,7 +51,7 @@ export function setWorkerEnv(bindings: Record<string, unknown>): void {
 
 export function getEnv(): Env {
   const src = readSource();
-  const key = `${src.DATABASE_URL ?? ''}|${src.JWT_SECRET ?? ''}|${src.SYNC_OPEN}|${src.CORS_ORIGIN}|${src.NODE_ENV}|${src.R2_BUCKET ?? ''}`;
+  const key = `${src.DATABASE_URL ?? ''}|${src.JWT_SECRET ?? ''}|${src.SYNC_OPEN}|${src.CORS_ORIGIN}|${src.NODE_ENV}|${src.R2_BUCKET ?? ''}|${src.ADMIN_EMAILS ?? ''}`;
   if (cached && key === cachedKey) return cached;
   const parsed = envSchema.safeParse(src);
   if (!parsed.success) {
@@ -73,10 +74,15 @@ export function getEnv(): Env {
     R2_ACCESS_KEY: e.R2_ACCESS_KEY,
     R2_SECRET_KEY: e.R2_SECRET_KEY,
     R2_PUBLIC_URL: e.R2_PUBLIC_URL,
+    ADMIN_EMAILS: e.ADMIN_EMAILS ?? '',
     isProd: NODE_ENV === 'production',
     syncOpen: (e.SYNC_OPEN ?? 'true') !== 'false',
   };
   return cached;
+}
+
+export function adminEmails(): string[] {
+  return getEnv().ADMIN_EMAILS.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
 }
 
 export function isWorkersRuntime(): boolean {
