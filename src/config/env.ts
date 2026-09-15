@@ -16,6 +16,8 @@ const envSchema = z.object({
   R2_SECRET_KEY: z.string().optional(),
   R2_PUBLIC_URL: z.string().optional(),
   ADMIN_EMAILS: z.string().default(''),
+  GOOGLE_WEB_CLIENT_ID: z.string().optional(),
+  GOOGLE_ANDROID_CLIENT_ID: z.string().optional(),
 });
 
 export type Env = z.infer<typeof envSchema> & {
@@ -51,7 +53,7 @@ export function setWorkerEnv(bindings: Record<string, unknown>): void {
 
 export function getEnv(): Env {
   const src = readSource();
-  const key = `${src.DATABASE_URL ?? ''}|${src.JWT_SECRET ?? ''}|${src.SYNC_OPEN}|${src.CORS_ORIGIN}|${src.NODE_ENV}|${src.R2_BUCKET ?? ''}|${src.ADMIN_EMAILS ?? ''}`;
+  const key = `${src.DATABASE_URL ?? ''}|${src.JWT_SECRET ?? ''}|${src.SYNC_OPEN}|${src.CORS_ORIGIN}|${src.NODE_ENV}|${src.R2_BUCKET ?? ''}|${src.ADMIN_EMAILS ?? ''}|${src.GOOGLE_WEB_CLIENT_ID ?? ''}|${src.GOOGLE_ANDROID_CLIENT_ID ?? ''}`;
   if (cached && key === cachedKey) return cached;
   const parsed = envSchema.safeParse(src);
   if (!parsed.success) {
@@ -75,6 +77,8 @@ export function getEnv(): Env {
     R2_SECRET_KEY: e.R2_SECRET_KEY,
     R2_PUBLIC_URL: e.R2_PUBLIC_URL,
     ADMIN_EMAILS: e.ADMIN_EMAILS ?? '',
+    GOOGLE_WEB_CLIENT_ID: e.GOOGLE_WEB_CLIENT_ID,
+    GOOGLE_ANDROID_CLIENT_ID: e.GOOGLE_ANDROID_CLIENT_ID,
     isProd: NODE_ENV === 'production',
     syncOpen: (e.SYNC_OPEN ?? 'true') !== 'false',
   };

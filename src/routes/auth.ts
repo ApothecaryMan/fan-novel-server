@@ -20,13 +20,13 @@ const googleSchema = z.object({
   idToken: z.string().optional(),
 });
 
-async function verifyGoogleIdToken(idToken?: string): Promise<{ verified: boolean; email?: string }> {
+async function verifyGoogleIdToken(idToken?: string): Promise<{ verified: boolean; email?: string; aud?: string }> {
   if (!idToken) return { verified: false };
   try {
     const res = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(idToken)}`);
     if (!res.ok) return { verified: false };
     const info: any = await res.json();
-    return { verified: true, email: info.email };
+    return { verified: true, email: info.email, aud: info.aud };
   } catch {
     return { verified: false };
   }
@@ -53,12 +53,20 @@ authRouter.post('/google', async (c) => {
   }
 
   const check = await verifyGoogleIdToken(idToken);
-  if (idToken) {
+  if (!idToken) {
+    if (env.isProd) return c.json({ error: 'رمز Google مطلوب لتسجيل الدخول' }, 400);
+  } else {
     if (!check.verified) {
       if (env.isProd) return c.json({ error: 'تعذر التحقق من هوية Google' }, 401);
       console.warn(`[dev] idToken verification skipped for ${email}; trusting email only`);
-    } else if (check.email && check.email.toLowerCase() !== email.toLowerCase()) {
-      return c.json({ error: 'عدم تطابق البريد الإلكتروني في رمز Google' }, 400);
+    } else {
+      const allowedAud = [env.GOOGLE_WEB_CLIENT_ID, env.GOOGLE_ANDROID_CLIENT_ID].filter(Boolean) as string[];
+      if (allowedAud.length > 0 && check.aud && !allowedAud.includes(check.aud)) {
+        return c.json({ error: 'رمز Google صادر لتطبيق آخر' }, 401);
+      }
+      if (check.email && check.email.toLowerCase() !== email.toLowerCase()) {
+        return c.json({ error: 'عدم تطابق البريد الإلكتروني في رمز Google' }, 400);
+      }
     }
   }
 

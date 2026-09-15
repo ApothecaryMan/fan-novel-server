@@ -18,6 +18,10 @@ NODE_ENV = "production"
 #   JWT_SECRET    — long random string
 #   ADMIN_EMAILS  — comma-separated admin emails (auto-promote on login)
 #
+# Google OAuth audience check (plain vars, not secrets — must match app.json extra.googleAuth):
+#   GOOGLE_WEB_CLIENT_ID
+#   GOOGLE_ANDROID_CLIENT_ID
+#
 # Optional R2 binding for cover uploads (private bucket, served via GET /uploads/covers/*).
 [[r2_buckets]]
 binding = "COVERS"
