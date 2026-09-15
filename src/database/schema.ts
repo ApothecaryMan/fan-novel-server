@@ -151,6 +151,21 @@ export const roleRequests = pgTable('role_requests', {
   userKindPendingIdx: uniqueIndex('user_kind_pending_idx').on(table.userId, table.kind, table.status)
 }));
 
+// 9. Author API tokens (PATs for agent/MCP publishing).
+// Only the sha256 hash is stored; plaintext is returned once at creation.
+// Accepted only on authoring routes, and the owner's grant flags still apply.
+export const authorApiKeys = pgTable('author_api_keys', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  userId: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
+  name: varchar('name', { length: 100 }).notNull(),
+  keyPrefix: varchar('key_prefix', { length: 16 }).notNull(),
+  keyHash: varchar('key_hash', { length: 64 }).notNull().unique(),
+  scopes: jsonb('scopes').$type<string[]>().default(['novels:write']).notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  lastUsedAt: timestamp('last_used_at'),
+  revokedAt: timestamp('revoked_at')
+});
+
 // Helper function for serial primary key type
 function serial(name: string) {
   return integer(name).generatedAlwaysAsIdentity();

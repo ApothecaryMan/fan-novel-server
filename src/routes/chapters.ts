@@ -4,7 +4,7 @@ import { and, desc, eq, gte, lte, asc } from 'drizzle-orm';
 import { db, isDbAvailable, noteDbFailure } from '../database/db.js';
 import { chapters, novels } from '../database/schema.js';
 import { NOVELS_STORE, type NovelData } from './novels.js';
-import { requireAuth } from '../middleware/auth.js';
+import { requireAuthOrPat } from '../middleware/authorToken.js';
 import { ensureNovelOwner } from '../middleware/ownership.js';
 import { getEnv } from '../config/env.js';
 
@@ -104,7 +104,7 @@ const timelineSchema = z.object({
 
 function writeGuard() {
   return async (c: any, next: any) => {
-    if (!getEnv().syncOpen) return requireAuth(c, next);
+    if (!getEnv().syncOpen) return requireAuthOrPat(c, next);
     await next();
   };
 }
@@ -309,7 +309,7 @@ chaptersRouter.get('/:novelId/chapters/:chapterNumber', async (c) => {
 });
 
 // POST /api/v1/novels/:novelId/chapters
-chaptersRouter.post('/:novelId/chapters', prodGuard(requireAuth, ensureNovelOwner()), async (c) => {
+chaptersRouter.post('/:novelId/chapters', prodGuard(requireAuthOrPat, ensureNovelOwner()), async (c) => {
   const novelId = c.req.param('novelId');
   const parsed = addChapterSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return c.json({ success: false, error: 'عنوان ومحتوى الفصل حقول مطلوبة', issues: parsed.error.issues }, 400);
@@ -347,7 +347,7 @@ const editChapterSchema = z.object({
 });
 
 // PUT /api/v1/novels/:novelId/chapters/:chapterNumber (owner or admin)
-chaptersRouter.put('/:novelId/chapters/:chapterNumber', prodGuard(requireAuth, ensureNovelOwner()), async (c) => {
+chaptersRouter.put('/:novelId/chapters/:chapterNumber', prodGuard(requireAuthOrPat, ensureNovelOwner()), async (c) => {
   const { novelId, chapterNumber } = c.req.param();
   const num = parseInt(chapterNumber, 10);
   if (Number.isNaN(num)) return c.json({ success: false, error: 'رقم الفصل غير صالح' }, 400);
@@ -381,7 +381,7 @@ chaptersRouter.put('/:novelId/chapters/:chapterNumber', prodGuard(requireAuth, e
 });
 
 // DELETE /api/v1/novels/:novelId/chapters/:chapterNumber (owner or admin)
-chaptersRouter.delete('/:novelId/chapters/:chapterNumber', prodGuard(requireAuth, ensureNovelOwner()), async (c) => {
+chaptersRouter.delete('/:novelId/chapters/:chapterNumber', prodGuard(requireAuthOrPat, ensureNovelOwner()), async (c) => {
   const { novelId, chapterNumber } = c.req.param();
   const num = parseInt(chapterNumber, 10);
   if (Number.isNaN(num)) return c.json({ success: false, error: 'رقم الفصل غير صالح' }, 400);

@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { and, desc, eq, ilike, or, sql } from 'drizzle-orm';
 import { db, isDbAvailable, noteDbFailure } from '../database/db.js';
 import { novels } from '../database/schema.js';
-import { requireAuth } from '../middleware/auth.js';
+import { requireAuthOrPat } from '../middleware/authorToken.js';
 import { ensureNovelOwner, getCaller } from '../middleware/ownership.js';
 import { getEnv } from '../config/env.js';
 
@@ -78,7 +78,7 @@ const createNovelSchema = z.object({
 
 function writeGuard() {
   return async (c: any, next: any) => {
-    if (!getEnv().syncOpen) return requireAuth(c, next);
+    if (!getEnv().syncOpen) return requireAuthOrPat(c, next);
     await next();
   };
 }
@@ -184,7 +184,7 @@ novelsRouter.get('/:id', async (c) => {
 });
 
 // POST /api/v1/novels
-novelsRouter.post('/', prodGuard(requireAuth), async (c) => {
+novelsRouter.post('/', prodGuard(requireAuthOrPat), async (c) => {
   const parsed = createNovelSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return c.json({ success: false, error: 'حقول غير صالحة', issues: parsed.error.issues }, 400);
   const body = parsed.data;
@@ -242,7 +242,7 @@ novelsRouter.post('/', prodGuard(requireAuth), async (c) => {
 });
 
 // PUT /api/v1/novels/:id
-novelsRouter.put('/:id', prodGuard(requireAuth, ensureNovelOwner()), async (c) => {
+novelsRouter.put('/:id', prodGuard(requireAuthOrPat, ensureNovelOwner()), async (c) => {
   const id = c.req.param('id');
   const body = await c.req.json().catch(() => ({}));
   const tags = body.tags !== undefined ? normalizeTags(body.tags) : undefined;
@@ -281,7 +281,7 @@ novelsRouter.put('/:id', prodGuard(requireAuth, ensureNovelOwner()), async (c) =
 });
 
 // DELETE /api/v1/novels/:id
-novelsRouter.delete('/:id', prodGuard(requireAuth, ensureNovelOwner()), async (c) => {
+novelsRouter.delete('/:id', prodGuard(requireAuthOrPat, ensureNovelOwner()), async (c) => {
   const id = c.req.param('id');
   if (isDbAvailable()) {
     try {

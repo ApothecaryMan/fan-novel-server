@@ -8,6 +8,7 @@ import { novelsRouter } from './routes/novels.js';
 import { chaptersRouter, chaptersTimelineRouter } from './routes/chapters.js';
 import { uploadRouter } from './routes/upload.js';
 import { authRouter } from './routes/auth.js';
+import { authorKeysRouter } from './routes/authorKeys.js';
 import { syncRouter } from './routes/sync.js';
 import { authorRouter } from './routes/author.js';
 import { adminRouter } from './routes/admin.js';
@@ -31,6 +32,7 @@ export function createApp() {
   if (!env.isProd) app.use('*', prettyJSON());
 
   app.use('/api/v1/auth/*', rateLimit(30));
+  app.use('/api/v1/author/keys*', rateLimit(10));
   app.use('/api/v1/upload/*', rateLimit(20));
   app.use('/api/v1/admin/*', rateLimit(60));
 
@@ -108,6 +110,7 @@ export function createApp() {
   });
 
   app.route('/api/v1/auth', authRouter);
+  app.route('/api/v1/author/keys', authorKeysRouter);
   app.route('/api/v1/sync', syncRouter);
   app.route('/api/v1/author', authorRouter);
   app.route('/api/v1/admin', adminRouter);

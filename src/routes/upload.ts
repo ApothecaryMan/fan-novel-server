@@ -4,7 +4,7 @@ import crypto from 'crypto';
 import { eq } from 'drizzle-orm';
 import { db, isDbAvailable, noteDbFailure } from '../database/db.js';
 import { coverBlobs } from '../database/schema.js';
-import { requireAuth } from '../middleware/auth.js';
+import { requireAuthOrPat } from '../middleware/authorToken.js';
 import { getEnv, getWorkerBinding, isWorkersRuntime } from '../config/env.js';
 
 export const uploadRouter = new Hono();
@@ -52,7 +52,7 @@ async function uploadToR2(buffer: Buffer, filename: string, mime: string): Promi
 
 // POST /api/v1/upload/cover (auth required when SYNC_OPEN=false, open LAN otherwise)
 uploadRouter.post('/cover', async (c, next) => {
-  if (!getEnv().syncOpen) return requireAuth(c, next);
+  if (!getEnv().syncOpen) return requireAuthOrPat(c, next);
   await next();
 }, async (c) => {
   try {
