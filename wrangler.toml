@@ -14,7 +14,6 @@ NODE_ENV = "production"
 #   ADMIN_EMAILS  — comma-separated admin emails (auto-promote on login)
 #
 # Optional R2 binding for cover uploads (private bucket, served via GET /uploads/covers/*).
-# Uncomment after creating the bucket (dashboard R2 -> enable -> create `fan-novel-covers`):
-# [[r2_buckets]]
-# binding = "COVERS"
-# bucket_name = "fan-novel-covers"
+[[r2_buckets]]
+binding = "COVERS"
+bucket_name = "fan-novel-covers"
