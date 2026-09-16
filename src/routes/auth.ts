@@ -16,9 +16,31 @@ const googleSchema = z.object({
   username: z.string().max(100).optional(),
   email: z.string().email().max(255),
   avatarUrl: z.string().max(2000).optional(),
+  bannerUrl: z.string().max(2000).optional(),
   googleId: z.string().max(255).optional(),
   idToken: z.string().optional(),
 });
+
+// Client display name / handle rules (mirrors the mobile app).
+const USERNAME_RE = /^[a-zA-Z0-9_]{3,20}$/;
+
+// Only remote URLs are ever persisted. Mobile clients historically sent
+// device file URIs (file://, content://) that die with the device —
+// storing them poisons the cross-install restore path, so they are
+// dropped (never 400: old clients still send them).
+function cleanMediaUrl(url?: string | null): string | undefined {
+  if (typeof url !== 'string') return undefined;
+  const v = url.trim();
+  return /^https?:\/\//i.test(v) ? v.slice(0, 2000) : undefined;
+}
+
+/** Keep a stored remote URL; adopt an incoming remote URL when the stored
+ *  one is missing or a dead device URI; never write device URIs. */
+function keepRemoteOrHeal(stored?: string | null, incoming?: string | null): string | null | undefined {
+  if (cleanMediaUrl(stored)) return undefined; // keep stored (no write)
+  const fresh = cleanMediaUrl(incoming);
+  return fresh ?? undefined; // adopt remote, or leave untouched
+}
 
 async function verifyGoogleIdToken(idToken?: string): Promise<{ verified: boolean; email?: string; aud?: string }> {
   if (!idToken) return { verified: false };
@@ -35,7 +57,8 @@ async function verifyGoogleIdToken(idToken?: string): Promise<{ verified: boolea
 function toPublic(u: any) {
   return {
     id: u.externalId ?? u.id, externalId: u.externalId ?? u.id, email: u.email,
-    name: u.username ?? u.name, username: u.username ?? u.name, avatarUrl: u.avatarUrl,
+    name: u.displayName ?? u.username ?? u.name, username: u.username ?? u.name,
+    avatarUrl: u.avatarUrl, bannerUrl: u.bannerUrl ?? null,
     role: u.role ?? 'reader', isAuthor: Boolean(u.isAuthor), isTranslator: Boolean(u.isTranslator),
     provider: 'google',
   };
@@ -45,7 +68,7 @@ function toPublic(u: any) {
 authRouter.post('/google', async (c) => {
   const parsed = googleSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return c.json({ error: 'البريد الإلكتروني مطلوب لتسجيل الدخول بحساب Google', issues: parsed.error.issues }, 400);
-  const { name, username, email, avatarUrl, googleId, idToken } = parsed.data;
+  const { name, username, email, avatarUrl, bannerUrl, googleId, idToken } = parsed.data;
   const env = getEnv();
 
   if (env.isProd && (!env.JWT_SECRET || env.JWT_SECRET.startsWith('web-novel-dev-') || env.JWT_SECRET === 'change-me-in-production')) {
@@ -82,12 +105,21 @@ authRouter.post('/google', async (c) => {
         const inserted = await db.insert(users).values({
           externalId, email: email.toLowerCase(),
           username: (username || displayName).slice(0, 100),
-          avatarUrl: avatarUrl ?? null,
+          displayName: (name || displayName).slice(0, 100),
+          avatarUrl: cleanMediaUrl(avatarUrl) ?? null,
+          bannerUrl: cleanMediaUrl(bannerUrl) ?? null,
           role: bootstrapAdmin ? 'admin' : 'reader',
         }).returning();
         row = inserted[0];
       } else {
-        const patch: Partial<typeof row> = { email: email.toLowerCase(), avatarUrl: avatarUrl ?? row.avatarUrl, updatedAt: new Date() };
+        // Fill-or-heal only: a stored remote URL (e.g. a custom R2 avatar)
+        // is never overwritten by the fresh Google photo. Device URIs are
+        // never written.
+        const patch: Partial<typeof row> = { email: email.toLowerCase(), updatedAt: new Date() };
+        const healedAvatar = keepRemoteOrHeal(row.avatarUrl, avatarUrl);
+        if (healedAvatar !== undefined) patch.avatarUrl = healedAvatar;
+        const healedBanner = keepRemoteOrHeal(row.bannerUrl, bannerUrl);
+        if (healedBanner !== undefined) patch.bannerUrl = healedBanner;
         if (bootstrapAdmin && row.role !== 'admin') patch.role = 'admin';
         await db.update(users).set(patch).where(eq(users.id, row.id));
         row = { ...row, ...patch };
@@ -101,12 +133,15 @@ authRouter.post('/google', async (c) => {
 
   let user = memUsers.find((u) => u.email === email || u.externalId === externalId);
   if (!user) {
-    user = { id: externalId, externalId, email, name: displayName, username: displayName, avatarUrl, role: 'reader', provider: 'google', createdAt: new Date().toISOString() };
+    user = { id: externalId, externalId, email, name: displayName, displayName, username: username || displayName, avatarUrl: cleanMediaUrl(avatarUrl) ?? null, bannerUrl: cleanMediaUrl(bannerUrl) ?? null, role: 'reader', provider: 'google', createdAt: new Date().toISOString() };
     memUsers.push(user);
   } else {
     if (name) user.name = name;
     if (username) user.username = username;
-    if (avatarUrl) user.avatarUrl = avatarUrl;
+    const healedAvatar = keepRemoteOrHeal(user.avatarUrl, avatarUrl);
+    if (healedAvatar !== undefined) user.avatarUrl = healedAvatar;
+    const healedBanner = keepRemoteOrHeal(user.bannerUrl, bannerUrl);
+    if (healedBanner !== undefined) user.bannerUrl = healedBanner;
   }
   const token = await signToken({ id: user.externalId, email: user.email, role: user.role });
   return c.json({ success: true, message: 'تم تسجيل الدخول بحساب Google بنجاح', user, token });
@@ -127,4 +162,66 @@ authRouter.get('/me', requireAuth, async (c) => {
   const user = memUsers.find((u) => u.id === sub || u.externalId === sub);
   if (!user) return c.json({ error: 'المستخدم غير موجود' }, 404);
   return c.json({ user });
+});
+
+// PATCH /api/v1/auth/me — explicit profile edit (display name, handle,
+// avatar, banner). Unlike POST /google (fill-or-heal), this overwrites:
+// media URLs must be remote http(s) — device file URIs are rejected.
+const profilePatchSchema = z.object({
+  name: z.string().min(1).max(100).optional(),
+  username: z.string().regex(USERNAME_RE, 'اسم المستخدم: 3-20 حرف (أحرف وأرقام و_)').optional(),
+  avatarUrl: z.string().max(2000).nullable().optional(),
+  bannerUrl: z.string().max(2000).nullable().optional(),
+});
+
+authRouter.patch('/me', requireAuth, async (c) => {
+  const payload = c.get('authUser') as { sub?: string };
+  const sub = payload.sub ?? '';
+  const parsed = profilePatchSchema.safeParse(await c.req.json().catch(() => null));
+  if (!parsed.success) return c.json({ error: 'بيانات الملف الشخصي غير صالحة', issues: parsed.error.issues }, 400);
+  const { name, username, avatarUrl, bannerUrl } = parsed.data;
+  if (name === undefined && username === undefined && avatarUrl === undefined && bannerUrl === undefined) {
+    return c.json({ error: 'لا يوجد ما يتم تحديثه' }, 400);
+  }
+  for (const [label, url] of [['avatarUrl', avatarUrl], ['bannerUrl', bannerUrl]] as const) {
+    if (url !== undefined && url !== null && !cleanMediaUrl(url)) {
+      return c.json({ error: `${label} يجب أن يكون رابط صورة http(s)` }, 400);
+    }
+  }
+
+  if (isDbAvailable()) {
+    try {
+      const found = await db.select().from(users).where(eq(users.externalId, sub)).limit(1);
+      const row = found[0];
+      if (!row) return c.json({ error: 'المستخدم غير موجود' }, 404);
+      if (username !== undefined && username !== row.username) {
+        const clash = await db.select({ id: users.id }).from(users).where(eq(users.username, username)).limit(1);
+        if (clash[0]) return c.json({ error: 'اسم المستخدم محجوز بالفعل' }, 409);
+      }
+      const patch: Record<string, unknown> = { updatedAt: new Date() };
+      if (username !== undefined) patch.username = username;
+      if (name !== undefined) patch.displayName = name;
+      if (avatarUrl !== undefined) patch.avatarUrl = avatarUrl === null ? null : cleanMediaUrl(avatarUrl);
+      if (bannerUrl !== undefined) patch.bannerUrl = bannerUrl === null ? null : cleanMediaUrl(bannerUrl);
+      await db.update(users).set(patch).where(eq(users.id, row.id));
+      const updated = { ...row, ...patch };
+      return c.json({ success: true, user: toPublic({ ...updated, externalId: row.externalId }) });
+    } catch (err) {
+      console.error('[auth] db profile patch failed', err); noteDbFailure();
+      return c.json({ error: 'تعذر تحديث الملف الشخصي' }, 500);
+    }
+  }
+
+  const user = memUsers.find((u) => u.id === sub || u.externalId === sub);
+  if (!user) return c.json({ error: 'المستخدم غير موجود' }, 404);
+  if (username !== undefined) {
+    if (memUsers.some((u) => u !== user && u.username === username)) {
+      return c.json({ error: 'اسم المستخدم محجوز بالفعل' }, 409);
+    }
+    user.username = username;
+  }
+  if (name !== undefined) user.displayName = name;
+  if (avatarUrl !== undefined) user.avatarUrl = avatarUrl === null ? null : cleanMediaUrl(avatarUrl);
+  if (bannerUrl !== undefined) user.bannerUrl = bannerUrl === null ? null : cleanMediaUrl(bannerUrl);
+  return c.json({ success: true, user: toPublic(user) });
 });

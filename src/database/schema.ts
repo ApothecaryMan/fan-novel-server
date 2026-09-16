@@ -8,8 +8,10 @@ export const users = pgTable('users', {
   externalId: varchar('external_id', { length: 255 }).unique(),
   email: varchar('email', { length: 255 }).unique(),
   username: varchar('username', { length: 100 }).unique(),
+  displayName: varchar('display_name', { length: 100 }),
   passwordHash: text('password_hash'),
   avatarUrl: text('avatar_url'),
+  bannerUrl: text('banner_url'),
   role: varchar('role', { length: 20 }).default('reader').notNull(), // 'reader' | 'admin'
   isAuthor: boolean('is_author').default(false).notNull(),
   isTranslator: boolean('is_translator').default(false).notNull(),

@@ -20,7 +20,8 @@ adminRouter.use('*', async (c, next) => {
 
 function publicUser(u: typeof users.$inferSelect) {
   return {
-    id: u.id, externalId: u.externalId, email: u.email, username: u.username, avatarUrl: u.avatarUrl,
+    id: u.id, externalId: u.externalId, email: u.email, username: u.username,
+    displayName: u.displayName, avatarUrl: u.avatarUrl, bannerUrl: u.bannerUrl,
     role: u.role, isAuthor: u.isAuthor, isTranslator: u.isTranslator,
     createdAt: u.createdAt?.toISOString() ?? null,
   };
