@@ -1,4 +1,4 @@
-import { pgTable, varchar, text, integer, real, boolean, timestamp, uuid, jsonb, bigint, uniqueIndex } from 'drizzle-orm/pg-core';
+import { pgTable, varchar, text, integer, smallint, real, boolean, timestamp, uuid, jsonb, bigint, uniqueIndex, index } from 'drizzle-orm/pg-core';
 
 // 1. جدول المستخدمين (Users Table)
 // externalId = stable client identity (mobile `google_<id>`). Auto-provisioned
@@ -172,3 +172,61 @@ export const authorApiKeys = pgTable('author_api_keys', {
 function serial(name: string) {
   return integer(name).generatedAlwaysAsIdentity();
 }
+
+function bigserial(name: string) {
+  return bigint(name, { mode: 'number' }).generatedAlwaysAsIdentity();
+}
+
+// 10. Native comments (app-native novels only: sourceId 'internal:published').
+// Threading: parentId NULL = root; reply sets parentId + rootId + depth 1..3.
+// chapterNumber NULL = novel-level comment, else chapter-scoped.
+// Soft moderation via status; counters denormalized (no count(*) per request).
+export const comments = pgTable('comments', {
+  id: bigserial('id').primaryKey(),
+  novelId: varchar('novel_id', { length: 100 }).references(() => novels.id, { onDelete: 'cascade' }).notNull(),
+  chapterNumber: integer('chapter_number'),
+  userId: uuid('user_id').references(() => users.id, { onDelete: 'set null' }),
+  parentId: bigint('parent_id', { mode: 'number' }),
+  rootId: bigint('root_id', { mode: 'number' }),
+  depth: smallint('depth').default(0).notNull(),
+  body: text('body').notNull(),
+  bodyHash: varchar('body_hash', { length: 64 }).notNull(),
+  status: varchar('status', { length: 20 }).default('visible').notNull(), // visible|pending|hidden|deleted
+  likesCount: integer('likes_count').default(0).notNull(),
+  repliesCount: integer('replies_count').default(0).notNull(),
+  reportsCount: integer('reports_count').default(0).notNull(),
+  editCount: integer('edit_count').default(0).notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+  editedAt: timestamp('edited_at', { withTimezone: true }),
+  deletedAt: timestamp('deleted_at', { withTimezone: true }),
+  decidedBy: uuid('decided_by').references(() => users.id, { onDelete: 'set null' }),
+  decidedReason: varchar('decided_reason', { length: 500 }),
+}, (t) => ({
+  rootsNewIdx: index('comments_roots_new').on(t.novelId, t.chapterNumber, t.createdAt, t.id),
+  rootsTopIdx: index('comments_roots_top').on(t.novelId, t.chapterNumber, t.likesCount, t.id),
+  threadIdx: index('comments_thread').on(t.rootId, t.createdAt, t.id),
+  parentIdx: index('comments_parent').on(t.parentId, t.createdAt, t.id),
+  userIdx: index('comments_user').on(t.userId, t.createdAt, t.id),
+}));
+
+// 11. Comment votes (like/dislike). PK doubles as toggle uniqueness guard.
+export const commentVotes = pgTable('comment_votes', {
+  commentId: bigint('comment_id', { mode: 'number' }).references(() => comments.id, { onDelete: 'cascade' }).notNull(),
+  userId: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
+  value: smallint('value').default(1).notNull(), // 1 | -1 (UI may expose like-only v1)
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+}, (t) => ({
+  votesPk: uniqueIndex('comment_votes_pkey').on(t.commentId, t.userId),
+  userLookupIdx: index('comment_votes_user').on(t.userId, t.commentId),
+}));
+
+// 12. Moderation audit log (append-only; never updated).
+export const commentModLog = pgTable('comment_mod_log', {
+  id: bigserial('id').primaryKey(),
+  commentId: bigint('comment_id', { mode: 'number' }).references(() => comments.id, { onDelete: 'cascade' }).notNull(),
+  action: varchar('action', { length: 20 }).notNull(), // hide|restore|approve|delete|hard_delete|report
+  actorId: uuid('actor_id').references(() => users.id, { onDelete: 'set null' }),
+  reason: varchar('reason', { length: 500 }),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+});

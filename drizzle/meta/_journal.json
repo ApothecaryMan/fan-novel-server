@@ -36,6 +36,13 @@
       "when": 1789516550060,
       "tag": "0004_secret_tattoo",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1789555576197,
+      "tag": "0005_tidy_ultimates",
+      "breakpoints": true
     }
   ]
 }

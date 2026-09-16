@@ -14,11 +14,13 @@ CORS_ORIGIN = "*"
 NODE_ENV = "production"
 GOOGLE_WEB_CLIENT_ID = "195474249564-v6tt0n741b80ma3gjne2vtptack749ks.apps.googleusercontent.com"
 GOOGLE_ANDROID_CLIENT_ID = "195474249564-2fo5557utpnh2hhoncvg6aj2hf2q51hf.apps.googleusercontent.com"
+# Admin bootstrap (plain email, not a secret): auto-promoted to admin on Google login.
+ADMIN_EMAILS = "mohamedrezk.mar@gmail.com"
 
 # Required secrets (wrangler secret put):
 #   DATABASE_URL  — Neon pooled connection string (https, no Hyperdrive needed; neon-http driver)
 #   JWT_SECRET    — long random string
-#   ADMIN_EMAILS  — comma-separated admin emails (auto-promote on login)
+# (A ADMIN_EMAILS secret would override the var above; prefer the var.)
 #
 # Google OAuth audience check (plain vars, not secrets — must match app.json extra.googleAuth):
 #   GOOGLE_WEB_CLIENT_ID

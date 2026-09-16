@@ -6,6 +6,7 @@ import { prettyJSON } from 'hono/pretty-json';
 import { requestId } from 'hono/request-id';
 import { novelsRouter } from './routes/novels.js';
 import { chaptersRouter, chaptersTimelineRouter } from './routes/chapters.js';
+import { commentsNovelsRouter, commentsRouter, adminCommentsRouter } from './routes/comments.js';
 import { uploadRouter } from './routes/upload.js';
 import { authRouter } from './routes/auth.js';
 import { authorKeysRouter } from './routes/authorKeys.js';
@@ -35,6 +36,8 @@ export function createApp() {
   app.use('/api/v1/author/keys*', rateLimit(10));
   app.use('/api/v1/upload/*', rateLimit(20));
   app.use('/api/v1/admin/*', rateLimit(60));
+  app.use('/api/v1/novels/*/comments*', rateLimit(60));
+  app.use('/api/v1/comments/*', rateLimit(60));
 
   // Ensure DB is initialized (pg Pool on Node, neon-http on Workers) before routes run.
   app.use('*', async (_c, next) => {
@@ -116,6 +119,9 @@ export function createApp() {
   app.route('/api/v1/admin', adminRouter);
   app.route('/api/v1/novels', novelsRouter);
   app.route('/api/v1/novels', chaptersRouter);
+  app.route('/api/v1/novels', commentsNovelsRouter);
+  app.route('/api/v1/comments', commentsRouter);
+  app.route('/api/v1/admin/comments', adminCommentsRouter);
   app.route('/api/v1/chapters', chaptersTimelineRouter);
   app.route('/api/v1/upload', uploadRouter);
 
@@ -134,6 +140,11 @@ export function createApp() {
         chapterTimeline: 'POST /api/v1/chapters/timeline',
         todayChapters: 'GET /api/v1/chapters/today',
         uploadCover: 'POST /api/v1/upload/cover',
+        commentsList: 'GET /api/v1/novels/:novelId/comments?chapter&cursor&limit&sort=new|top',
+        commentsCount: 'GET /api/v1/novels/:novelId/comments/count',
+        commentReplies: 'GET /api/v1/novels/:novelId/comments/:commentId/replies',
+        commentPost: 'POST /api/v1/novels/:novelId/comments',
+        commentVote: 'POST /api/v1/comments/:id/vote',
       authorMine: 'GET /api/v1/author/mine?kind=author|translator',
       authorRequests: 'POST /api/v1/author/requests',
       myRequests: 'GET /api/v1/author/requests/mine',

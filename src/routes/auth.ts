@@ -138,12 +138,17 @@ authRouter.post('/google', async (c) => {
   }
 
   let user = memUsers.find((u) => u.email === email || u.externalId === externalId);
+  // Memory fallback must honor the same admin bootstrap as the DB path,
+  // otherwise an admin email always logs in as reader when DATABASE_URL
+  // is unset/down, and any in-memory promotion is lost on re-login.
+  const memBootstrapAdmin = adminEmails().includes(email.toLowerCase());
   if (!user) {
-    user = { id: externalId, externalId, email, name: displayName, displayName, username: username || displayName, avatarUrl: cleanMediaUrl(avatarUrl) ?? null, bannerUrl: cleanMediaUrl(bannerUrl) ?? null, role: 'reader', provider: 'google', createdAt: new Date().toISOString() };
+    user = { id: externalId, externalId, email, name: displayName, displayName, username: username || displayName, avatarUrl: cleanMediaUrl(avatarUrl) ?? null, bannerUrl: cleanMediaUrl(bannerUrl) ?? null, role: memBootstrapAdmin ? 'admin' : 'reader', provider: 'google', createdAt: new Date().toISOString() };
     memUsers.push(user);
   } else {
     if (name) user.name = name;
     if (username) user.username = username;
+    if (memBootstrapAdmin && user.role !== 'admin') user.role = 'admin';
     const healedAvatar = keepRemoteOrHeal(user.avatarUrl, avatarUrl);
     if (healedAvatar !== undefined) user.avatarUrl = healedAvatar;
     const healedBanner = keepRemoteOrHeal(user.bannerUrl, bannerUrl);
@@ -153,21 +158,28 @@ authRouter.post('/google', async (c) => {
   return c.json({ success: true, message: 'تم تسجيل الدخول بحساب Google بنجاح', user, token });
 });
 
-// GET /api/v1/auth/me
+// GET /api/v1/auth/me — returns the authoritative DB role plus a freshly
+// signed token, so a client holding a stale pre-grant token self-heals
+// (role upgrades included) by refetching /me on app startup.
 authRouter.get('/me', requireAuth, async (c) => {
   const payload = c.get('authUser') as { sub?: string };
   const sub = payload.sub ?? '';
   if (isDbAvailable()) {
     try {
       const found = await db.select().from(users).where(eq(users.externalId, sub)).limit(1);
-      if (found[0]) return c.json({ user: toPublic(found[0]) });
+      if (found[0]) {
+        const row = found[0];
+        const fresh = await signToken({ id: row.externalId ?? sub, email: row.email!, role: row.role ?? 'reader' });
+        return c.json({ user: toPublic(row), token: fresh });
+      }
     } catch (err) {
       console.error('[auth] db me failed', err); noteDbFailure();
     }
   }
   const user = memUsers.find((u) => u.id === sub || u.externalId === sub);
   if (!user) return c.json({ error: 'المستخدم غير موجود' }, 404);
-  return c.json({ user });
+  const fresh = await signToken({ id: user.externalId, email: user.email, role: user.role ?? 'reader' });
+  return c.json({ user, token: fresh });
 });
 
 // PATCH /api/v1/auth/me — explicit profile edit (display name, handle,
