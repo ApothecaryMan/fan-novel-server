@@ -124,8 +124,14 @@ authRouter.post('/google', async (c) => {
         await db.update(users).set(patch).where(eq(users.id, row.id));
         row = { ...row, ...patch };
       }
-      const token = await signToken({ id: externalId, email: row.email!, role: row.role ?? 'reader' });
-      return c.json({ success: true, message: 'تم تسجيل الدخول بحساب Google بنجاح', user: toPublic({ ...row, externalId }), token });
+      // Stable identity: the token sub must be the stored externalId, not the
+      // freshly computed one. Finding by email with a different googleId
+      // (email-only first login, changed Google ID) otherwise mints a token
+      // that getCaller can never resolve -> 401 'غير مصرح' on every
+      // authenticated call (/me, /author/requests, /admin/*).
+      const stableExternalId = row.externalId ?? externalId;
+      const token = await signToken({ id: stableExternalId, email: row.email!, role: row.role ?? 'reader' });
+      return c.json({ success: true, message: 'تم تسجيل الدخول بحساب Google بنجاح', user: toPublic({ ...row, externalId: stableExternalId }), token });
     } catch (err) {
       console.error('[auth] db login failed, memory fallback', err); noteDbFailure();
     }
