@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
-import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, inArray, lt, or, sql } from 'drizzle-orm';
 import { db, isDbAvailable, noteDbFailure } from '../database/db.js';
 import { chapters, comments, commentModLog, commentVotes, novels, users } from '../database/schema.js';
 import { requireAuth } from '../middleware/auth.js';
@@ -228,13 +228,7 @@ async function checkCooldown(userId: string, cooldownS: number): Promise<number>
         .from(comments)
         .where(and(eq(comments.userId, userId), sql`${comments.createdAt} > ${dayAgo}`));
       if (Number(n) >= DAILY_CAP) return 3600;
-      const lastBodies = await db
-        .select({ bodyHash: comments.bodyHash })
-        .from(comments)
-        .where(eq(comments.userId, userId))
-        .orderBy(desc(comments.createdAt))
-        .limit(3);
-      return lastBodies.length ? -lastBodies.length : 0; // negative = hashes follow, no wait
+      return 0;
     } catch (err) {
       console.error('[comments] cooldown check failed', err);
       noteDbFailure();
@@ -390,9 +384,18 @@ commentsNovelsRouter.get('/:novelId/comments', async (c) => {
     const order = sort === 'top' ? [desc(comments.likesCount), desc(comments.id)] : [desc(comments.createdAt), desc(comments.id)];
     let cursorCond;
     if (cursor) {
+      const cursorDate = new Date(cursor.t);
+      const byId = lt(comments.id, cursor.i);
+      const byTime = or(
+        lt(comments.createdAt, cursorDate),
+        and(eq(comments.createdAt, cursorDate), byId),
+      );
       cursorCond = sort === 'top'
-        ? sql`(${comments.likesCount}, ${comments.createdAt}, ${comments.id}) < (${cursor.s ?? 0}, ${new Date(cursor.t)}, ${cursor.i})`
-        : sql`(${comments.createdAt}, ${comments.id}) < (${new Date(cursor.t)}, ${cursor.i})`;
+        ? or(
+          lt(comments.likesCount, cursor.s ?? 0),
+          and(eq(comments.likesCount, cursor.s ?? 0), byTime),
+        )
+        : byTime;
     }
     const rows = await db.select().from(comments).where(cursorCond ? and(base, cursorCond) : base).orderBy(...order).limit(limit + 1);
     const hasMore = rows.length > limit;
@@ -519,7 +522,12 @@ commentsNovelsRouter.get('/:novelId/comments/:commentId/replies', async (c) => {
     if (!root || root.novelId !== novelId) return c.json({ success: false, error: 'التعليق غير موجود' }, 404);
     const threadId = (root.rootId as number) ?? root.id;
     const base = and(eq(comments.rootId, threadId), eq(comments.status, 'visible'));
-    const cursorCond = cursor ? sql`(${comments.createdAt}, ${comments.id}) > (${new Date(cursor.t)}, ${cursor.i})` : undefined;
+    const cursorCond = cursor
+      ? or(
+        gt(comments.createdAt, new Date(cursor.t)),
+        and(eq(comments.createdAt, new Date(cursor.t)), gt(comments.id, cursor.i)),
+      )
+      : undefined;
     const rows = await db.select().from(comments).where(cursorCond ? and(base, cursorCond) : base)
       .orderBy(asc(comments.createdAt), asc(comments.id)).limit(limit + 1);
     const hasMore = rows.length > limit;
@@ -632,9 +640,8 @@ commentsNovelsRouter.post('/:novelId/comments', prodGuard(requireAuth, rateLimit
     }).returning();
     const row = inserted[0];
     if (parent) {
-      const ids = [parent.id, rootId].filter((x): x is number => x != null && x !== parent.id);
-      const all = [parent.id, ...ids];
-      for (const pid of [...new Set(all)]) {
+      const bumpIds = [parent.id, rootId].filter((x): x is number => x != null);
+      for (const pid of [...new Set(bumpIds)]) {
         await db.update(comments).set({
           repliesCount: sql`${comments.repliesCount} + 1`,
           updatedAt: new Date(),
