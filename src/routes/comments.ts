@@ -280,10 +280,11 @@ async function novelExists(novelId: string): Promise<boolean> {
   if (isDbAvailable()) {
     try {
       const rows = await db.select({ id: novels.id }).from(novels).where(eq(novels.id, novelId)).limit(1);
-      if (rows[0]) return true;
+      return Boolean(rows[0]);
     } catch (err) {
       console.error('[comments] novel lookup failed', err);
       noteDbFailure();
+      return true; // DB error: stay open, let the query decide
     }
   }
   return true; // memory fallback accepts any novel id
