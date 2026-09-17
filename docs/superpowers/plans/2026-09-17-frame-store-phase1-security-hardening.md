@@ -8,7 +8,7 @@ The task checklist below is the original proposed sequence, not evidence that ea
 - [x] Two explicitly approved trial accounts deleted; post-deletion users 0, novels 1, chapters 35.
 - [x] Production secrets configuration reported completed by the user; values are not independently readable from Cloudflare.
 - [x] Additional approved ledger correction committed in the database: remove duplicate ledger IDs 6/7/8; correct checksums on 9/10/11. No application data/schema changes. Backup and independent post-commit verification: `/tmp/opencode/fan-novel-gate3-schema-audit/backups/2026-09-17T19-15-49-415Z/` and corresponding correction evidence JSON.
-- [ ] Apply and verify migration 0006 on Neon.
+- [x] Migration 0006 applied and independently verified on Neon (ledger ID 12, canonical hash/timestamp; nullable users.google_subject and valid unique constraint; users 0, novels 1, chapters 35). Evidence: `/tmp/opencode/fan-novel-gate3-schema-audit/0006-2026-09-17T19-27-10-642Z/postcommit-evidence.json`.
 - [ ] Deploy Worker and verify deployed version and health.
 - [ ] Real Google sign-in smoke test from the app (operator required).
 
