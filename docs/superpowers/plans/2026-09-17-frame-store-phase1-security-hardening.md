@@ -1,5 +1,20 @@
 # Frame Store Phase 1 Security Hardening Implementation Plan
 
+## Coordinated execution status (2026-09-17)
+
+The task checklist below is the original proposed sequence, not evidence that each exact command or intermediate commit was executed. Implementation was delivered together in `81bbb88`; isolated PostgreSQL verification subsequently passed all 114 tests. Do not replay completed work from unchecked boxes.
+
+- [x] Local implementation committed (`81bbb88`); 114 tests passed including four isolated PostgreSQL tests.
+- [x] Two explicitly approved trial accounts deleted; post-deletion users 0, novels 1, chapters 35.
+- [x] Production secrets configuration reported completed by the user; values are not independently readable from Cloudflare.
+- [x] Additional approved ledger correction committed in the database: remove duplicate ledger IDs 6/7/8; correct checksums on 9/10/11. No application data/schema changes. Backup and independent post-commit verification: `/tmp/opencode/fan-novel-gate3-schema-audit/backups/2026-09-17T19-15-49-415Z/` and corresponding correction evidence JSON.
+- [ ] Apply and verify migration 0006 on Neon.
+- [ ] Deploy Worker and verify deployed version and health.
+- [ ] Real Google sign-in smoke test from the app (operator required).
+
+No production deployment or migration 0006 is implied by the local test results. Ledger correction was a separately approved operational scope addition, supported by a live-schema comparison against SQL migrations 0000–0005.
+
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers-subagent-driven-development (recommended) or superpowers-executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Bind accounts permanently to verified Google subjects, lock authentication email against client writes, and fail closed on production configuration or account-storage failures.
