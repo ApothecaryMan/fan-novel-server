@@ -1,10 +1,18 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createApp } from '../app.js';
+
+beforeEach(() => {
+  vi.stubGlobal('__WORKER_ENV__', undefined);
+  vi.stubEnv('NODE_ENV', 'test');
+  vi.stubEnv('SYNC_OPEN', 'false');
+  vi.stubEnv('JWT_SECRET', 'development-fixture-signing-key');
+  vi.stubEnv('DATABASE_URL', undefined);
+  vi.stubEnv('ADMIN_EMAILS', 'admin@test.com');
+});
+afterEach(() => { vi.unstubAllEnvs(); vi.unstubAllGlobals(); });
 
 describe('admin role survives app restart (re-login + /me refresh)', () => {
   it('memory fallback promotes ADMIN_EMAILS on first and repeat logins', async () => {
-    process.env.ADMIN_EMAILS = 'admin@test.com';
-    delete process.env.DATABASE_URL;
     const app = createApp();
 
     const login = await app.request('/api/v1/auth/google', {
@@ -36,8 +44,6 @@ describe('admin role survives app restart (re-login + /me refresh)', () => {
   });
 
   it('non-admin stays reader', async () => {
-    process.env.ADMIN_EMAILS = 'admin@test.com';
-    delete process.env.DATABASE_URL;
     const app = createApp();
     const res = await app.request('/api/v1/auth/google', {
       method: 'POST',

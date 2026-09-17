@@ -1,11 +1,12 @@
 import { pgTable, varchar, text, integer, smallint, real, boolean, timestamp, uuid, jsonb, bigint, uniqueIndex, index } from 'drizzle-orm/pg-core';
 
 // 1. جدول المستخدمين (Users Table)
-// externalId = stable client identity (mobile `google_<id>`). Auto-provisioned
-// on first sync so offline-first clients never need a prior signup call.
+// Production identity is google_<verified subject>; sync cannot create accounts.
+// googleSubject is the permanent verified-identity anchor, not a migration aid.
 export const users = pgTable('users', {
   id: uuid('id').defaultRandom().primaryKey(),
   externalId: varchar('external_id', { length: 255 }).unique(),
+  googleSubject: varchar('google_subject', { length: 255 }).unique(),
   email: varchar('email', { length: 255 }).unique(),
   username: varchar('username', { length: 100 }).unique(),
   displayName: varchar('display_name', { length: 100 }),

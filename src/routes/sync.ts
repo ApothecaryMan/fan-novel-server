@@ -1,7 +1,7 @@
 import { Hono, type Context } from 'hono';
 import { and, eq, gt } from 'drizzle-orm';
 import { z } from 'zod';
-import { db, isDbAvailable } from '../database/db.js';
+import { db, isDbAvailable, noteDbFailure } from '../database/db.js';
 import { users, userLibrary, readingHistory, readingSessions } from '../database/schema.js';
 import { verifySubject } from '../middleware/auth.js';
 import { getEnv } from '../config/env.js';
@@ -14,8 +14,8 @@ export const syncRouter = new Hono();
 // UTC epoch ms). received_at is audit/GC only and is never compared.
 // Tombstone beats live regardless of clock; else larger updatedAt wins;
 // ties union category_ids. Sessions are append-only + idempotent.
-// Auth: SYNC_OPEN=false requires Bearer JWT; default true auto-provisions
-// the user by external_id (LAN-first threat model).
+// Production: closed sync, existing authenticated accounts only.
+// Explicit development/test mode may provision fixtures without auth email.
 // ==========================================
 
 export const CLIENT_CLOCK_SKEW_MS = 5 * 60 * 1000;
@@ -86,28 +86,26 @@ const unionStrings = (a: string[], b: string[]): string[] => {
   return [...a, ...b].map(String).filter((x) => (seen.has(x) ? false : (seen.add(x), true)));
 };
 
-async function provisionUser(externalId: string, email?: string, name?: string) {
-  const cleanEmail = (email || '').trim().toLowerCase() || null;
-  const cleanName = (name || '').slice(0, 100) || null;
-  await db
-    .insert(users)
-    .values({
-      externalId,
-      email: cleanEmail,
-      username: `user_${externalId.replace(/[^a-zA-Z0-9]/g, '').slice(0, 40) || 'x'}`,
-      avatarUrl: null
-    })
-    .onConflictDoNothing({ target: users.externalId });
-  const row = await db.select().from(users).where(eq(users.externalId, externalId)).then((r) => r[0]);
-  if (!row) throw new Error('user provision failed');
-  if ((cleanEmail && row.email !== cleanEmail) || (cleanName && !row.avatarUrl)) {
-    await db
-      .update(users)
-      .set({ email: cleanEmail ?? row.email, updatedAt: new Date() })
-      .where(eq(users.id, row.id));
+async function provisionUser(externalId: string) {
+  const [existing] = await db.select().from(users).where(eq(users.externalId, externalId)).limit(1);
+  if (existing || getEnv().isProd) return existing;
+  await db.insert(users).values({
+    externalId, email: null, googleSubject: null,
+    username: `user_${externalId.replace(/[^a-zA-Z0-9]/g, '').slice(0, 40) || 'x'}`,
+    avatarUrl: null,
+  }).onConflictDoNothing({ target: users.externalId });
+  return (await db.select().from(users).where(eq(users.externalId, externalId)).limit(1))[0];
+}
+
+// Catch account-resolution failures locally; never expose driver diagnostics.
+async function resolveSyncUser(c: Context, externalId: string) {
+  try {
+    const user = await provisionUser(externalId);
+    return user ?? c.json({ error: 'account not found' }, 401);
+  } catch {
+    noteDbFailure();
+    return c.json({ error: 'account storage unavailable' }, 503);
   }
-  void cleanName;
-  return row;
 }
 
 const num = (v: unknown, fallback = 0): number =>
@@ -139,7 +137,8 @@ syncRouter.post('/push', async (c) => {
     return c.json({ error: 'forbidden: token identity does not match user.externalId' }, 403);
   }
   const now = Date.now();
-  const user = await provisionUser(externalId, body.user?.email, body.user?.name);
+  const user = await resolveSyncUser(c, externalId);
+  if (user instanceof Response) return user;
 
   let appliedLibrary = 0;
   for (const e of body.library ?? []) {
@@ -272,7 +271,8 @@ syncRouter.post('/pull', async (c) => {
     return c.json({ error: 'forbidden: token identity does not match user.externalId' }, 403);
   }
   const since = num(body?.since, 0);
-  const user = await provisionUser(externalId, body.user?.email, body.user?.name);
+  const user = await resolveSyncUser(c, externalId);
+  if (user instanceof Response) return user;
 
   const library = await db
     .select()
@@ -344,7 +344,11 @@ syncRouter.post('/stats', async (c) => {
   const body = await c.req.json().catch(() => null);
   const externalId = typeof body?.user?.externalId === 'string' ? body.user.externalId : '';
   if (!externalId) return c.json({ error: 'user.externalId is required' }, 400);
-  const user = await provisionUser(externalId);
+  const authedSub = await authedSubject(c);
+  if (!getEnv().syncOpen && !authedSub) return c.json({ error: 'unauthorized' }, 401);
+  if (authedSub && authedSub !== externalId) return c.json({ error: 'forbidden' }, 403);
+  const user = await resolveSyncUser(c, externalId);
+  if (user instanceof Response) return user;
   const lib = await db.select({ id: userLibrary.id }).from(userLibrary).where(eq(userLibrary.userId, user.id));
   const hist = await db.select({ id: readingHistory.id }).from(readingHistory).where(eq(readingHistory.userId, user.id));
   const sess = await db.select({ id: readingSessions.id }).from(readingSessions).where(eq(readingSessions.userId, user.id));

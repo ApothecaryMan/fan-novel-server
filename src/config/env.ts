@@ -4,9 +4,9 @@ const envSchema = z.object({
   PORT: z.coerce.number().default(4000),
   DATABASE_URL: z.string().min(1).optional(),
   JWT_SECRET: z.string().min(1).optional(),
-  SYNC_OPEN: z.string().default('true'),
+  SYNC_OPEN: z.enum(['true', 'false']).optional(),
   CORS_ORIGIN: z.string().default('*'),
-  NODE_ENV: z.string().default('development'),
+  NODE_ENV: z.enum(['production', 'development', 'test']),
   REDIS_URL: z.string().optional(),
   UPLOAD_MAX_MB: z.coerce.number().default(2),
   // R2 / S3-compatible object storage (optional; falls back to local disk on Node)
@@ -18,6 +18,18 @@ const envSchema = z.object({
   ADMIN_EMAILS: z.string().default(''),
   GOOGLE_WEB_CLIENT_ID: z.string().optional(),
   GOOGLE_ANDROID_CLIENT_ID: z.string().optional(),
+}).superRefine((value, ctx) => {
+  if (value.NODE_ENV !== 'production') return;
+  const invalid = (field: string) => ctx.addIssue({ code: z.ZodIssueCode.custom, path: [field], message: 'invalid configuration' });
+  try {
+    const url = new URL(value.DATABASE_URL ?? '');
+    if (!['postgres:', 'postgresql:'].includes(url.protocol) || !url.hostname || url.pathname.length < 2) invalid('DATABASE_URL');
+  } catch { invalid('DATABASE_URL'); }
+  if (value.SYNC_OPEN !== 'false') invalid('SYNC_OPEN');
+  if (![value.GOOGLE_WEB_CLIENT_ID, value.GOOGLE_ANDROID_CLIENT_ID].some((v) => v && v.trim().length > 0)) invalid('GOOGLE_WEB_CLIENT_ID');
+  const secret = value.JWT_SECRET ?? '';
+  if (new TextEncoder().encode(secret).length < 32 || !secret.trim() ||
+      secret.trim().startsWith('web-novel-dev-') || secret.trim() === 'change-me-in-production') invalid('JWT_SECRET');
 });
 
 export type Env = z.infer<typeof envSchema> & {
@@ -30,14 +42,10 @@ declare global {
   var __WORKER_ENV__: Record<string, string | undefined> | undefined;
 }
 
-let cached: Env | null = null;
-let cachedKey = '';
-
 function readSource(): Record<string, string | undefined> {
-  const w = typeof globalThis !== 'undefined' ? (globalThis as any).__WORKER_ENV__ : undefined;
-  const proc = typeof process !== 'undefined' ? (process.env as Record<string, string | undefined>) : {};
-  if (w) return { ...proc, ...w };
-  return { ...proc };
+  // Do not inherit process defaults into a Worker with missing bindings.
+  if (globalThis.__WORKER_ENV__ !== undefined) return { ...globalThis.__WORKER_ENV__ };
+  return typeof process === 'undefined' ? {} : { ...process.env };
 }
 
 /** Called by the Workers entry on every request (bindings differ per env). */
@@ -46,43 +54,17 @@ export function setWorkerEnv(bindings: Record<string, unknown>): void {
   for (const [k, v] of Object.entries(bindings ?? {})) {
     if (typeof v === 'string') flat[k] = v;
   }
-  (globalThis as any).__WORKER_ENV__ = flat;
-  cached = null;
-  cachedKey = '';
+  globalThis.__WORKER_ENV__ = flat;
 }
 
 export function getEnv(): Env {
-  const src = readSource();
-  const key = `${src.DATABASE_URL ?? ''}|${src.JWT_SECRET ?? ''}|${src.SYNC_OPEN}|${src.CORS_ORIGIN}|${src.NODE_ENV}|${src.R2_BUCKET ?? ''}|${src.ADMIN_EMAILS ?? ''}|${src.GOOGLE_WEB_CLIENT_ID ?? ''}|${src.GOOGLE_ANDROID_CLIENT_ID ?? ''}`;
-  if (cached && key === cachedKey) return cached;
-  const parsed = envSchema.safeParse(src);
+  const parsed = envSchema.safeParse(readSource());
   if (!parsed.success) {
-    console.warn('[env] invalid env, using defaults:', parsed.error.issues);
+    const fields = [...new Set(parsed.error.issues.map((issue) => String(issue.path[0] ?? 'environment')))];
+    throw new Error(`Invalid environment fields: ${fields.join(', ')}`);
   }
-  const e = (parsed.success ? parsed.data : {}) as z.infer<typeof envSchema>;
-  const NODE_ENV = e.NODE_ENV ?? 'development';
-  cachedKey = key;
-  cached = {
-    PORT: e.PORT ?? 4000,
-    DATABASE_URL: e.DATABASE_URL,
-    JWT_SECRET: e.JWT_SECRET,
-    SYNC_OPEN: e.SYNC_OPEN ?? 'true',
-    CORS_ORIGIN: e.CORS_ORIGIN ?? '*',
-    NODE_ENV,
-    REDIS_URL: e.REDIS_URL,
-    UPLOAD_MAX_MB: e.UPLOAD_MAX_MB ?? 2,
-    R2_ENDPOINT: e.R2_ENDPOINT,
-    R2_BUCKET: e.R2_BUCKET,
-    R2_ACCESS_KEY: e.R2_ACCESS_KEY,
-    R2_SECRET_KEY: e.R2_SECRET_KEY,
-    R2_PUBLIC_URL: e.R2_PUBLIC_URL,
-    ADMIN_EMAILS: e.ADMIN_EMAILS ?? '',
-    GOOGLE_WEB_CLIENT_ID: e.GOOGLE_WEB_CLIENT_ID,
-    GOOGLE_ANDROID_CLIENT_ID: e.GOOGLE_ANDROID_CLIENT_ID,
-    isProd: NODE_ENV === 'production',
-    syncOpen: (e.SYNC_OPEN ?? 'true') !== 'false',
-  };
-  return cached;
+  const value = parsed.data;
+  return { ...value, isProd: value.NODE_ENV === 'production', syncOpen: (value.SYNC_OPEN ?? 'true') === 'true' };
 }
 
 export function adminEmails(): string[] {

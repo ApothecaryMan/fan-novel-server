@@ -43,6 +43,13 @@
       "when": 1789555576197,
       "tag": "0005_tidy_ultimates",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1789603200000,
+      "tag": "0006_google_identity_binding",
+      "breakpoints": true
     }
   ]
 }
