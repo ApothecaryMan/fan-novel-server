@@ -9,7 +9,7 @@ The task checklist below is the original proposed sequence, not evidence that ea
 - [x] Production secrets configuration reported completed by the user; values are not independently readable from Cloudflare.
 - [x] Additional approved ledger correction committed in the database: remove duplicate ledger IDs 6/7/8; correct checksums on 9/10/11. No application data/schema changes. Backup and independent post-commit verification: `/tmp/opencode/fan-novel-gate3-schema-audit/backups/2026-09-17T19-15-49-415Z/` and corresponding correction evidence JSON.
 - [x] Migration 0006 applied and independently verified on Neon (ledger ID 12, canonical hash/timestamp; nullable users.google_subject and valid unique constraint; users 0, novels 1, chapters 35). Evidence: `/tmp/opencode/fan-novel-gate3-schema-audit/0006-2026-09-17T19-27-10-642Z/postcommit-evidence.json`.
-- [ ] Deploy Worker and verify deployed version and health.
+- [x] Deployed approved source `81bbb88` to `https://fan-novel-server.mohamed1232003.workers.dev`; active version `12f18023-060a-467c-880d-9902bedbdfea`, 100% traffic. GET /health returned 200 with db up (actual SQL check); unauthenticated GET /api/v1/auth/me returned 401. Evidence: `/tmp/opencode/fan-novel-gate4-20260917/final-success.json`. Wrangler applied approved local COVERS R2 binding configuration over a reported remote difference; no bucket/object operations. Prior version: `2ba331ec-816c-4df6-bed6-c752561cdb85`.
 - [ ] Real Google sign-in smoke test from the app (operator required).
 
 No production deployment or migration 0006 is implied by the local test results. Ledger correction was a separately approved operational scope addition, supported by a live-schema comparison against SQL migrations 0000–0005.
