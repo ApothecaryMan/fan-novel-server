@@ -5,6 +5,7 @@ import { migrate } from 'drizzle-orm/node-postgres/migrator';
 import { eq } from 'drizzle-orm';
 import * as schema from '../database/schema.js';
 import { resolveGoogleAccount } from './googleAccount.js';
+import { UsernameTakenError } from './usernames.js';
 import type { Db } from '../database/db.js';
 
 const url = process.env.PHASE1_PG_URL;
@@ -79,5 +80,33 @@ describe.skipIf(!url)('isolated PostgreSQL provisioning', () => {
       .rejects.toMatchObject({ status: 409 });
     const [unchanged] = await database.select().from(schema.users).where(eq(schema.users.id, first.id));
     expect(unchanged).toEqual(first);
+  });
+  it('concurrent creations racing the same explicit username converge to one holder', async () => {
+    const attempts = await Promise.allSettled([
+      resolveGoogleAccount(database, { sub: 'pg-race-u1', email: 'pg-race-a@test.com' }, { username: 'race_handle' }, false, 'pg-race-u1'),
+      resolveGoogleAccount(database, { sub: 'pg-race-u2', email: 'pg-race-b@test.com' }, { username: 'race_handle' }, false, 'pg-race-u2'),
+    ]);
+    expect(attempts.filter((a) => a.status === 'fulfilled')).toHaveLength(1);
+    const rejected = attempts.find((a) => a.status === 'rejected') as PromiseRejectedResult;
+    expect(rejected.reason).toBeInstanceOf(UsernameTakenError);
+    expect((rejected.reason as { suggestions: string[] }).suggestions).toEqual(['race_handle_1', 'race_handle_2', 'race_handle_3']);
+    const holders = await database.select().from(schema.users).where(eq(schema.users.username, 'race_handle'));
+    expect(holders).toHaveLength(1);
+  });
+  it('username-less concurrent creations both succeed with null usernames', async () => {
+    const [a, b] = await Promise.all([
+      resolveGoogleAccount(database, { sub: 'pg-null-1', email: 'pg-null-1@test.com' }, { name: 'Null One' }, false, 'pg-null-1'),
+      resolveGoogleAccount(database, { sub: 'pg-null-2', email: 'pg-null-2@test.com' }, { name: 'Null Two' }, false, 'pg-null-2'),
+    ]);
+    expect(a.username).toBeNull();
+    expect(b.username).toBeNull();
+    expect(await database.select().from(schema.users)).toHaveLength(2);
+  });
+  it('grandfathered-row login leaves the legacy username untouched', async () => {
+    await database.insert(schema.users).values({ externalId: 'google_pg-grand-1', googleSubject: 'pg-grand-1',
+      email: 'pg-grand@test.com', username: 'Legacy_Name', displayName: 'Legacy' });
+    const row = await resolveGoogleAccount(database, { sub: 'pg-grand-1', email: 'pg-grand@test.com' }, { name: 'Ignored' }, false, 'pg-grand-1');
+    expect(row.username).toBe('Legacy_Name');
+    expect(row.displayName).toBe('Legacy');
   });
 });
