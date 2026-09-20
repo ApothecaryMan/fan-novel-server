@@ -91,7 +91,7 @@ async function provisionUser(externalId: string) {
   if (existing || getEnv().isProd) return existing;
   await db.insert(users).values({
     externalId, email: null, googleSubject: null,
-    username: `user_${externalId.replace(/[^a-zA-Z0-9]/g, '').slice(0, 40) || 'x'}`,
+    username: null,
     avatarUrl: null,
   }).onConflictDoNothing({ target: users.externalId });
   return (await db.select().from(users).where(eq(users.externalId, externalId)).limit(1))[0];
