@@ -16,7 +16,7 @@ const memUsers: any[] = [];
 
 const googleSchema = z.object({
   name: z.string().max(100).optional(),
-  username: z.string().max(100).optional(),
+  username: z.string().regex(USERNAME_RE, 'اسم المستخدم: 3-20 حرف (أحرف وأرقام و_)').optional(),
   email: z.string().trim().email().max(255),
   avatarUrl: z.string().max(2000).optional(),
   bannerUrl: z.string().max(2000).optional(),
@@ -30,7 +30,7 @@ import { USERNAME_RE } from './usernames.js';
 function toPublic(u: any) {
   return {
     id: u.externalId ?? u.id, externalId: u.externalId ?? u.id, email: u.email,
-    name: u.displayName ?? u.username ?? u.name, username: u.username ?? u.name,
+    name: u.displayName ?? null, username: u.username ?? null,
     avatarUrl: u.avatarUrl, bannerUrl: u.bannerUrl ?? null,
     role: u.role ?? 'reader', isAuthor: Boolean(u.isAuthor), isTranslator: Boolean(u.isTranslator),
     provider: 'google',
@@ -68,9 +68,10 @@ authRouter.post('/google', async (c) => {
     // Absent-token fixtures cannot read or write persistent accounts even if a DB exists.
     let user = memUsers.find((u) => u.externalId === externalId);
     if (!user) {
-      const displayName = input.name || input.username || email.split('@')[0];
+      const displayName = (input.name || email.split('@')[0]).slice(0, 100);
+      const explicit = typeof input.username === 'string' && USERNAME_RE.test(input.username) ? input.username : null;
       user = { id: externalId, externalId, googleSubject: identity?.sub ?? null, email,
-        displayName, username: input.username || displayName,
+        displayName, username: explicit,
         avatarUrl: cleanMediaUrl(input.avatarUrl) ?? null, bannerUrl: cleanMediaUrl(input.bannerUrl) ?? null,
         role: bootstrapAdmin ? 'admin' : 'reader' };
       memUsers.push(user);
@@ -78,7 +79,7 @@ authRouter.post('/google', async (c) => {
       user.email = email;
       if (bootstrapAdmin) user.role = 'admin';
       if (input.name) user.displayName = input.name;
-      if (input.username) user.username = input.username;
+      if (input.username !== undefined && USERNAME_RE.test(input.username)) user.username = input.username;
       if (!cleanMediaUrl(user.avatarUrl)) user.avatarUrl = cleanMediaUrl(input.avatarUrl) ?? user.avatarUrl;
       if (!cleanMediaUrl(user.bannerUrl)) user.bannerUrl = cleanMediaUrl(input.bannerUrl) ?? user.bannerUrl;
     }
