@@ -3,6 +3,7 @@ import { HTTPException } from 'hono/http-exception';
 import type { Db } from '../database/db.js';
 import { users } from '../database/schema.js';
 import type { VerifiedGoogleIdentity } from './googleIdentity.js';
+import { USERNAME_RE, UsernameTakenError, suggestUsernames } from './usernames.js';
 
 export function isUniqueConflict(error: unknown): boolean {
   let current = error;
@@ -31,12 +32,24 @@ export async function resolveGoogleAccount(database: Db, identity: VerifiedGoogl
   };
   let row = await find();
   if (!row) {
+    if (input.username !== undefined && !USERNAME_RE.test(input.username)) {
+      throw new HTTPException(400, { message: 'invalid Google login payload' });
+    }
+    const explicit = typeof input.username === 'string' && USERNAME_RE.test(input.username) ? input.username : null;
+    if (explicit) {
+      const clash = await database.select({ id: users.id }).from(users).where(eq(users.username, explicit)).limit(1);
+      if (clash[0]) {
+        const suggestions = await suggestUsernames(explicit, async (candidate) =>
+          (await database.select({ id: users.id }).from(users).where(eq(users.username, candidate)).limit(1)).length > 0);
+        throw new UsernameTakenError(suggestions);
+      }
+    }
     try {
-      const displayName = input.name || input.username || identity.email.split('@')[0];
+      const displayName = (input.name || identity.email.split('@')[0]).slice(0, 100);
       const inserted = await database.insert(users).values({
         externalId, googleSubject: identity.sub, email: identity.email,
-        username: (input.username || displayName).slice(0, 100),
-        displayName: displayName.slice(0, 100),
+        username: explicit,
+        displayName,
         avatarUrl: cleanMediaUrl(input.avatarUrl) ?? null,
         bannerUrl: cleanMediaUrl(input.bannerUrl) ?? null,
         role: bootstrapAdmin ? 'admin' : 'reader',
@@ -46,7 +59,20 @@ export async function resolveGoogleAccount(database: Db, identity: VerifiedGoogl
       console.info(JSON.stringify({ event: 'account.provisioned', requestId, accountId: row.id, outcome: 'created' }));
       return assertCanonical(row);
     } catch (error) {
+      if (error instanceof UsernameTakenError) throw error;
       if (!isUniqueConflict(error)) throw error;
+      if (explicit) {
+        const holder = await database.select({ id: users.id }).from(users)
+          .where(eq(users.username, explicit)).limit(1);
+        if (holder[0]) {
+          const committed = await find();
+          if (!committed) {
+            const suggestions = await suggestUsernames(explicit, async (candidate) =>
+              (await database.select({ id: users.id }).from(users).where(eq(users.username, candidate)).limit(1)).length > 0);
+            throw new UsernameTakenError(suggestions);
+          }
+        }
+      }
       const committed = await find();
       if (!committed || committed.email !== identity.email) {
         throw new HTTPException(409, { message: 'account identity conflict' });
