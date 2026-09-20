@@ -24,8 +24,8 @@ const googleSchema = z.object({
   idToken: z.string().optional(),
 });
 
-// Client display name / handle rules (mirrors the mobile app).
-const USERNAME_RE = /^[a-zA-Z0-9_]{3,20}$/;
+// Canonical handle rules live in ./usernames.js (mirrors the mobile app).
+import { USERNAME_RE } from './usernames.js';
 
 function toPublic(u: any) {
   return {
