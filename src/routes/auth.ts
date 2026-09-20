@@ -25,7 +25,7 @@ const googleSchema = z.object({
 });
 
 // Canonical handle rules live in ./usernames.js (mirrors the mobile app).
-import { USERNAME_RE } from './usernames.js';
+import { USERNAME_RE, UsernameTakenError, suggestUsernames } from './usernames.js';
 
 function toPublic(u: any) {
   return {
@@ -86,6 +86,9 @@ authRouter.post('/google', async (c) => {
     const token = await signToken({ id: user.externalId, email: user.email, role: user.role });
     return c.json({ success: true, message: 'تم تسجيل الدخول بحساب Google بنجاح', user: toPublic(user), token });
   } catch (error) {
+    if (error instanceof UsernameTakenError) {
+      return c.json({ error: 'اسم المستخدم محجوز بالفعل', code: 'username_taken', suggestions: error.suggestions }, 409);
+    }
     return accountError(c, error);
   }
 });
@@ -110,6 +113,36 @@ authRouter.get('/me', requireAuth, async (c) => {
   return c.json({ user: toPublic(user), token });
 });
 
+// GET /api/v1/auth/username/availability?username=<candidate>
+// Authenticated single-candidate live check. 200 for both free and taken
+// (taken is an expected answer, not an error); 400 for malformed input
+// with no suggestions; 401 via requireAuth; 503 on storage failure.
+authRouter.get('/username/availability', requireAuth, async (c) => {
+  const sub = String(c.get('authUser')?.sub ?? '');
+  const candidate = (c.req.query('username') ?? '').trim();
+  if (!USERNAME_RE.test(candidate)) {
+    return c.json({ error: 'اسم المستخدم: 3-20 حرف (أحرف وأرقام و_)' }, 400);
+  }
+  const memFallback = !isDbAvailable() || (!getEnv().isProd && sub.startsWith('dev_'));
+  try {
+    if (memFallback) {
+      if (!isDbAvailable() && getEnv().isProd) return c.json({ error: 'account storage unavailable' }, 503);
+      const taken = memUsers.some((u) => u.username === candidate);
+      if (!taken) return c.json({ available: true, suggestions: [] });
+      const suggestions = await suggestUsernames(candidate, async (name) => memUsers.some((u) => u.username === name));
+      return c.json({ available: false, suggestions });
+    }
+    const rows = await db.select({ id: users.id }).from(users).where(eq(users.username, candidate)).limit(1);
+    if (rows.length === 0) return c.json({ available: true, suggestions: [] });
+    const suggestions = await suggestUsernames(candidate, async (name) =>
+      (await db.select({ id: users.id }).from(users).where(eq(users.username, name)).limit(1)).length > 0);
+    return c.json({ available: false, suggestions });
+  } catch (error) {
+    if (error instanceof HTTPException) return c.json({ error: error.message }, error.status);
+    noteDbFailure();
+    return c.json({ error: 'account storage unavailable' }, 503);
+  }
+});
 // PATCH /api/v1/auth/me — explicit profile edit (display name, handle,
 // avatar, banner). Unlike POST /google (fill-or-heal), this overwrites:
 // media URLs must be remote http(s) — device file URIs are rejected.
@@ -142,7 +175,11 @@ authRouter.patch('/me', requireAuth, async (c) => {
       if (!row) return c.json({ error: 'account not found' }, 401);
       if (username !== undefined && username !== row.username) {
         const clash = await db.select({ id: users.id }).from(users).where(eq(users.username, username)).limit(1);
-        if (clash[0]) return c.json({ error: 'اسم المستخدم محجوز بالفعل' }, 409);
+        if (clash[0]) {
+          const suggestions = await suggestUsernames(username, async (name) =>
+            (await db.select({ id: users.id }).from(users).where(eq(users.username, name)).limit(1)).length > 0);
+          return c.json({ error: 'اسم المستخدم محجوز بالفعل', code: 'username_taken', suggestions }, 409);
+        }
       }
       const patch: Record<string, unknown> = { updatedAt: new Date() };
       if (username !== undefined) patch.username = username;
@@ -153,6 +190,19 @@ authRouter.patch('/me', requireAuth, async (c) => {
       if (!updated) return c.json({ error: 'account not found' }, 401);
       return c.json({ success: true, user: toPublic({ ...updated, externalId: row.externalId }) });
     } catch (error) {
+      if (isUniqueConflict(error) && username !== undefined) {
+        try {
+          const holder = await db.select({ id: users.id }).from(users).where(eq(users.username, username)).limit(1);
+          if (holder[0]) {
+            const suggestions = await suggestUsernames(username, async (name) =>
+              (await db.select({ id: users.id }).from(users).where(eq(users.username, name)).limit(1)).length > 0);
+            return c.json({ error: 'اسم المستخدم محجوز بالفعل', code: 'username_taken', suggestions }, 409);
+          }
+        } catch {
+          noteDbFailure();
+          return c.json({ error: 'account storage unavailable' }, 503);
+        }
+      }
       return accountError(c, error);
     }
   }
@@ -162,7 +212,8 @@ authRouter.patch('/me', requireAuth, async (c) => {
   if (!user) return c.json({ error: 'account not found' }, 401);
   if (username !== undefined) {
     if (memUsers.some((u) => u !== user && u.username === username)) {
-      return c.json({ error: 'اسم المستخدم محجوز بالفعل' }, 409);
+      const suggestions = await suggestUsernames(username, async (name) => memUsers.some((u) => u.username === name));
+      return c.json({ error: 'اسم المستخدم محجوز بالفعل', code: 'username_taken', suggestions }, 409);
     }
     user.username = username;
   }
