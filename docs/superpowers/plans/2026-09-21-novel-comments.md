@@ -570,20 +570,20 @@ Expected: clean + pass.
 **Files:** Modify `src/routes/comments.ts` (`resolveWriter`, `requireNovelMod`, list liked-by-me lines 413-422, `modTransition` line 871, PATCH/DELETE/vote/report/mod/admin error bodies).
 **Key changes:** cache caller on context; consume cached value; add codes.
 
-- [ ] **Step 1: Cache the caller in `resolveWriter` and `requireNovelMod`**
+- [x] **Step 1: Cache the caller in `resolveWriter` and `requireNovelMod`** (done: 2139063)
 
 In `resolveWriter` (line 200): after `const caller = await getCaller(c);` add `c.set('caller', caller);` on the success path (before building the return). In `requireNovelMod` (line 305): after `const caller = await getCaller(c);` add the same `c.set('caller', caller);` on success paths. `getCaller` itself short-circuits via Task 5, so the second and third calls in a request (mod check, liked-by-me batch, `modTransition` actor lookup) hit the cache.
 
-- [ ] **Step 2: Add codes to every remaining error body**
+- [x] **Step 2: Add codes to every remaining error body** (done: 2139063)
 
 Per the table: list (`invalid_query` + `issues`, `invalid_cursor`; plus tri-state novel check replacing line-380 `if (!(await novelExists(novelId)))` with the same `exists/missing/unknown` → 404 `novel_not_found` / 503 `تعذر التحقق` pattern from Task 6); replies (`invalid_cursor`, `comment_not_found`); count query failure (`invalid_query`); PATCH (`invalid_payload`+`issues`, `comment_not_found`, `forbidden`, `deleted`, `edit_window`, `edit_limit`); DELETE (`comment_not_found`, `forbidden`); vote (`invalid_payload`+`issues` on `قيمة غير صالحة`, `vote_login`, `comment_not_found`, `self_vote`); report (`comment_not_found`); mod (`invalid_payload`, `comment_not_found`, `deleted`, `forbidden`/`unauthorized` via `requireNovelMod` passthrough unchanged); admin (`invalid_query` on `حالة غير صالحة`, `forbidden`); novel-mod 404 already `الرواية غير موجودة` gains `novel_not_found`. Memory branches gain identical codes. No Arabic string reworded; `issues`/`retryAfter` extras kept.
 
-- [ ] **Step 3: Typecheck + tests**
+- [x] **Step 3: Typecheck + tests** (done: clean, 7 passed, 2139063)
 
 Run: `npx tsc --noEmit && npx vitest run src/routes/comments.test.ts`
 Expected: clean + pass.
 
-**Done criteria:** Authenticated flows issue one users lookup by construction (cache short-circuit in `getCaller` + `c.set('caller', ...)` on every resolve path; verified by inspection that no comments handler calls the users table except through the cached `getCaller`/`buildAuthorLookup`); every error body in the file carries `code`.
+**Done criteria:** Authenticated flows issue one users lookup by construction (cache short-circuit in `getCaller` + `c.set('caller', ...)` on every resolve path; verified by inspection that no comments handler calls the users table except through the cached `getCaller`/`buildAuthorLookup`); every error body in the file carries `code`. (done: 2139063, zero codeless 4xx)
 
 ---
 
