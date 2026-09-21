@@ -14,7 +14,12 @@ export function rateLimit(max = 60, windowMs = 60_000): MiddlewareHandler {
       return;
     }
     cur.count += 1;
-    if (cur.count > max) return c.json({ error: 'too many requests' }, 429);
+    if (cur.count > max) {
+      if (c.req.path.includes('/comments')) {
+        return c.json({ success: false, code: 'rate_limited', error: 'too many requests' }, 429);
+      }
+      return c.json({ error: 'too many requests' }, 429);
+    }
     await next();
   };
 }
