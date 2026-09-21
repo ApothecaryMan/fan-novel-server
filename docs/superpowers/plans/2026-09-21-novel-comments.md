@@ -402,7 +402,7 @@ Expected: exit 0 (POST call sites resolved).
 **Files:** Modify `src/routes/comments.ts` lines 493, 668, 712, 768, 822, 891-893, 928.
 **Key changes:** replace each `Number(c.req.param(...))` with `parseCommentId`; add `invalid_id` code.
 
-- [ ] **Step 1: Apply the rollout**
+- [x] **Step 1: Apply the rollout** (done: dc8b559)
 
 Exact per-site edits:
 1. Replies (line 493-494): `const commentId = Number(c.req.param('commentId')); if (!Number.isInteger(commentId)) return c.json({ success: false, error: 'معرف غير صالح' }, 400);` → `const commentId = parseCommentId(c.req.param('commentId')); if (commentId == null) return c.json({ success: false, code: 'invalid_id', error: 'معرف غير صالح' }, 400);`
@@ -418,7 +418,7 @@ commentsRouter.post('/:id/hide', prodGuard(requireAuth), async (c) => {
 (repeat for `restore`, `approve`).
 4. Add `code: 'invalid_id'` to the memory-path id checks as well (same message).
 
-- [ ] **Step 2: Typecheck + targeted tests**
+- [x] **Step 2: Typecheck + targeted tests** (done: clean, 7 passed, no Number(c.req.param left)
 
 Run: `npx tsc --noEmit && npx vitest run src/routes/comments.test.ts`
 Expected: both exit 0 / pass.
