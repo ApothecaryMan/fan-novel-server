@@ -239,7 +239,8 @@ async function resolveWriter(c: any): Promise<{ userId: string; userName: string
     return { userId: 'local-dev', userName: 'مستخدم محلي', isAdmin: true, cooldownS: 0 };
   }
   const caller = await getCaller(c);
-  if (!caller.row) return { error: c.json({ success: false, error: 'غير مصرح: مطلوب تسجيل الدخول' }, 401) };
+  if (!caller.row) return { error: c.json({ success: false, code: 'unauthorized', error: 'غير مصرح: مطلوب تسجيل الدخول' }, 401) };
+  c.set('caller', caller);
   return {
     userId: caller.row.id,
     userName: caller.row.displayName || caller.row.username || 'مستخدم',
@@ -345,16 +346,17 @@ async function chapterExists(novelId: string, chapterNumber: number): Promise<bo
 /** Owner-or-admin check for a novel. Returns caller on success. */
 async function requireNovelMod(c: any, novelId: string) {
   const caller = await getCaller(c);
-  if (!caller.row) return { error: c.json({ success: false, error: 'غير مصرح: مطلوب تسجيل الدخول' }, 401) };
+  if (!caller.row) return { error: c.json({ success: false, code: 'unauthorized', error: 'غير مصرح: مطلوب تسجيل الدخول' }, 401) };
+  c.set('caller', caller);
   if (caller.isAdmin) return { caller };
   if (!isDbAvailable()) return { caller };
   try {
     const rows = await db.select().from(novels).where(eq(novels.id, novelId)).limit(1);
     const novel = rows[0];
-    if (!novel) return { error: c.json({ success: false, error: 'الرواية غير موجودة' }, 404) };
+    if (!novel) return { error: c.json({ success: false, code: 'novel_not_found', error: 'الرواية غير موجودة' }, 404) };
     const ownerId = novel.authorUserId ?? novel.translatorUserId ?? null;
     if (ownerId && ownerId === caller.row.id) return { caller };
-    return { error: c.json({ success: false, error: 'غير مسموح' }, 403) };
+    return { error: c.json({ success: false, code: 'forbidden', error: 'غير مسموح' }, 403) };
   } catch (err) {
     console.error('[comments] mod check failed', err);
     return { error: c.json({ success: false, error: 'تعذر التحقق' }, 500) };
@@ -370,12 +372,12 @@ commentsNovelsRouter.get('/:novelId/comments', async (c) => {
     chapter: c.req.query('chapter'), cursor: c.req.query('cursor'),
     limit: c.req.query('limit'), sort: c.req.query('sort') ?? 'new', status: c.req.query('status'),
   });
-  if (!parsed.success) return c.json({ success: false, error: 'استعلام غير صالح', issues: parsed.error.issues }, 400);
+  if (!parsed.success) return c.json({ success: false, code: 'invalid_query', error: 'استعلام غير صالح', issues: parsed.error.issues }, 400);
   const { chapter, cursor: cursorRaw, limit, sort, status } = parsed.data;
   let cursor: RootsCursor | undefined;
   if (cursorRaw) {
     const d = decodeCursor(cursorRaw);
-    if (!d) return c.json({ success: false, error: 'مؤشر ترقيم غير صالح' }, 400);
+    if (!d) return c.json({ success: false, code: 'invalid_cursor', error: 'مؤشر ترقيم غير صالح' }, 400);
     cursor = d;
   }
 
@@ -419,7 +421,9 @@ commentsNovelsRouter.get('/:novelId/comments', async (c) => {
   }
 
   try {
-    if (!(await novelExists(novelId))) return c.json({ success: false, error: 'الرواية غير موجودة' }, 404);
+    const novelCheck = await novelExists(novelId);
+    if (novelCheck === 'missing') return c.json({ success: false, code: 'novel_not_found', error: 'الرواية غير موجودة' }, 404);
+    if (novelCheck === 'unknown') return c.json({ success: false, code: 'novel_not_found', error: 'تعذر التحقق' }, 503);
     const statusCond = visibleOnly ? eq(comments.status, 'visible') : wantStatus ? eq(comments.status, wantStatus) : undefined;
     const chapterCond = chapter !== undefined ? eq(comments.chapterNumber, chapter) : sql`${comments.chapterNumber} IS NULL`;
     const base = and(eq(comments.novelId, novelId), sql`${comments.parentId} IS NULL`, chapterCond, statusCond);
@@ -489,7 +493,7 @@ commentsNovelsRouter.get('/:novelId/comments/count', async (c) => {
   const chapterRaw = c.req.query('chapter');
   const chapter = chapterRaw !== undefined ? Number(chapterRaw) : undefined;
   if (chapterRaw !== undefined && (!Number.isInteger(chapter) || (chapter as number) < 1)) {
-    return c.json({ success: false, error: 'رقم الفصل غير صالح' }, 400);
+    return c.json({ success: false, code: 'invalid_query', error: 'رقم الفصل غير صالح' }, 400);
   }
   if (!isDbAvailable()) {
     const all = memList(novelId, chapter, true);
@@ -522,12 +526,12 @@ commentsNovelsRouter.get('/:novelId/comments/:commentId/replies', async (c) => {
   let cursor: RootsCursor | undefined;
   if (cursorRaw) {
     const d = decodeCursor(cursorRaw);
-    if (!d) return c.json({ success: false, error: 'مؤشر ترقيم غير صالح' }, 400);
+    if (!d) return c.json({ success: false, code: 'invalid_cursor', error: 'مؤشر ترقيم غير صالح' }, 400);
     cursor = d;
   }
   if (!isDbAvailable()) {
     const root = MEM.get(commentId);
-    if (!root || root.novelId !== novelId) return c.json({ success: false, error: 'التعليق غير موجود' }, 404);
+    if (!root || root.novelId !== novelId) return c.json({ success: false, code: 'comment_not_found', error: 'التعليق غير موجود' }, 404);
     const kids = [...MEM.values()].filter((m) => m.rootId === (root.rootId ?? root.id) && m.status === 'visible')
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id - b.id);
     let start = 0;
@@ -544,7 +548,7 @@ commentsNovelsRouter.get('/:novelId/comments/:commentId/replies', async (c) => {
   try {
     const rrows = await db.select().from(comments).where(eq(comments.id, commentId)).limit(1);
     const root = rrows[0];
-    if (!root || root.novelId !== novelId) return c.json({ success: false, error: 'التعليق غير موجود' }, 404);
+    if (!root || root.novelId !== novelId) return c.json({ success: false, code: 'comment_not_found', error: 'التعليق غير موجود' }, 404);
     const threadId = (root.rootId as number) ?? root.id;
     const base = and(eq(comments.rootId, threadId), eq(comments.status, 'visible'));
     const cursorCond = cursor
@@ -699,16 +703,16 @@ commentsRouter.patch('/:id', prodGuard(requireAuth, rateLimit(30)), async (c) =>
   const id = parseCommentId(c.req.param('id'));
   if (id == null) return c.json({ success: false, code: 'invalid_id', error: 'معرف غير صالح' }, 400);
   const parsed = editCommentSchema.safeParse(await c.req.json().catch(() => null));
-  if (!parsed.success) return c.json({ success: false, error: 'حقول غير صالحة', issues: parsed.error.issues }, 400);
+  if (!parsed.success) return c.json({ success: false, code: 'invalid_payload', error: 'حقول غير صالحة', issues: parsed.error.issues }, 400);
   const writer = await resolveWriter(c);
   if ('error' in writer) return writer.error;
 
   if (!isDbAvailable()) {
     const m = MEM.get(id);
-    if (!m) return c.json({ success: false, error: 'التعليق غير موجود' }, 404);
-    if (writer.userId !== 'local-dev' && m.userId !== writer.userId) return c.json({ success: false, error: 'غير مسموح' }, 403);
-    if (Date.now() - new Date(m.createdAt).getTime() > EDIT_WINDOW_MS) return c.json({ success: false, error: 'انتهت مهلة التعديل' }, 403);
-    if (m.editCount >= MAX_EDITS) return c.json({ success: false, error: 'تم بلوغ حد التعديلات' }, 403);
+    if (!m) return c.json({ success: false, code: 'comment_not_found', error: 'التعليق غير موجود' }, 404);
+    if (writer.userId !== 'local-dev' && m.userId !== writer.userId) return c.json({ success: false, code: 'forbidden', error: 'غير مسموح' }, 403);
+    if (Date.now() - new Date(m.createdAt).getTime() > EDIT_WINDOW_MS) return c.json({ success: false, code: 'edit_window', error: 'انتهت مهلة التعديل' }, 403);
+    if (m.editCount >= MAX_EDITS) return c.json({ success: false, code: 'edit_limit', error: 'تم بلوغ حد التعديلات' }, 403);
     m.body = parsed.data.body; m.bodyHash = bodyHashHex(parsed.data.body.toLowerCase());
     m.editCount += 1; m.editedAt = new Date().toISOString(); m.updatedAt = m.editedAt;
     return c.json({ success: true, message: 'تم تعديل التعليق', data: memToApi(m, 0) });
@@ -716,13 +720,13 @@ commentsRouter.patch('/:id', prodGuard(requireAuth, rateLimit(30)), async (c) =>
   try {
     const rows = await db.select().from(comments).where(eq(comments.id, id)).limit(1);
     const row = rows[0];
-    if (!row) return c.json({ success: false, error: 'التعليق غير موجود' }, 404);
-    if (writer.userId !== 'local-dev' && row.userId !== writer.userId) return c.json({ success: false, error: 'غير مسموح' }, 403);
-    if (row.status === 'deleted') return c.json({ success: false, error: 'التعليق محذوف' }, 409);
+    if (!row) return c.json({ success: false, code: 'comment_not_found', error: 'التعليق غير موجود' }, 404);
+    if (writer.userId !== 'local-dev' && row.userId !== writer.userId) return c.json({ success: false, code: 'forbidden', error: 'غير مسموح' }, 403);
+    if (row.status === 'deleted') return c.json({ success: false, code: 'deleted', error: 'التعليق محذوف' }, 409);
     if (Date.now() - new Date(row.createdAt as unknown as string).getTime() > EDIT_WINDOW_MS) {
-      return c.json({ success: false, error: 'انتهت مهلة التعديل' }, 403);
+      return c.json({ success: false, code: 'edit_window', error: 'انتهت مهلة التعديل' }, 403);
     }
-    if ((row.editCount ?? 0) >= MAX_EDITS) return c.json({ success: false, error: 'تم بلوغ حد التعديلات' }, 403);
+    if ((row.editCount ?? 0) >= MAX_EDITS) return c.json({ success: false, code: 'edit_limit', error: 'تم بلوغ حد التعديلات' }, 403);
     await db.update(comments).set({
       body: parsed.data.body, bodyHash: bodyHashHex(parsed.data.body.toLowerCase()),
       editCount: sql`${comments.editCount} + 1`, editedAt: new Date(), updatedAt: new Date(),
@@ -747,9 +751,9 @@ commentsRouter.delete('/:id', prodGuard(requireAuth, rateLimit(30)), async (c) =
 
   if (!isDbAvailable()) {
     const m = MEM.get(id);
-    if (!m) return c.json({ success: false, error: 'التعليق غير موجود' }, 404);
+    if (!m) return c.json({ success: false, code: 'comment_not_found', error: 'التعليق غير موجود' }, 404);
     const own = writer.userId === 'local-dev' || m.userId === writer.userId;
-    if (!own && !writer.isAdmin) return c.json({ success: false, error: 'غير مسموح' }, 403);
+    if (!own && !writer.isAdmin) return c.json({ success: false, code: 'forbidden', error: 'غير مسموح' }, 403);
     if (m.status === 'deleted') return c.json({ success: true, message: 'تم حذف التعليق' });
     m.status = 'deleted'; m.deletedAt = new Date().toISOString();
     const bump = (pid: number | null) => {
@@ -764,7 +768,7 @@ commentsRouter.delete('/:id', prodGuard(requireAuth, rateLimit(30)), async (c) =
   try {
     const rows = await db.select().from(comments).where(eq(comments.id, id)).limit(1);
     const row = rows[0];
-    if (!row) return c.json({ success: false, error: 'التعليق غير موجود' }, 404);
+    if (!row) return c.json({ success: false, code: 'comment_not_found', error: 'التعليق غير موجود' }, 404);
     const own = writer.userId !== 'local-dev' && row.userId === writer.userId;
     let allowed = own || writer.isAdmin;
     if (!allowed && writer.userId !== 'local-dev') {
@@ -773,7 +777,7 @@ commentsRouter.delete('/:id', prodGuard(requireAuth, rateLimit(30)), async (c) =
     } else if (writer.userId === 'local-dev') {
       allowed = true;
     }
-    if (!allowed) return c.json({ success: false, error: 'غير مسموح' }, 403);
+    if (!allowed) return c.json({ success: false, code: 'forbidden', error: 'غير مسموح' }, 403);
     if (row.status === 'deleted') return c.json({ success: true, message: 'تم حذف التعليق' });
     await db.transaction(async (tx) => {
       await tx.update(comments).set({ status: 'deleted', deletedAt: new Date(), updatedAt: new Date() }).where(eq(comments.id, id));
@@ -801,15 +805,15 @@ commentsRouter.post('/:id/vote', prodGuard(requireAuth, rateLimit(30)), async (c
   const id = parseCommentId(c.req.param('id'));
   if (id == null) return c.json({ success: false, code: 'invalid_id', error: 'معرف غير صالح' }, 400);
   const parsed = voteSchema.safeParse(await c.req.json().catch(() => null));
-  if (!parsed.success) return c.json({ success: false, error: 'قيمة غير صالحة', issues: parsed.error.issues }, 400);
+  if (!parsed.success) return c.json({ success: false, code: 'invalid_payload', error: 'قيمة غير صالحة', issues: parsed.error.issues }, 400);
   const writer = await resolveWriter(c);
   if ('error' in writer) return writer.error;
-  if (writer.userId === 'local-dev') return c.json({ success: false, error: 'سجل الدخول للتصويت' }, 401);
+  if (writer.userId === 'local-dev') return c.json({ success: false, code: 'vote_login', error: 'سجل الدخول للتصويت' }, 401);
 
   if (!isDbAvailable()) {
     const m = MEM.get(id);
-    if (!m || m.status !== 'visible') return c.json({ success: false, error: 'التعليق غير موجود' }, 404);
-    if (m.userId === writer.userId) return c.json({ success: false, error: 'لا يمكن التصويت على تعليقك' }, 403);
+    if (!m || m.status !== 'visible') return c.json({ success: false, code: 'comment_not_found', error: 'التعليق غير موجود' }, 404);
+    if (m.userId === writer.userId) return c.json({ success: false, code: 'self_vote', error: 'لا يمكن التصويت على تعليقك' }, 403);
     const key = `${id}:${writer.userId}`;
     const old = MEM_VOTES.get(key) ?? 0;
     const next = parsed.data.value;
@@ -845,8 +849,8 @@ commentsRouter.post('/:id/vote', prodGuard(requireAuth, rateLimit(30)), async (c
       }
       return { kind: 'ok' as const, score, myVote: next };
     });
-    if (outcome.kind === 'not_found') return c.json({ success: false, error: 'التعليق غير موجود' }, 404);
-    if (outcome.kind === 'self_vote') return c.json({ success: false, error: 'لا يمكن التصويت على تعليقك' }, 403);
+    if (outcome.kind === 'not_found') return c.json({ success: false, code: 'comment_not_found', error: 'التعليق غير موجود' }, 404);
+    if (outcome.kind === 'self_vote') return c.json({ success: false, code: 'self_vote', error: 'لا يمكن التصويت على تعليقك' }, 403);
     return c.json({ success: true, data: { commentId: `app_${id}`, score: outcome.score, myVote: outcome.myVote } });
   } catch (err) {
     console.error('[comments] db vote failed', err);
@@ -864,14 +868,14 @@ commentsRouter.post('/:id/report', prodGuard(requireAuth, rateLimit(10)), async 
 
   if (!isDbAvailable()) {
     const m = MEM.get(id);
-    if (!m) return c.json({ success: false, error: 'التعليق غير موجود' }, 404);
+    if (!m) return c.json({ success: false, code: 'comment_not_found', error: 'التعليق غير موجود' }, 404);
     m.reportsCount += 1;
     if (m.reportsCount >= REPORTS_TO_PENDING && m.status === 'visible') m.status = 'pending';
     return c.json({ success: true, message: 'تم الإبلاغ' });
   }
   try {
     const rows = await db.select().from(comments).where(eq(comments.id, id)).limit(1);
-    if (!rows[0]) return c.json({ success: false, error: 'التعليق غير موجود' }, 404);
+    if (!rows[0]) return c.json({ success: false, code: 'comment_not_found', error: 'التعليق غير موجود' }, 404);
     await db.transaction(async (tx) => {
       const bumped = await tx.update(comments).set({ reportsCount: sql`${comments.reportsCount} + 1`, updatedAt: new Date() }).where(eq(comments.id, id)).returning();
       const cur = bumped[0];
@@ -892,20 +896,20 @@ commentsRouter.post('/:id/report', prodGuard(requireAuth, rateLimit(10)), async 
 
 async function modTransition(c: any, id: number, action: 'hide' | 'restore' | 'approve') {
   const parsed = modActionSchema.safeParse(await c.req.json().catch(() => ({})));
-  if (!parsed.success) return c.json({ success: false, error: 'حقول غير صالحة' }, 400);
+  if (!parsed.success) return c.json({ success: false, code: 'invalid_payload', error: 'حقول غير صالحة' }, 400);
   const toStatus = action === 'restore' || action === 'approve' ? 'visible' : 'hidden';
 
   if (!isDbAvailable()) {
     const m = MEM.get(id);
-    if (!m) return c.json({ success: false, error: 'التعليق غير موجود' }, 404);
-    if (m.status === 'deleted' && action !== 'approve') return c.json({ success: false, error: 'التعليق محذوف' }, 409);
+    if (!m) return c.json({ success: false, code: 'comment_not_found', error: 'التعليق غير موجود' }, 404);
+    if (m.status === 'deleted' && action !== 'approve') return c.json({ success: false, code: 'deleted', error: 'التعليق محذوف' }, 409);
     m.status = toStatus;
     return c.json({ success: true, message: 'تم', data: memToApi(m, 0) });
   }
   try {
     const rows = await db.select().from(comments).where(eq(comments.id, id)).limit(1);
     const row = rows[0];
-    if (!row) return c.json({ success: false, error: 'التعليق غير موجود' }, 404);
+    if (!row) return c.json({ success: false, code: 'comment_not_found', error: 'التعليق غير موجود' }, 404);
     const mod = getEnv().syncOpen ? null : await requireNovelMod(c, row.novelId);
     if (mod && 'error' in mod) return mod.error;
     const actorId = getEnv().syncOpen ? null : (await getCaller(c)).row?.id ?? null;
@@ -936,11 +940,11 @@ commentsRouter.post('/:id/approve', prodGuard(requireAuth), async (c) => { const
 
 adminCommentsRouter.get('/', prodGuard(requireAuth), async (c) => {
   const status = c.req.query('status') ?? 'pending';
-  if (!['visible', 'pending', 'hidden', 'deleted'].includes(status)) return c.json({ success: false, error: 'حالة غير صالحة' }, 400);
+  if (!['visible', 'pending', 'hidden', 'deleted'].includes(status)) return c.json({ success: false, code: 'invalid_query', error: 'حالة غير صالحة' }, 400);
   const limit = Math.min(100, Math.max(1, Number(c.req.query('limit') ?? 20) || 20));
   if (!getEnv().syncOpen) {
     const caller = await getCaller(c);
-    if (!caller.row || !caller.isAdmin) return c.json({ success: false, error: 'غير مسموح' }, 403);
+    if (!caller.row || !caller.isAdmin) return c.json({ success: false, code: 'forbidden', error: 'غير مسموح' }, 403);
   }
   if (!isDbAvailable()) {
     const all = [...MEM.values()].filter((m) => m.status === status).sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, limit);
@@ -964,16 +968,16 @@ adminCommentsRouter.delete('/:id/hard', prodGuard(requireAuth), async (c) => {
   if (id == null) return c.json({ success: false, code: 'invalid_id', error: 'معرف غير صالح' }, 400);
   if (!getEnv().syncOpen) {
     const caller = await getCaller(c);
-    if (!caller.row || !caller.isAdmin) return c.json({ success: false, error: 'غير مسموح' }, 403);
+    if (!caller.row || !caller.isAdmin) return c.json({ success: false, code: 'forbidden', error: 'غير مسموح' }, 403);
   }
   if (!isDbAvailable()) {
-    if (!MEM.has(id)) return c.json({ success: false, error: 'التعليق غير موجود' }, 404);
+    if (!MEM.has(id)) return c.json({ success: false, code: 'comment_not_found', error: 'التعليق غير موجود' }, 404);
     MEM.delete(id);
     return c.json({ success: true, message: 'تم الحذف النهائي' });
   }
   try {
     const rows = await db.select().from(comments).where(eq(comments.id, id)).limit(1);
-    if (!rows[0]) return c.json({ success: false, error: 'التعليق غير موجود' }, 404);
+    if (!rows[0]) return c.json({ success: false, code: 'comment_not_found', error: 'التعليق غير موجود' }, 404);
     await db.delete(comments).where(eq(comments.id, id));
     return c.json({ success: true, message: 'تم الحذف النهائي' });
   } catch (err) {
