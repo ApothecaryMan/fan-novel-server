@@ -99,6 +99,9 @@ export function parseCommentId(raw: unknown): number | null {
   return n;
 }
 
+/** Reply scope: explicit value wins; omitted inherits the parent chapter; else novel-level null. */
+export function resolveEffectiveChapter(explicit: number | undefined, parentChapter: number | null | undefined): number | null { return explicit ?? parentChapter ?? null; }
+
 // ---------- validation ----------
 
 const CommentBody = z
@@ -298,18 +301,19 @@ async function isDuplicate(userId: string, hash: string, novelId: string): Promi
   return check.some((m) => m.bodyHash === hash);
 }
 
-async function novelExists(novelId: string): Promise<boolean> {
+type NovelCheck = 'exists' | 'missing' | 'unknown';
+async function novelExists(novelId: string): Promise<NovelCheck> {
   if (isDbAvailable()) {
     try {
       const rows = await db.select({ id: novels.id }).from(novels).where(eq(novels.id, novelId)).limit(1);
-      return Boolean(rows[0]);
+      return rows[0] ? 'exists' : 'missing';
     } catch (err) {
       console.error('[comments] novel lookup failed', err);
       noteDbFailure();
-      return true; // DB error: stay open, let the query decide
+      return 'unknown'; // DB error: caller returns 503, never masks as exists
     }
   }
-  return true; // memory fallback accepts any novel id
+  return 'exists'; // memory fallback accepts any novel id
 }
 
 async function chapterExists(novelId: string, chapterNumber: number): Promise<boolean> {

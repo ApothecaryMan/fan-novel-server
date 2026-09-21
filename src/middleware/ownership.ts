@@ -11,6 +11,8 @@ export interface Caller {
 
 /** Resolve the Bearer caller to its DB row. Token sub is the stable externalId. */
 export async function getCaller(c: Context): Promise<Caller> {
+  const cached = c.get('caller') as Caller | undefined;
+  if (cached) return cached;
   const payload = c.get('authUser') as { sub?: string } | undefined;
   const sub = payload?.sub ?? '';
   const empty: Caller = { row: null, isAdmin: false, canWrite: false };
