@@ -160,6 +160,16 @@ function authorOf(userId: string | null, lookup: Map<string, { name: string; ava
   return hit ? { id: userId, name: hit.name, avatarUrl: hit.avatarUrl } : { id: userId, name: 'مستخدم' };
 }
 
+/** Single author batch for every DB read path. Live reads off users table. */
+async function buildAuthorLookup(userIds: string[]): Promise<Map<string, { name: string; avatarUrl?: string }>> {
+  const lookup = new Map<string, { name: string; avatarUrl?: string }>();
+  const uniq = [...new Set(userIds.filter(Boolean))];
+  if (!uniq.length) return lookup;
+  const urows = await db.select().from(users).where(inArray(users.id, uniq));
+  for (const u of urows) lookup.set(u.id, { name: u.displayName || u.username || 'مستخدم', avatarUrl: u.avatarUrl ?? undefined });
+  return lookup;
+}
+
 /** Run middlewares only in closed (prod) mode; open LAN keeps legacy behavior. */
 function prodGuard(...mws: Array<(c: any, next: any) => unknown>) {
   return async (c: any, next: any) => {
@@ -436,12 +446,7 @@ commentsNovelsRouter.get('/:novelId/comments', async (c) => {
     const [{ n }] = await db.select({ n: sql<number>`count(*)::int` }).from(comments).where(base);
 
     // authors batch
-    const uids = [...new Set(page.map((r) => r.userId).filter(Boolean))] as string[];
-    const lookup = new Map<string, { name: string; avatarUrl?: string }>();
-    if (uids.length) {
-      const urows = await db.select().from(users).where(inArray(users.id, uids));
-      for (const u of urows) lookup.set(u.id, { name: u.displayName || u.username || 'مستخدم', avatarUrl: u.avatarUrl ?? undefined });
-    }
+    const lookup = await buildAuthorLookup(page.map((r) => r.userId).filter(Boolean) as string[]);
     // liked-by-me batch
     const liked = new Set<number>();
     if (!getEnv().syncOpen) {
@@ -564,12 +569,7 @@ commentsNovelsRouter.get('/:novelId/comments/:commentId/replies', async (c) => {
       .orderBy(asc(comments.createdAt), asc(comments.id)).limit(limit + 1);
     const hasMore = rows.length > limit;
     const page = hasMore ? rows.slice(0, limit) : rows;
-    const uids = [...new Set(page.map((r) => r.userId).filter(Boolean))] as string[];
-    const lookup = new Map<string, { name: string; avatarUrl?: string }>();
-    if (uids.length) {
-      const urows = await db.select().from(users).where(inArray(users.id, uids));
-      for (const u of urows) lookup.set(u.id, { name: u.displayName || u.username || 'مستخدم', avatarUrl: u.avatarUrl ?? undefined });
-    }
+    const lookup = await buildAuthorLookup(page.map((r) => r.userId).filter(Boolean) as string[]);
     const last = page[page.length - 1];
     const nextCursor = last && hasMore ? encodeCursor({ t: new Date(last.createdAt as unknown as string).getTime(), i: last.id }) : null;
     return c.json({
@@ -921,7 +921,7 @@ async function modTransition(c: any, id: number, action: 'hide' | 'restore' | 'a
     }).where(eq(comments.id, id));
     if (actorId) await db.insert(commentModLog).values({ commentId: id, action, actorId, reason: parsed.data.reason ?? null });
     const updated = (await db.select().from(comments).where(eq(comments.id, id)).limit(1))[0];
-    const lookup = new Map<string, { name: string; avatarUrl?: string }>();
+    const lookup = await buildAuthorLookup(updated.userId ? [updated.userId] : []);
     return c.json({ success: true, message: 'تم', data: toApi(updated, authorOf(updated.userId, lookup), 0) });
   } catch (err) {
     console.error('[comments] db mod failed', err);
@@ -952,12 +952,7 @@ adminCommentsRouter.get('/', prodGuard(requireAuth), async (c) => {
   try {
     const rows = await db.select().from(comments).where(eq(comments.status, status))
       .orderBy(desc(comments.createdAt)).limit(limit);
-    const uids = [...new Set(rows.map((r) => r.userId).filter(Boolean))] as string[];
-    const lookup = new Map<string, { name: string; avatarUrl?: string }>();
-    if (uids.length) {
-      const urows = await db.select().from(users).where(inArray(users.id, uids));
-      for (const u of urows) lookup.set(u.id, { name: u.displayName || u.username || 'مستخدم', avatarUrl: u.avatarUrl ?? undefined });
-    }
+    const lookup = await buildAuthorLookup(rows.map((r) => r.userId).filter(Boolean) as string[]);
     return c.json({ success: true, total: rows.length, data: rows.map((r) => toApi(r, authorOf(r.userId, lookup), 0)) });
   } catch (err) {
     console.error('[comments] admin queue failed', err);
