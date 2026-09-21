@@ -735,17 +735,17 @@ Expected: all tests pass, including the 4 new blocks.
 **Files:** none (verification only).
 **Key changes:** none.
 
-- [ ] **Step 1: Run the full test suite**
+- [x] **Step 1: Run the full test suite** (done: 145 passed, 7 skipped, exit 0)
 
 Run: `npm test`
 Expected: all test files pass, zero failures.
 
-- [ ] **Step 2: Run typecheck**
+- [x] **Step 2: Run typecheck** (done: exit 0)
 
 Run: `npm run typecheck`
 Expected: exit 0.
 
-- [ ] **Step 3: Run build**
+- [x] **Step 3: Run build** (done: exit 0, dist/ emitted)
 
 Run: `npm run build`
 Expected: exit 0, `dist/` emitted.
