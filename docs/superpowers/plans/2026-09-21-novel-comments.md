@@ -629,7 +629,7 @@ Expected: clean + pass.
 **Files:** Extend `src/routes/comments.test.ts` (append new `it` blocks; do not alter existing ones except adding `code` assertions where already exact).
 **Key changes:** chapter inheritance, mismatch, both id formats, codes, true total, previews, cache headers, snapshot rule.
 
-- [ ] **Step 1: Append these test blocks**
+- [x] **Step 1: Append these test blocks** (done: df4825e, 11/11 pass)
 
 ```ts
 it('chapter scope: default novel-only, ?chapter selects, reply inherits', async () => {
@@ -720,7 +720,7 @@ it('list cache header is public in anonymous open mode', async () => {
 });
 ```
 
-- [ ] **Step 2: Run the extended suite**
+- [x] **Step 2: Run the extended suite** (done: 11 passed)
 
 Run: `npx vitest run src/routes/comments.test.ts`
 Expected: all tests pass, including the 4 new blocks.
