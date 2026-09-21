@@ -588,27 +588,30 @@ commentsNovelsRouter.get('/:novelId/comments/:commentId/replies', async (c) => {
 commentsNovelsRouter.post('/:novelId/comments', prodGuard(requireAuth, rateLimit(5)), async (c) => {
   const novelId = c.req.param('novelId');
   const parsed = createCommentSchema.safeParse(await c.req.json().catch(() => null));
-  if (!parsed.success) return c.json({ success: false, error: 'حقول غير صالحة', issues: parsed.error.issues }, 400);
+  if (!parsed.success) return c.json({ success: false, code: 'invalid_payload', error: 'حقول غير صالحة', issues: parsed.error.issues }, 400);
   const { body, chapterNumber, parentId } = parsed.data;
 
   const writer = await resolveWriter(c);
   if ('error' in writer) return writer.error;
 
-  if (!(await novelExists(novelId))) return c.json({ success: false, error: 'الرواية غير موجودة' }, 404);
+  const novelCheck = await novelExists(novelId);
+  if (novelCheck === 'missing') return c.json({ success: false, code: 'novel_not_found', error: 'الرواية غير موجودة' }, 404);
+  if (novelCheck === 'unknown') return c.json({ success: false, code: 'novel_not_found', error: 'تعذر التحقق' }, 503);
   if (chapterNumber !== undefined && !(await chapterExists(novelId, chapterNumber))) {
-    return c.json({ success: false, error: 'الفصل غير موجود' }, 404);
+    return c.json({ success: false, code: 'chapter_not_found', error: 'الفصل غير موجود' }, 404);
   }
 
   const wait = await checkCooldown(writer.userId, writer.cooldownS);
-  if (wait > 0) return c.json({ success: false, error: 'مهلاً — انتظر قليلاً قبل التعليق التالي', retryAfter: wait }, 429);
+  if (wait > 0) return c.json({ success: false, code: 'cooldown', error: 'مهلاً — انتظر قليلاً قبل التعليق التالي', retryAfter: wait }, 429);
   const hash = bodyHashHex(body.toLowerCase());
-  if (await isDuplicate(writer.userId, hash, novelId)) return c.json({ success: false, error: 'تعليق مكرر' }, 409);
+  if (await isDuplicate(writer.userId, hash, novelId)) return c.json({ success: false, code: 'duplicate', error: 'تعليق مكرر' }, 409);
 
   const pending = shouldHoldForModeration(body);
   const status = pending ? 'pending' : 'visible';
 
   // Reply validation + thread resolution
   let parent: CommentRow | MemComment | null = null;
+  let effectiveChapter: number | null | undefined;
   if (parentId != null) {
     if (isDbAvailable()) {
       try {
@@ -621,17 +624,21 @@ commentsNovelsRouter.post('/:novelId/comments', prodGuard(requireAuth, rateLimit
     } else {
       parent = MEM.get(parentId) ?? null;
     }
-    if (!parent) return c.json({ success: false, error: 'التعليق الأب غير موجود' }, 404);
-    if (parent.novelId !== novelId) return c.json({ success: false, error: 'التعليق الأب من رواية أخرى' }, 400);
-    const pChapter = (parent as CommentRow).chapterNumber ?? (parent as MemComment).chapterNumber;
-    if ((pChapter ?? null) !== (chapterNumber ?? null)) return c.json({ success: false, error: 'النطاق غير متطابق' }, 400);
+    if (!parent) return c.json({ success: false, code: 'parent_not_found', error: 'التعليق الأب غير موجود' }, 404);
+    if (parent.novelId !== novelId) return c.json({ success: false, code: 'parent_wrong_novel', error: 'التعليق الأب من رواية أخرى' }, 400);
+    const pChapter = (parent as CommentRow).chapterNumber ?? (parent as MemComment).chapterNumber ?? null;
+    effectiveChapter = resolveEffectiveChapter(chapterNumber, pChapter);
+    if (chapterNumber !== undefined && chapterNumber !== (pChapter ?? null)) return c.json({ success: false, code: 'chapter_mismatch', error: 'النطاق غير متطابق' }, 400);
     if ((parent as CommentRow).status !== undefined && (parent as CommentRow).status !== 'visible') {
-      return c.json({ success: false, error: 'لا يمكن الرد على تعليق محجوب' }, 409);
+      return c.json({ success: false, code: 'reply_forbidden', error: 'لا يمكن الرد على تعليق محجوب' }, 409);
     }
     if ((parent as MemComment).status !== undefined && (parent as MemComment).status !== 'visible') {
-      return c.json({ success: false, error: 'لا يمكن الرد على تعليق محجوب' }, 409);
+      return c.json({ success: false, code: 'reply_forbidden', error: 'لا يمكن الرد على تعليق محجوب' }, 409);
     }
-    if ((parent.depth ?? 0) >= MAX_DEPTH) return c.json({ success: false, error: 'تم بلوغ أقصى عمق للردود' }, 400);
+    if ((parent.depth ?? 0) >= MAX_DEPTH) return c.json({ success: false, code: 'depth_limit', error: 'تم بلوغ أقصى عمق للردود' }, 400);
+    if (chapterNumber === undefined && effectiveChapter != null && !(await chapterExists(novelId, effectiveChapter))) {
+      return c.json({ success: false, code: 'chapter_not_found', error: 'الفصل غير موجود' }, 404);
+    }
   }
 
   if (!isDbAvailable()) {
@@ -639,7 +646,7 @@ commentsNovelsRouter.post('/:novelId/comments', prodGuard(requireAuth, rateLimit
     const now = new Date().toISOString();
     const rootId = parent ? ((parent.rootId as number | null) ?? parent.id) : null;
     const m: MemComment = {
-      id, novelId, chapterNumber: chapterNumber ?? (parent ? ((parent as MemComment).chapterNumber ?? null) : null),
+      id, novelId, chapterNumber: parent ? (effectiveChapter ?? null) : (chapterNumber ?? null),
       userId: writer.userId === 'local-dev' ? null : writer.userId, userName: writer.userName, avatarUrl: writer.avatarUrl,
       parentId: parent ? parent.id : null, rootId, depth: parent ? (parent.depth ?? 0) + 1 : 0,
       body, bodyHash: hash, status, likesCount: 0,
@@ -663,23 +670,27 @@ commentsNovelsRouter.post('/:novelId/comments', prodGuard(requireAuth, rateLimit
     const rootId = parent ? (((parent as CommentRow).rootId as number | null) ?? parent.id) : null;
     const depth = parent ? ((parent.depth ?? 0) + 1) : 0;
     const now = new Date();
-    const inserted = await db.insert(comments).values({
-      novelId, chapterNumber: chapterNumber ?? null,
-      userId: writer.userId === 'local-dev' ? null : writer.userId,
-      parentId: parent ? parent.id : null, rootId, depth,
-      body, bodyHash: hash, status,
-      createdAt: now, updatedAt: now,
-    }).returning();
-    const row = inserted[0];
-    if (parent) {
-      const bumpIds = [parent.id, rootId].filter((x): x is number => x != null);
-      for (const pid of [...new Set(bumpIds)]) {
-        await db.update(comments).set({
-          repliesCount: sql`${comments.repliesCount} + 1`,
-          updatedAt: new Date(),
-        }).where(eq(comments.id, pid));
+    const replyChapter = parent ? (effectiveChapter ?? null) : (chapterNumber ?? null);
+    const row = await db.transaction(async (tx) => {
+      const inserted = await tx.insert(comments).values({
+        novelId, chapterNumber: replyChapter,
+        userId: writer.userId === 'local-dev' ? null : writer.userId,
+        parentId: parent ? parent.id : null, rootId, depth,
+        body, bodyHash: hash, status,
+        createdAt: now, updatedAt: now,
+      }).returning();
+      const created = inserted[0];
+      if (parent) {
+        const bumpIds = [parent.id, rootId].filter((x): x is number => x != null);
+        for (const pid of [...new Set(bumpIds)]) {
+          await tx.update(comments).set({
+            repliesCount: sql`${comments.repliesCount} + 1`,
+            updatedAt: new Date(),
+          }).where(eq(comments.id, pid));
+        }
       }
-    }
+      return created;
+    });
     const lookup = new Map<string, { name: string; avatarUrl?: string }>();
     if (row.userId) lookup.set(row.userId, { name: writer.userName, avatarUrl: writer.avatarUrl });
     return c.json({
