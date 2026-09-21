@@ -522,8 +522,8 @@ commentsNovelsRouter.get('/:novelId/comments/count', async (c) => {
 // GET /api/v1/novels/:novelId/comments/:commentId/replies?cursor&limit
 commentsNovelsRouter.get('/:novelId/comments/:commentId/replies', async (c) => {
   const novelId = c.req.param('novelId');
-  const commentId = Number(c.req.param('commentId'));
-  if (!Number.isInteger(commentId)) return c.json({ success: false, error: 'معرف غير صالح' }, 400);
+  const commentId = parseCommentId(c.req.param('commentId'));
+  if (commentId == null) return c.json({ success: false, code: 'invalid_id', error: 'معرف غير صالح' }, 400);
   const limit = Math.min(50, Math.max(1, Number(c.req.query('limit') ?? 20) || 20));
   const cursorRaw = c.req.query('cursor');
   let cursor: RootsCursor | undefined;
@@ -708,8 +708,8 @@ commentsNovelsRouter.post('/:novelId/comments', prodGuard(requireAuth, rateLimit
 
 // PATCH /api/v1/comments/:id
 commentsRouter.patch('/:id', prodGuard(requireAuth, rateLimit(30)), async (c) => {
-  const id = Number(c.req.param('id'));
-  if (!Number.isInteger(id)) return c.json({ success: false, error: 'معرف غير صالح' }, 400);
+  const id = parseCommentId(c.req.param('id'));
+  if (id == null) return c.json({ success: false, code: 'invalid_id', error: 'معرف غير صالح' }, 400);
   const parsed = editCommentSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return c.json({ success: false, error: 'حقول غير صالحة', issues: parsed.error.issues }, 400);
   const writer = await resolveWriter(c);
@@ -752,8 +752,8 @@ commentsRouter.patch('/:id', prodGuard(requireAuth, rateLimit(30)), async (c) =>
 
 // DELETE /api/v1/comments/:id (soft)
 commentsRouter.delete('/:id', prodGuard(requireAuth, rateLimit(30)), async (c) => {
-  const id = Number(c.req.param('id'));
-  if (!Number.isInteger(id)) return c.json({ success: false, error: 'معرف غير صالح' }, 400);
+  const id = parseCommentId(c.req.param('id'));
+  if (id == null) return c.json({ success: false, code: 'invalid_id', error: 'معرف غير صالح' }, 400);
   const writer = await resolveWriter(c);
   if ('error' in writer) return writer.error;
 
@@ -808,8 +808,8 @@ commentsRouter.delete('/:id', prodGuard(requireAuth, rateLimit(30)), async (c) =
 
 // POST /api/v1/comments/:id/vote {value: 1|-1|0}
 commentsRouter.post('/:id/vote', prodGuard(requireAuth, rateLimit(30)), async (c) => {
-  const id = Number(c.req.param('id'));
-  if (!Number.isInteger(id)) return c.json({ success: false, error: 'معرف غير صالح' }, 400);
+  const id = parseCommentId(c.req.param('id'));
+  if (id == null) return c.json({ success: false, code: 'invalid_id', error: 'معرف غير صالح' }, 400);
   const parsed = voteSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return c.json({ success: false, error: 'قيمة غير صالحة', issues: parsed.error.issues }, 400);
   const writer = await resolveWriter(c);
@@ -862,8 +862,8 @@ commentsRouter.post('/:id/vote', prodGuard(requireAuth, rateLimit(30)), async (c
 
 // POST /api/v1/comments/:id/report
 commentsRouter.post('/:id/report', prodGuard(requireAuth, rateLimit(10)), async (c) => {
-  const id = Number(c.req.param('id'));
-  if (!Number.isInteger(id)) return c.json({ success: false, error: 'معرف غير صالح' }, 400);
+  const id = parseCommentId(c.req.param('id'));
+  if (id == null) return c.json({ success: false, code: 'invalid_id', error: 'معرف غير صالح' }, 400);
   const writer = await resolveWriter(c);
   if ('error' in writer) return writer.error;
 
@@ -931,9 +931,9 @@ async function modTransition(c: any, id: number, action: 'hide' | 'restore' | 'a
 }
 
 // POST /api/v1/comments/:id/hide|restore|approve
-commentsRouter.post('/:id/hide', prodGuard(requireAuth), async (c) => modTransition(c, Number(c.req.param('id')), 'hide'));
-commentsRouter.post('/:id/restore', prodGuard(requireAuth), async (c) => modTransition(c, Number(c.req.param('id')), 'restore'));
-commentsRouter.post('/:id/approve', prodGuard(requireAuth), async (c) => modTransition(c, Number(c.req.param('id')), 'approve'));
+commentsRouter.post('/:id/hide', prodGuard(requireAuth), async (c) => { const id = parseCommentId(c.req.param('id')); if (id == null) return c.json({ success: false, code: 'invalid_id', error: 'معرف غير صالح' }, 400); return modTransition(c, id, 'hide'); });
+commentsRouter.post('/:id/restore', prodGuard(requireAuth), async (c) => { const id = parseCommentId(c.req.param('id')); if (id == null) return c.json({ success: false, code: 'invalid_id', error: 'معرف غير صالح' }, 400); return modTransition(c, id, 'restore'); });
+commentsRouter.post('/:id/approve', prodGuard(requireAuth), async (c) => { const id = parseCommentId(c.req.param('id')); if (id == null) return c.json({ success: false, code: 'invalid_id', error: 'معرف غير صالح' }, 400); return modTransition(c, id, 'approve'); });
 
 // ---------- admin queue (/api/v1/admin/comments) ----------
 
@@ -968,8 +968,8 @@ adminCommentsRouter.get('/', prodGuard(requireAuth), async (c) => {
 
 // DELETE /api/v1/admin/comments/:id/hard (GDPR/abuse purge, admin only)
 adminCommentsRouter.delete('/:id/hard', prodGuard(requireAuth), async (c) => {
-  const id = Number(c.req.param('id'));
-  if (!Number.isInteger(id)) return c.json({ success: false, error: 'معرف غير صالح' }, 400);
+  const id = parseCommentId(c.req.param('id'));
+  if (id == null) return c.json({ success: false, code: 'invalid_id', error: 'معرف غير صالح' }, 400);
   if (!getEnv().syncOpen) {
     const caller = await getCaller(c);
     if (!caller.row || !caller.isAdmin) return c.json({ success: false, error: 'غير مسموح' }, 403);
