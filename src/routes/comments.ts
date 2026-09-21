@@ -56,19 +56,47 @@ export function shouldHoldForModeration(body: string): boolean {
 
 export interface RootsCursor { t: number; i: number; s?: number }
 
+function base64UrlEncodeText(text: string): string {
+  const bytes = new TextEncoder().encode(text);
+  let bin = '';
+  for (const b of bytes) bin += String.fromCharCode(b);
+  return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+function base64UrlDecodeToText(raw: string): string {
+  let s = raw.replace(/-/g, '+').replace(/_/g, '/');
+  const pad = s.length % 4;
+  if (pad === 1) throw new Error('bad length');
+  if (pad) s += '='.repeat(4 - pad);
+  const bin = atob(s);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new TextDecoder().decode(bytes);
+}
+
 export function encodeCursor(c: RootsCursor): string {
-  return Buffer.from(JSON.stringify(c), 'utf8').toString('base64url');
+  return base64UrlEncodeText(JSON.stringify(c));
 }
 
 export function decodeCursor(raw: string): RootsCursor | null {
   try {
-    const parsed = JSON.parse(Buffer.from(raw, 'base64url').toString('utf8'));
+    const parsed = JSON.parse(base64UrlDecodeToText(raw));
     if (typeof parsed?.t !== 'number' || typeof parsed?.i !== 'number') return null;
     if (parsed.s !== undefined && typeof parsed.s !== 'number') return null;
     return parsed as RootsCursor;
   } catch {
     return null;
   }
+}
+
+/** Accept `123` or `app_123`; anything else -> null. Single-strip only. */
+export function parseCommentId(raw: unknown): number | null {
+  const s = String(raw ?? '').trim();
+  const stripped = s.startsWith('app_') ? s.slice(4) : s;
+  if (!/^[1-9]\d*$/.test(stripped)) return null;
+  const n = Number(stripped);
+  if (!Number.isSafeInteger(n) || n < 1) return null;
+  return n;
 }
 
 // ---------- validation ----------
