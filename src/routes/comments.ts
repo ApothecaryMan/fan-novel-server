@@ -416,7 +416,8 @@ commentsNovelsRouter.get('/:novelId/comments', async (c) => {
     const nextCursor = last && all.length > start + limit
       ? encodeCursor(sort === 'top' ? { s: last.likesCount, t: new Date(last.createdAt).getTime(), i: last.id } : { t: new Date(last.createdAt).getTime(), i: last.id })
       : null;
-    c.header('Cache-Control', 'public, max-age=60, stale-while-revalidate=60');
+    const callerForCache = getEnv().syncOpen ? null : await getCaller(c);
+    if (wantStatus !== undefined) { c.header('Cache-Control', 'no-store'); c.header('Vary', 'Authorization'); } else if (callerForCache?.row) { c.header('Cache-Control', 'private, max-age=30'); c.header('Vary', 'Authorization'); } else { c.header('Cache-Control', 'public, max-age=60, stale-while-revalidate=60'); }
     return c.json({ success: true, total: all.length, data, pagination: { limit, nextCursor, hasMore: nextCursor !== null } });
   }
 
@@ -478,7 +479,8 @@ commentsNovelsRouter.get('/:novelId/comments', async (c) => {
         ? { s: last.likesCount ?? 0, t: new Date(last.createdAt as unknown as string).getTime(), i: last.id }
         : { t: new Date(last.createdAt as unknown as string).getTime(), i: last.id })
       : null;
-    c.header('Cache-Control', 'public, max-age=60, stale-while-revalidate=60');
+    const callerForCache = getEnv().syncOpen ? null : await getCaller(c);
+    if (wantStatus !== undefined) { c.header('Cache-Control', 'no-store'); c.header('Vary', 'Authorization'); } else if (callerForCache?.row) { c.header('Cache-Control', 'private, max-age=30'); c.header('Vary', 'Authorization'); } else { c.header('Cache-Control', 'public, max-age=60, stale-while-revalidate=60'); }
     return c.json({ success: true, total: Number(n ?? page.length), data, pagination: { limit, nextCursor, hasMore } });
   } catch (err) {
     console.error('[comments] db list failed', err);
