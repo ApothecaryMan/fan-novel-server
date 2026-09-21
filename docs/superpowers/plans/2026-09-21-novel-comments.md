@@ -87,7 +87,7 @@ Expected: all suites pass (`Test Files  1 passed`, `Tests` all passed).
 **Files:** Modify `src/routes/comments.ts` lines 57-72 (cursor section) + add helper next to it.
 **Key changes:** `encodeCursor`, `decodeCursor`, new `parseCommentId(raw: unknown): number | null`.
 
-- [ ] **Step 1: Replace cursor helpers with the Web-standard implementation**
+- [x] **Step 1: Replace cursor helpers with the Web-standard implementation** (done: a47459a)
 
 Old strings (exact, lines 59-72):
 ```ts
@@ -153,12 +153,12 @@ export function parseCommentId(raw: unknown): number | null {
 ```
 Rules pinned: trims whitespace; strips exactly one `app_` prefix (`app_app_1` → `invalid_id`); rejects `0`, negatives, fractions (`12.5`), empty, non-numeric, unsafe integers.
 
-- [ ] **Step 2: Typecheck**
+- [x] **Step 2: Typecheck** (done: exit 0)
 
 Run: `npx tsc --noEmit`
 Expected: exit 0.
 
-- [ ] **Step 3: Run existing pure-helper tests (must still pass — wire format unchanged)**
+- [x] **Step 3: Run existing pure-helper tests (must still pass — wire format unchanged)** (done: pass)
 
 Run: `npx vitest run src/routes/comments.test.ts -t "cursor round-trips"`
 Expected: PASS (pre-fix vectors decode identically).
