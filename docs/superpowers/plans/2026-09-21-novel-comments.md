@@ -173,7 +173,7 @@ Expected: PASS (pre-fix vectors decode identically).
 **Files:** Create `src/routes/comments.unit.test.ts`.
 **Key changes:** imports `parseCommentId`, `encodeCursor`, `decodeCursor`, `resolveEffectiveChapter` (added in Task 5 — this task's inheritance cases import it; if Task 5 is not done yet, implement the 6-line resolver here first as specified below and Task 5 reuses it verbatim).
 
-- [ ] **Step 1: Create `src/routes/comments.unit.test.ts` with this exact content**
+- [x] **Step 1: Create `src/routes/comments.unit.test.ts` with this exact content** (done: 7505279)
 
 ```ts
 import { describe, it, expect } from 'vitest';
@@ -234,7 +234,7 @@ describe('chapter inheritance resolver', () => {
 });
 ```
 
-- [ ] **Step 2: Run the new suite**
+- [x] **Step 2: Run the new suite** (done: 7 passed)
 
 Run: `npx vitest run src/routes/comments.unit.test.ts`
 Expected: `Test Files  1 passed`, all tests passed.
