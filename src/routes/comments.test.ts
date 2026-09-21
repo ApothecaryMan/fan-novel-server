@@ -148,4 +148,91 @@ describe('comments API (memory fallback, open mode)', () => {
     expect(body.needsModeration).toBe(true);
     expect(body.data.status).toBe('pending');
   });
+
+  it('chapter scope: default novel-only, ?chapter selects, reply inherits', async () => {
+    const app = openApp();
+    const novel = `ch_${Date.now()}`;
+    const root = await (await app.request(`/api/v1/novels/${novel}/comments`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ body: 'جذر الفصل 72', chapterNumber: 72 }),
+    })).json() as any;
+    const wall: any = await (await app.request(`/api/v1/novels/${novel}/comments`)).json();
+    expect(wall.data.some((c: any) => c.id === root.data.id)).toBe(false);
+    const ch: any = await (await app.request(`/api/v1/novels/${novel}/comments?chapter=72`)).json();
+    expect(ch.data.some((c: any) => c.id === root.data.id)).toBe(true);
+    const rid = Number(String(root.data.id).replace('app_', ''));
+    const rep = await (await app.request(`/api/v1/novels/${novel}/comments`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ body: 'رد موروث', parentId: rid }),
+    })).json() as any;
+    expect(rep.success).toBe(true);
+    expect(rep.data.chapterNumber).toBe(72);
+    const ch2: any = await (await app.request(`/api/v1/novels/${novel}/comments?chapter=72`)).json();
+    expect(ch2.data[0].preview.length).toBeGreaterThanOrEqual(1);
+    const bad = await app.request(`/api/v1/novels/${novel}/comments`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ body: 'رد مخالف', parentId: rid, chapterNumber: 5 }),
+    });
+    expect(bad.status).toBe(400);
+    expect(((await bad.json()) as any).code).toBe('chapter_mismatch');
+  });
+
+  it('accepts both id formats; garbage yields invalid_id', async () => {
+    const app = openApp();
+    const novel = `ids_${Date.now()}`;
+    const posted: any = await (await app.request(`/api/v1/novels/${novel}/comments`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ body: 'جذر للمعرفات' }),
+    })).json();
+    const bare = String(posted.data.id).replace('app_', '');
+    for (const id of [bare, posted.data.id]) {
+      const reps = await app.request(`/api/v1/novels/${novel}/comments/${id}/replies`);
+      expect(reps.status).toBe(200);
+      const edit = await app.request(`/api/v1/comments/${id}`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ body: `تعديل ${id} ${Date.now()}` }),
+      });
+      expect(edit.status).toBe(200);
+    }
+    const bad = await app.request(`/api/v1/novels/${novel}/comments/app_abc/replies`);
+    expect(bad.status).toBe(400);
+    expect(((await bad.json()) as any).code).toBe('invalid_id');
+  });
+
+  it('error bodies carry codes; replies total is true; previews capped at 2', async () => {
+    const app = openApp();
+    const novel = `tot_${Date.now()}`;
+    const posted: any = await (await app.request(`/api/v1/novels/${novel}/comments`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ body: 'جذر العد' }),
+    })).json();
+    const rid = Number(String(posted.data.id).replace('app_', ''));
+    const ts = Date.now();
+    for (let i = 0; i < 5; i++) {
+      await app.request(`/api/v1/novels/${novel}/comments`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ body: `رد ${i} ${ts}`, parentId: rid }),
+      });
+    }
+    const reps: any = await (await app.request(`/api/v1/novels/${novel}/comments/${rid}/replies?limit=2`)).json();
+    expect(reps.total).toBe(5);
+    expect(reps.data.length).toBe(2);
+    const list: any = await (await app.request(`/api/v1/novels/${novel}/comments?limit=10`)).json();
+    const mine = list.data.find((c: any) => c.id === posted.data.id);
+    expect(mine.preview.length).toBeLessThanOrEqual(2);
+    const dup = await app.request(`/api/v1/novels/${novel}/comments`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ body: `رد 4 ${ts}`, parentId: rid }),
+    });
+    expect(dup.status).toBe(409);
+    expect(((await dup.json()) as any).code).toBe('duplicate');
+    const cur = await app.request(`/api/v1/novels/${novel}/comments?cursor=nope`);
+    expect(((await cur.json()) as any).code).toBe('invalid_cursor');
+  });
+
+  it('list cache header is public in anonymous open mode', async () => {
+    const app = openApp();
+    const res = await app.request(`/api/v1/novels/cache_${Date.now()}/comments`);
+    expect(res.headers.get('cache-control')).toContain('public');
+  });
 });
