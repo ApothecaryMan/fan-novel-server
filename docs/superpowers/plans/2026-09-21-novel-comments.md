@@ -754,6 +754,10 @@ Expected: exit 0, `dist/` emitted.
 
 ---
 
+## Hotfix 2026-09-21: transactions removed (post-deploy outage)
+
+Tasks 6/10 wrapped DB writes in `db.transaction(...)`. Production runs on Workers → Drizzle **neon-http driver, whose `transaction()` unconditionally throws** (`No transactions support in neon-http driver`), so every production write (POST/vote/delete/report) 500'd while memory-mode tests stayed green. Fixed in `cad0573` by running the identical statements sequentially with `db.` (single-statement atomic counter SQL retained: `likesCount + delta`, `GREATEST(0,...)`, `reportsCount + 1`). Lesson: any future atomicity work must use driver-supported primitives (single-statement SQL / Neon batch API), and DB write paths need a live-DB smoke test before ship. Deployed as Worker version `80b33ca1`.
+
 ## Scope guard (do not implement)
 
 No Redis work, no index migration / new migration file, no avatar upload endpoint, no app-repo edits, no changes to novels/chapters/auth shape/sync/uploads/decorations/billing/Cloudflare config, no live-Neon commands. Tunables unchanged: `EDIT_WINDOW_MS` 15min, `MAX_EDITS` 5, cooldowns 30s/10s, `DAILY_CAP` 100, `REPORTS_TO_PENDING` 3, `MAX_DEPTH` 3, rate budgets POST 5/min vote/report/edit 30/10/30.
