@@ -358,7 +358,7 @@ Expected: exit 0. (Callers of `novelExists` still use boolean at this point — 
 **Files:** Modify `src/routes/comments.ts` POST handler (lines 555-662).
 **Key changes:** `resolveWriter` stays (now cached); `novelExists` tri-state consumption; `effectiveChapter` insert; scope-match against inherited value; transaction wrapper; coded errors.
 
-- [ ] **Step 1: Rewrite the POST handler body per this spec**
+- [x] **Step 1: Rewrite the POST handler body per this spec** (done: 0071d38)
 
 Apply these exact edits in order:
 1. Payload failure (line 559): `c.json({ success: false, error: 'حقول غير صالحة', issues: ... }, 400)` → add `code: 'invalid_payload'`.
@@ -382,12 +382,12 @@ Note: the 503 uses the existing `تعذر التحقق` string with code `novel_
 7. Insert path: store `chapterNumber: effectiveChapter ?? null` for replies (roots keep `chapterNumber ?? null`); wrap insert + the parent/root `repliesCount` bumps in one `db.transaction(async (tx) => {...})` replacing the sequential `db.insert` + looped `db.update` calls (lines 634-650). Memory path (lines 605-627) already inherits correctly — add codes only, no logic change.
 8. Catch-all 500s keep their Arabic strings unchanged.
 
-- [ ] **Step 2: Targeted verification**
+- [x] **Step 2: Targeted verification** (done: 7 passed)
 
 Run: `npx vitest run src/routes/comments.test.ts`
 Expected: existing full-flow + cross-novel + spam tests still pass (new `code` fields are additive).
 
-- [ ] **Step 3: Typecheck**
+- [x] **Step 3: Typecheck** (done: exit 0)
 
 Run: `npx tsc --noEmit`
 Expected: exit 0 (POST call sites resolved).
