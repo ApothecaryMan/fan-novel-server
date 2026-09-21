@@ -665,26 +665,23 @@ commentsNovelsRouter.post('/:novelId/comments', prodGuard(requireAuth, rateLimit
     const depth = parent ? ((parent.depth ?? 0) + 1) : 0;
     const now = new Date();
     const replyChapter = parent ? (effectiveChapter ?? null) : (chapterNumber ?? null);
-    const row = await db.transaction(async (tx) => {
-      const inserted = await tx.insert(comments).values({
-        novelId, chapterNumber: replyChapter,
-        userId: writer.userId === 'local-dev' ? null : writer.userId,
-        parentId: parent ? parent.id : null, rootId, depth,
-        body, bodyHash: hash, status,
-        createdAt: now, updatedAt: now,
-      }).returning();
-      const created = inserted[0];
-      if (parent) {
-        const bumpIds = [parent.id, rootId].filter((x): x is number => x != null);
-        for (const pid of [...new Set(bumpIds)]) {
-          await tx.update(comments).set({
-            repliesCount: sql`${comments.repliesCount} + 1`,
-            updatedAt: new Date(),
-          }).where(eq(comments.id, pid));
-        }
+    const inserted = await db.insert(comments).values({
+      novelId, chapterNumber: replyChapter,
+      userId: writer.userId === 'local-dev' ? null : writer.userId,
+      parentId: parent ? parent.id : null, rootId, depth,
+      body, bodyHash: hash, status,
+      createdAt: now, updatedAt: now,
+    }).returning();
+    const row = inserted[0];
+    if (parent) {
+      const bumpIds = [parent.id, rootId].filter((x): x is number => x != null);
+      for (const pid of [...new Set(bumpIds)]) {
+        await db.update(comments).set({
+          repliesCount: sql`${comments.repliesCount} + 1`,
+          updatedAt: new Date(),
+        }).where(eq(comments.id, pid));
       }
-      return created;
-    });
+    }
     const lookup = new Map<string, { name: string; avatarUrl?: string }>();
     if (row.userId) lookup.set(row.userId, { name: writer.userName, avatarUrl: writer.avatarUrl });
     return c.json({
@@ -781,19 +778,17 @@ commentsRouter.delete('/:id', prodGuard(requireAuth, rateLimit(30)), async (c) =
     }
     if (!allowed) return c.json({ success: false, code: 'forbidden', error: 'غير مسموح' }, 403);
     if (row.status === 'deleted') return c.json({ success: true, message: 'تم حذف التعليق' });
-    await db.transaction(async (tx) => {
-      await tx.update(comments).set({ status: 'deleted', deletedAt: new Date(), updatedAt: new Date() }).where(eq(comments.id, id));
-      const pids = [row.parentId, row.rootId].filter((x): x is number => x != null);
-      for (const pid of [...new Set(pids)]) {
-        await tx.update(comments).set({
-          repliesCount: sql`GREATEST(0, ${comments.repliesCount} - 1)`,
-          updatedAt: new Date(),
-        }).where(eq(comments.id, pid));
-      }
-      if (writer.userId !== 'local-dev') {
-        await tx.insert(commentModLog).values({ commentId: id, action: 'delete', actorId: writer.userId });
-      }
-    });
+    await db.update(comments).set({ status: 'deleted', deletedAt: new Date(), updatedAt: new Date() }).where(eq(comments.id, id));
+    const pids = [row.parentId, row.rootId].filter((x): x is number => x != null);
+    for (const pid of [...new Set(pids)]) {
+      await db.update(comments).set({
+        repliesCount: sql`GREATEST(0, ${comments.repliesCount} - 1)`,
+        updatedAt: new Date(),
+      }).where(eq(comments.id, pid));
+    }
+    if (writer.userId !== 'local-dev') {
+      await db.insert(commentModLog).values({ commentId: id, action: 'delete', actorId: writer.userId });
+    }
     return c.json({ success: true, message: 'تم حذف التعليق' });
   } catch (err) {
     console.error('[comments] db delete failed', err);
@@ -824,36 +819,31 @@ commentsRouter.post('/:id/vote', prodGuard(requireAuth, rateLimit(30)), async (c
     return c.json({ success: true, data: { commentId: `app_${id}`, score: m.likesCount, myVote: next } });
   }
   try {
-    const outcome = await db.transaction(async (tx) => {
-      const rows = await tx.select().from(comments).where(eq(comments.id, id)).limit(1);
-      const row = rows[0];
-      if (!row || row.status !== 'visible') return { kind: 'not_found' as const };
-      if (row.userId === writer.userId) return { kind: 'self_vote' as const };
-      const next = parsed.data.value;
-      const existing = await tx.select().from(commentVotes)
-        .where(and(eq(commentVotes.commentId, id), eq(commentVotes.userId, writer.userId))).limit(1);
-      const old = existing[0]?.value ?? 0;
-      if (next === 0) {
-        if (existing[0]) await tx.delete(commentVotes).where(and(eq(commentVotes.commentId, id), eq(commentVotes.userId, writer.userId)));
-      } else if (existing[0]) {
-        await tx.update(commentVotes).set({ value: next }).where(and(eq(commentVotes.commentId, id), eq(commentVotes.userId, writer.userId)));
-      } else {
-        await tx.insert(commentVotes).values({ commentId: id, userId: writer.userId, value: next });
-      }
-      const delta = next - old;
-      let score = (row.likesCount ?? 0) + delta;
-      if (delta !== 0) {
-        const updated = await tx.update(comments).set({
-          likesCount: sql`${comments.likesCount} + ${delta}`,
-          updatedAt: new Date(),
-        }).where(eq(comments.id, id)).returning();
-        score = updated[0]?.likesCount ?? score;
-      }
-      return { kind: 'ok' as const, score, myVote: next };
-    });
-    if (outcome.kind === 'not_found') return c.json({ success: false, code: 'comment_not_found', error: 'التعليق غير موجود' }, 404);
-    if (outcome.kind === 'self_vote') return c.json({ success: false, code: 'self_vote', error: 'لا يمكن التصويت على تعليقك' }, 403);
-    return c.json({ success: true, data: { commentId: `app_${id}`, score: outcome.score, myVote: outcome.myVote } });
+    const rows = await db.select().from(comments).where(eq(comments.id, id)).limit(1);
+    const row = rows[0];
+    if (!row || row.status !== 'visible') return c.json({ success: false, code: 'comment_not_found', error: 'التعليق غير موجود' }, 404);
+    if (row.userId === writer.userId) return c.json({ success: false, code: 'self_vote', error: 'لا يمكن التصويت على تعليقك' }, 403);
+    const next = parsed.data.value;
+    const existing = await db.select().from(commentVotes)
+      .where(and(eq(commentVotes.commentId, id), eq(commentVotes.userId, writer.userId))).limit(1);
+    const old = existing[0]?.value ?? 0;
+    if (next === 0) {
+      if (existing[0]) await db.delete(commentVotes).where(and(eq(commentVotes.commentId, id), eq(commentVotes.userId, writer.userId)));
+    } else if (existing[0]) {
+      await db.update(commentVotes).set({ value: next }).where(and(eq(commentVotes.commentId, id), eq(commentVotes.userId, writer.userId)));
+    } else {
+      await db.insert(commentVotes).values({ commentId: id, userId: writer.userId, value: next });
+    }
+    const delta = next - old;
+    let score = (row.likesCount ?? 0) + delta;
+    if (delta !== 0) {
+      const updated = await db.update(comments).set({
+        likesCount: sql`${comments.likesCount} + ${delta}`,
+        updatedAt: new Date(),
+      }).where(eq(comments.id, id)).returning();
+      score = updated[0]?.likesCount ?? score;
+    }
+    return c.json({ success: true, data: { commentId: `app_${id}`, score, myVote: next } });
   } catch (err) {
     console.error('[comments] db vote failed', err);
     noteDbFailure();
@@ -878,16 +868,14 @@ commentsRouter.post('/:id/report', prodGuard(requireAuth, rateLimit(10)), async 
   try {
     const rows = await db.select().from(comments).where(eq(comments.id, id)).limit(1);
     if (!rows[0]) return c.json({ success: false, code: 'comment_not_found', error: 'التعليق غير موجود' }, 404);
-    await db.transaction(async (tx) => {
-      const bumped = await tx.update(comments).set({ reportsCount: sql`${comments.reportsCount} + 1`, updatedAt: new Date() }).where(eq(comments.id, id)).returning();
-      const cur = bumped[0];
-      if ((cur?.reportsCount ?? 0) >= REPORTS_TO_PENDING && cur?.status === 'visible') {
-        await tx.update(comments).set({ status: 'pending', updatedAt: new Date() }).where(eq(comments.id, id));
-      }
-      if (writer.userId !== 'local-dev') {
-        await tx.insert(commentModLog).values({ commentId: id, action: 'report', actorId: writer.userId });
-      }
-    });
+    const bumped = await db.update(comments).set({ reportsCount: sql`${comments.reportsCount} + 1`, updatedAt: new Date() }).where(eq(comments.id, id)).returning();
+    const cur = bumped[0];
+    if ((cur?.reportsCount ?? 0) >= REPORTS_TO_PENDING && cur?.status === 'visible') {
+      await db.update(comments).set({ status: 'pending', updatedAt: new Date() }).where(eq(comments.id, id));
+    }
+    if (writer.userId !== 'local-dev') {
+      await db.insert(commentModLog).values({ commentId: id, action: 'report', actorId: writer.userId });
+    }
     return c.json({ success: true, message: 'تم الإبلاغ' });
   } catch (err) {
     console.error('[comments] db report failed', err);
