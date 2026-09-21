@@ -593,7 +593,7 @@ Expected: clean + pass.
 **Files:** Modify `src/routes/comments.ts` lines 375 (mem list), 452 (db list), 472/481 (count).
 **Key changes:** conditional `Cache-Control` + `Vary`.
 
-- [ ] **Step 1: List headers (both DB and memory branches)**
+- [x] **Step 1: List headers (both DB and memory branches)** (done: f461978)
 
 Replace the unconditional `c.header('Cache-Control', 'public, max-age=60, stale-while-revalidate=60');` in the list handler with:
 ```ts
@@ -610,16 +610,16 @@ if (wantStatus !== undefined) {
 ```
 Reuse the already-cached caller (Task 11) — this `getCaller` call hits the context cache, adding no query. Note: the moderator `requireNovelMod` call earlier in the handler already cached the caller.
 
-- [ ] **Step 2: Count headers unchanged**
+- [x] **Step 2: Count headers unchanged** (done: untouched, f461978)
 
 Leave both count branches (`public, max-age=60, stale-while-revalidate=60`) exactly as-is — count carries no per-user data. No `Vary` added.
 
-- [ ] **Step 3: Typecheck + tests**
+- [x] **Step 3: Typecheck + tests** (done: clean, 7 passed, f461978)
 
 Run: `npx tsc --noEmit && npx vitest run src/routes/comments.test.ts`
 Expected: clean + pass.
 
-**Done criteria:** `grep -n "Cache-Control" src/routes/comments.ts` shows `public` only on list-anonymous + count branches, `private, max-age=30` and `no-store` on the personalized branches, each paired with `Vary: Authorization`.
+**Done criteria:** `grep -n "Cache-Control" src/routes/comments.ts` shows `public` only on list-anonymous + count branches, `private, max-age=30` and `no-store` on the personalized branches, each paired with `Vary: Authorization`. (done: f461978)
 
 ---
 
