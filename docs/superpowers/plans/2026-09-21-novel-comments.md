@@ -543,19 +543,19 @@ Expected: clean + pass.
 **Files:** Modify `src/routes/comments.ts` vote (787-812), soft-delete (747-757), report (834-844).
 **Key changes:** wrap each read-modify-write in `db.transaction`.
 
-- [ ] **Step 1: Vote toggle transaction**
+- [x] **Step 1: Vote toggle transaction** (done: d6fd8c0)
 
 Wrap the existing vote-row read + upsert/delete + `likesCount` delta update (lines 793-811) in `await db.transaction(async (tx) => { ... })` with all `db.` calls inside switched to `tx.`. Observable contract unchanged: `score` returned from the updated row; unique guard `(commentId, userId)` + atomic `likesCount + delta` preserved; last-writer-wins on the vote row.
 
-- [ ] **Step 2: Soft-delete transaction**
+- [x] **Step 2: Soft-delete transaction** (done: d6fd8c0)
 
 Wrap status flip + parent/root `repliesCount` decrements (`GREATEST(0, ... - 1)`, deduped pid set) + `commentModLog` insert (lines 747-757) in one `db.transaction`. Idempotent re-delete (`status === 'deleted'` → success message, no writes) stays before the transaction.
 
-- [ ] **Step 3: Report transaction**
+- [x] **Step 3: Report transaction** (done: d6fd8c0)
 
 Replace the read-bump-re-read-flip sequence (lines 837-844) with a single transaction: increment `reportsCount`, then conditional flip to `pending` when `reportsCount >= 3 AND status = 'visible'` evaluated on the just-updated row inside the same txn, then `commentModLog` insert.
 
-- [ ] **Step 4: Typecheck + tests**
+- [x] **Step 4: Typecheck + tests** (done: clean, 7 passed, d6fd8c0)
 
 Run: `npx tsc --noEmit && npx vitest run src/routes/comments.test.ts`
 Expected: clean + pass.
