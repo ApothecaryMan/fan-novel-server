@@ -470,7 +470,7 @@ Expected: clean + pass.
 **Files:** Modify `src/routes/comments.ts` list preview block (lines 423-441) and replies total (line 544).
 **Key changes:** per-root bounded fetch (chosen shape); `count(*)` for replies total; author union widened.
 
-- [ ] **Step 1: Replace the preview over-fetch block**
+- [x] **Step 1: Replace the preview over-fetch block** (done: 8cf6a95)
 
 Old strings (exact, lines 423-441):
 ```ts
@@ -512,11 +512,11 @@ New strings:
 ```
 (`rootIds` const above is now unused — delete the `const rootIds = page.map((r) => r.id);` line; keep the `inArray` import since replies/admin still use it.)
 
-- [ ] **Step 2: Widen the list author batch to the union**
+- [x] **Step 2: Widen the list author batch to the union** (done: 8cf6a95)
 
 After `previews` is built, collect `const previewUids = [...previews.values()].flat().map((k) => k.userId).filter(Boolean) as string[];` and build the lookup from roots ∪ previews (move the `buildAuthorLookup` call to after the preview fetch, passing both UID sets). Preview mapping (line 444) then uses this unified lookup instead of the root-only one.
 
-- [ ] **Step 3: True replies total**
+- [x] **Step 3: True replies total** (done: 8cf6a95)
 
 Old string (exact, line 543-544):
 ```ts
@@ -528,12 +528,12 @@ New string:
 ```
 Memory fallback (`kids.length`, line 517) unchanged. List `total` (root `count(*)`, line 404) unchanged per spec assumption.
 
-- [ ] **Step 4: Typecheck + tests**
+- [x] **Step 4: Typecheck + tests** (done: clean, 7 passed, 8cf6a95)
 
 Run: `npx tsc --noEmit && npx vitest run src/routes/comments.test.ts`
 Expected: clean + pass.
 
-**Done criteria:** A root with 10 visible children no longer starves later roots (each listed root has ≤2 oldest previews); replies `total` equals full visible-children count.
+**Done criteria:** A root with 10 visible children no longer starves later roots (each listed root has ≤2 oldest previews); replies `total` equals full visible-children count. (done: 8cf6a95)
 
 ---
 
