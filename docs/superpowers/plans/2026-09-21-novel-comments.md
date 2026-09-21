@@ -249,7 +249,7 @@ Expected: `Test Files  1 passed`, all tests passed.
 **Files:** Modify `src/middleware/rateLimit.ts` line 17.
 **Key changes:** 429 body only.
 
-- [ ] **Step 1: Edit the throttle branch**
+- [x] **Step 1: Edit the throttle branch** (done: b20c281)
 
 Old string (exact):
 ```ts
@@ -265,12 +265,12 @@ New string:
     }
 ```
 
-- [ ] **Step 2: Typecheck**
+- [x] **Step 2: Typecheck** (done: exit 0)
 
 Run: `npx tsc --noEmit`
 Expected: exit 0.
 
-**Done criteria:** Non-comments paths byte-identical; comments paths carry `{ success: false, code: 'rate_limited', error: 'too many requests' }` at 429.
+**Done criteria:** Non-comments paths byte-identical; comments paths carry `{ success: false, code: 'rate_limited', error: 'too many requests' }` at 429. (Step 2 typecheck done: exit 0, b20c281)
 
 ---
 
