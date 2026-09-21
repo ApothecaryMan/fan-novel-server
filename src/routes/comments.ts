@@ -445,8 +445,6 @@ commentsNovelsRouter.get('/:novelId/comments', async (c) => {
 
     const [{ n }] = await db.select({ n: sql<number>`count(*)::int` }).from(comments).where(base);
 
-    // authors batch
-    const lookup = await buildAuthorLookup(page.map((r) => r.userId).filter(Boolean) as string[]);
     // liked-by-me batch
     const liked = new Set<number>();
     if (!getEnv().syncOpen) {
@@ -457,25 +455,15 @@ commentsNovelsRouter.get('/:novelId/comments', async (c) => {
         for (const v of vrows) liked.add(v.commentId);
       }
     }
-    // reply preview in one query
-    const rootIds = page.map((r) => r.id);
+    // reply preview: per-root bounded fetch (oldest ≤2 visible each; no cross-root starvation)
     const previews = new Map<number, CommentRow[]>();
-    if (rootIds.length) {
-      const kids = await db.select().from(comments)
-        .where(and(inArray(comments.rootId, rootIds), visibleOnly ? eq(comments.status, 'visible') : sql`true`))
-        .orderBy(asc(comments.createdAt), asc(comments.id))
-        .limit(rootIds.length * 2 + 10);
-      const perRoot = new Map<number, number>();
-      for (const k of kids) {
-        const rk = k.rootId as number;
-        const used = perRoot.get(rk) ?? 0;
-        if (used >= 2) continue;
-        perRoot.set(rk, used + 1);
-        const arr = previews.get(rk) ?? [];
-        arr.push(k);
-        previews.set(rk, arr);
-      }
+    if (page.length) {
+      const perRoot = await Promise.all(page.map((r) => db.select().from(comments).where(and(eq(comments.rootId, r.id), visibleOnly ? eq(comments.status, 'visible') : sql`true`)).orderBy(asc(comments.createdAt), asc(comments.id)).limit(2)));
+      page.forEach((r, idx) => previews.set(r.id, perRoot[idx]));
     }
+    // authors batch: roots ∪ previews union
+    const previewUids = [...previews.values()].flat().map((k) => k.userId).filter(Boolean) as string[];
+    const lookup = await buildAuthorLookup([...page.map((r) => r.userId).filter(Boolean) as string[], ...previewUids]);
     const data = page.map((r) => ({
       ...toApi(r, authorOf(r.userId, lookup), (liked.has(r.id) ? 1 : 0) as 1 | -1 | 0),
       preview: (previews.get(r.id) ?? []).map((k) => toApi(k, authorOf(k.userId, lookup), 0)),
@@ -573,7 +561,7 @@ commentsNovelsRouter.get('/:novelId/comments/:commentId/replies', async (c) => {
     const last = page[page.length - 1];
     const nextCursor = last && hasMore ? encodeCursor({ t: new Date(last.createdAt as unknown as string).getTime(), i: last.id }) : null;
     return c.json({
-      success: true, total: page.length,
+      success: true, total: Number((await db.select({ n: sql<number>`count(*)::int` }).from(comments).where(base))[0]?.n ?? page.length),
       data: page.map((r) => toApi(r, authorOf(r.userId, lookup), 0)),
       pagination: { limit, nextCursor, hasMore },
     });
