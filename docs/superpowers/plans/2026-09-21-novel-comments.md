@@ -280,7 +280,7 @@ Expected: exit 0.
 **Files:** Modify `src/middleware/ownership.ts` (`getCaller`), `src/routes/comments.ts` (`resolveEffectiveChapter`, `novelExists`).
 **Key changes:** `getCaller` cache short-circuit; new `resolveEffectiveChapter`; `novelExists` tri-state.
 
-- [ ] **Step 1: Add cache short-circuit at the top of `getCaller`**
+- [x] **Step 1: Add cache short-circuit at the top of `getCaller`** (done: 731037b)
 
 Old string (exact, ownership.ts lines 13-15):
 ```ts
@@ -295,7 +295,7 @@ export async function getCaller(c: Context): Promise<Caller> {
   const payload = c.get('authUser') as { sub?: string } | undefined;
 ```
 
-- [ ] **Step 2: Add the inheritance resolver to comments.ts after `parseCommentId`**
+- [x] **Step 2: Add the inheritance resolver to comments.ts after `parseCommentId`** (done: 731037b)
 
 ```ts
 /** Reply scope: explicit value wins; omitted inherits the parent chapter; else novel-level null. */
@@ -307,7 +307,7 @@ export function resolveEffectiveChapter(
 }
 ```
 
-- [ ] **Step 3: Make `novelExists` tri-state**
+- [x] **Step 3: Make `novelExists` tri-state** (done: 731037b)
 
 Old strings (exact, comments.ts lines 273-285):
 ```ts
@@ -343,7 +343,7 @@ async function novelExists(novelId: string): Promise<NovelCheck> {
 }
 ```
 
-- [ ] **Step 4: Typecheck**
+- [x] **Step 4: Typecheck** (done: exit 0, zero errors — `!check` on strings is valid TS so old call sites are logically dead until Task 6)
 
 Run: `npx tsc --noEmit`
 Expected: exit 0. (Callers of `novelExists` still use boolean at this point — if `tsc` flags them, note the errors; Task 6 rewrites those call sites. Do not fix them here.)
