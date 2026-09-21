@@ -433,7 +433,7 @@ Expected: both exit 0 / pass.
 **Files:** Modify `src/routes/comments.ts` (author sections lines 406-412, 444, 535-540, 881, 912-917).
 **Key changes:** new `buildAuthorLookup(userIds: string[])`; call sites pass the union of UIDs.
 
-- [ ] **Step 1: Add the helper after `authorOf` (line 130)**
+- [x] **Step 1: Add the helper after `authorOf` (line 130)** (done: 53c93c6)
 
 ```ts
 /** Single author batch for every DB read path. Live reads off users table. */
@@ -447,7 +447,7 @@ async function buildAuthorLookup(userIds: string[]): Promise<Map<string, { name:
 }
 ```
 
-- [ ] **Step 2: Rewire call sites**
+- [x] **Step 2: Rewire call sites** (done: 53c93c6)
 
 1. List (lines 406-412): replace inline `uids`/`lookup` block with `buildAuthorLookup(page.map((r) => r.userId).filter(Boolean) as string[])` — extended in Task 9 to include preview UIDs (union set); keep roots-only here, Task 9 widens it.
 2. Replies (lines 535-540): replace inline block with `buildAuthorLookup(...)`.
@@ -455,12 +455,12 @@ async function buildAuthorLookup(userIds: string[]): Promise<Map<string, { name:
 4. `modTransition` (line 881): replace `const lookup = new Map...` (empty) with `const lookup = await buildAuthorLookup(updated.userId ? [updated.userId] : []);`
 5. `authorOf` fallback `{name:'مستخدم'}` and deleted-user `{id:'deleted', name:'مستخدم محذوف'}` with no avatar key stay exactly as-is.
 
-- [ ] **Step 3: Typecheck + tests**
+- [x] **Step 3: Typecheck + tests** (done: clean, 7 passed)
 
 Run: `npx tsc --noEmit && npx vitest run src/routes/comments.test.ts`
 Expected: clean + pass.
 
-**Done criteria:** One `users ... WHERE id IN (...)` query per read path; mod hide/restore/approve responses carry the real author; no orphaned inline author-batch blocks remain.
+**Done criteria:** One `users ... WHERE id IN (...)` query per read path; mod hide/restore/approve responses carry the real author; no orphaned inline author-batch blocks remain. (done: 53c93c6)
 
 ---
 
