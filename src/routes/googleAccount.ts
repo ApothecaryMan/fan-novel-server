@@ -35,6 +35,13 @@ export function cleanBio(value?: string | null): string | null | undefined {
 }
 
 type DisplayInput = { name?: string; username?: string; avatarUrl?: string; bannerUrl?: string };
+
+/** Seed-only guard: true when at least one admin row already exists. */
+export async function hasAnyAdmin(database: Db): Promise<boolean> {
+  const existing = await database.select({ id: users.id }).from(users)
+    .where(eq(users.role, 'admin')).limit(1);
+  return existing.length > 0;
+}
 export async function resolveGoogleAccount(database: Db, identity: VerifiedGoogleIdentity,
   input: DisplayInput, bootstrapAdmin: boolean, requestId: string) {
   const externalId = `google_${identity.sub}`;

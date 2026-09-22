@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { eq } from 'drizzle-orm';
 import { HTTPException } from 'hono/http-exception';
 import { verifyGoogleIdToken } from './googleIdentity.js';
-import { cleanBio, cleanMediaUrl, isUniqueConflict, resolveGoogleAccount } from './googleAccount.js';
+import { cleanBio, cleanMediaUrl, hasAnyAdmin, isUniqueConflict, resolveGoogleAccount } from './googleAccount.js';
 import { db, isDbAvailable, noteDbFailure } from '../database/db.js';
 import { users } from '../database/schema.js';
 import { requireAuth, signToken } from '../middleware/auth.js';
@@ -59,7 +59,17 @@ authRouter.post('/google', async (c) => {
     if (identity && identity.email !== requestEmail) return c.json({ error: 'Google email mismatch' }, 400);
     const email = identity?.email ?? requestEmail;
     const externalId = identity ? `google_${identity.sub}` : `dev_${email}`;
-    const bootstrapAdmin = adminEmails().includes(email);
+    // Seed-only bootstrap: ADMIN_EMAILS promotes only when zero admins exist.
+    // After the first admin, all further grants go via DB (/admin UI or CLI).
+    const bootstrapMatch = adminEmails().includes(email);
+    let bootstrapAdmin = false;
+    if (identity && isDbAvailable() && bootstrapMatch) {
+      try {
+        bootstrapAdmin = !(await hasAnyAdmin(db));
+      } catch {
+        bootstrapAdmin = false;
+      }
+    }
     if (identity && isDbAvailable()) {
       const row = await resolveGoogleAccount(db, identity, input, bootstrapAdmin, c.get('requestId') ?? crypto.randomUUID());
       const token = await signToken({ id: row.externalId!, email: row.email!, role: row.role });
@@ -67,6 +77,8 @@ authRouter.post('/google', async (c) => {
     }
     if (env.isProd) return c.json({ error: 'account storage unavailable' }, 503);
     // Absent-token fixtures cannot read or write persistent accounts even if a DB exists.
+    // Same seed-only rule in memory: first admin only, never re-promote.
+    const memSeed = bootstrapMatch && !memUsers.some((u) => u.role === 'admin');
     let user = memUsers.find((u) => u.externalId === externalId);
     if (!user) {
       const displayName = (input.name || email.split('@')[0]).slice(0, 100);
@@ -74,11 +86,11 @@ authRouter.post('/google', async (c) => {
       user = { id: externalId, externalId, googleSubject: identity?.sub ?? null, email,
         displayName, username: explicit, bio: null,
         avatarUrl: cleanMediaUrl(input.avatarUrl) ?? null, bannerUrl: cleanMediaUrl(input.bannerUrl) ?? null,
-        role: bootstrapAdmin ? 'admin' : 'reader' };
+        role: memSeed ? 'admin' : 'reader' };
       memUsers.push(user);
     } else {
       user.email = email;
-      if (bootstrapAdmin) user.role = 'admin';
+      if (memSeed) user.role = 'admin';
       if (input.name) user.displayName = input.name;
       if (input.username !== undefined && USERNAME_RE.test(input.username)) user.username = input.username;
       if (!cleanMediaUrl(user.avatarUrl)) user.avatarUrl = cleanMediaUrl(input.avatarUrl) ?? user.avatarUrl;

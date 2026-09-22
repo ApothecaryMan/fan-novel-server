@@ -15,7 +15,7 @@ export function identityDb() {
     const query = dialect.sqlToQuery(condition);
     const column = /"users"\."([a-z_]+)"/.exec(query.sql)?.[1];
     const key = ({ google_subject: 'googleSubject', external_id: 'externalId', id: 'id',
-      username: 'username', email: 'email' } as Record<string, keyof Row>)[column ?? ''];
+      username: 'username', email: 'email', role: 'role' } as Record<string, keyof Row>)[column ?? ''];
     if (!key) throw new Error('unexpected test query');
     return row[key] === query.params[0];
   }
