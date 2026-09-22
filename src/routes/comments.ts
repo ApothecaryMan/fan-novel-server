@@ -460,11 +460,50 @@ commentsNovelsRouter.get('/:novelId/comments', async (c) => {
         for (const v of vrows) liked.add(v.commentId);
       }
     }
-    // reply preview: per-root bounded fetch (oldest ≤2 visible each; no cross-root starvation)
+    // reply preview: ONE round trip via window function (neon-http: each
+    // query = HTTPS). Oldest ≤2 visible children per listed root.
     const previews = new Map<number, CommentRow[]>();
     if (page.length) {
-      const perRoot = await Promise.all(page.map((r) => db.select().from(comments).where(and(eq(comments.rootId, r.id), visibleOnly ? eq(comments.status, 'visible') : sql`true`)).orderBy(asc(comments.createdAt), asc(comments.id)).limit(2)));
-      page.forEach((r, idx) => previews.set(r.id, perRoot[idx]));
+      const ids = page.map((r) => r.id);
+      const statusFilter = visibleOnly ? sql`AND c."status" = 'visible'` : sql``;
+      const result = await db.execute(sql`
+        SELECT c.* FROM (
+          SELECT c.*,
+            ROW_NUMBER() OVER (PARTITION BY c."root_id" ORDER BY c."created_at" ASC, c."id" ASC) AS rn
+          FROM "comments" c
+          WHERE c."root_id" IN (${sql.join(ids.map((id) => sql`${id}`), sql`, `)})
+          ${statusFilter}
+        ) c WHERE c.rn <= 2 ORDER BY c."created_at" ASC, c."id" ASC
+      `);
+      const rawRows = ((result as unknown as { rows?: Record<string, unknown>[] }).rows ?? result) as unknown as Record<string, any>[];
+      for (const r of page) previews.set(r.id, []);
+      for (const w of rawRows) {
+        const k: CommentRow = {
+          id: Number(w.id),
+          novelId: w.novel_id,
+          chapterNumber: w.chapter_number,
+          userId: w.user_id,
+          parentId: w.parent_id != null ? Number(w.parent_id) : null,
+          rootId: w.root_id != null ? Number(w.root_id) : null,
+          depth: w.depth,
+          body: w.body,
+          bodyHash: w.body_hash,
+          status: w.status,
+          likesCount: w.likes_count,
+          repliesCount: w.replies_count,
+          reportsCount: w.reports_count,
+          editCount: w.edit_count,
+          createdAt: new Date(w.created_at),
+          updatedAt: new Date(w.updated_at),
+          editedAt: w.edited_at ? new Date(w.edited_at) : null,
+          deletedAt: w.deleted_at ? new Date(w.deleted_at) : null,
+          decidedBy: w.decided_by,
+          decidedReason: w.decided_reason,
+        } as CommentRow;
+        const rk = k.rootId as unknown as number;
+        // cap at 2 per root even if the DB shape ever drifts
+        if (rk != null && previews.has(rk) && previews.get(rk)!.length < 2) previews.get(rk)!.push(k);
+      }
     }
     // authors batch: roots ∪ previews union
     const previewUids = [...previews.values()].flat().map((k) => k.userId).filter(Boolean) as string[];
