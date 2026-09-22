@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
-import { count, desc, eq } from 'drizzle-orm';
+import { count, desc, eq, ilike, or } from 'drizzle-orm';
 import { db, isDbAvailable, noteDbFailure } from '../database/db.js';
 import { novels, roleRequests, users } from '../database/schema.js';
 import { requireAuth } from '../middleware/auth.js';
@@ -22,21 +22,30 @@ function publicUser(u: typeof users.$inferSelect) {
   return {
     id: u.id, externalId: u.externalId, email: u.email, username: u.username,
     displayName: u.displayName, avatarUrl: u.avatarUrl, bannerUrl: u.bannerUrl,
-    bio: u.bio ?? null, status: u.bio ?? null,
+    bio: u.bio ?? null,
     role: u.role, isAuthor: u.isAuthor, isTranslator: u.isTranslator,
     createdAt: u.createdAt?.toISOString() ?? null,
   };
 }
 
-// GET /api/v1/admin/users?page&limit&q
+// GET /api/v1/admin/users?page&limit&q (q searches email/username/displayName)
 adminRouter.get('/users', async (c) => {
   if (!isDbAvailable()) return c.json({ error: 'database not configured' }, 503);
   const page = Math.max(1, Number(c.req.query('page') ?? 1) || 1);
   const limit = Math.min(100, Math.max(1, Number(c.req.query('limit') ?? 20) || 20));
+  const q = (c.req.query('q') ?? '').trim().slice(0, 100);
+  const where = q
+    ? or(ilike(users.email, `%${q}%`), ilike(users.username, `%${q}%`), ilike(users.displayName, `%${q}%`))
+    : undefined;
   try {
-    const rows = await db.select().from(users).orderBy(desc(users.createdAt)).limit(limit).offset((page - 1) * limit);
-    const [{ total }] = await db.select({ total: count() }).from(users);
-    return c.json({ success: true, total: Number(total ?? rows.length), data: rows.map(publicUser) });
+    const rows = where
+      ? await db.select().from(users).where(where).orderBy(desc(users.createdAt)).limit(limit).offset((page - 1) * limit)
+      : await db.select().from(users).orderBy(desc(users.createdAt)).limit(limit).offset((page - 1) * limit);
+    const countRows = where
+      ? await db.select({ total: count() }).from(users).where(where)
+      : await db.select({ total: count() }).from(users);
+    const total = Number(countRows[0]?.total ?? rows.length);
+    return c.json({ success: true, total, data: rows.map(publicUser) });
   } catch (err) {
     console.error('[admin] users failed', err); noteDbFailure();
     return c.json({ error: 'فشل الجلب' }, 500);
@@ -134,12 +143,21 @@ adminRouter.get('/novels', async (c) => {
   if (!isDbAvailable()) return c.json({ error: 'database not configured' }, 503);
   try {
     const rows = await db.select().from(novels).orderBy(desc(novels.updatedAt)).limit(200);
+    const ownerIds = [...new Set(rows.flatMap((r) => [r.authorUserId, r.translatorUserId]).filter(Boolean))] as string[];
+    const emailById = new Map<string, string | null>();
+    for (let i = 0; i < ownerIds.length; i += 100) {
+      const chunk = ownerIds.slice(i, i + 100);
+      const owners = await db.select({ id: users.id, email: users.email }).from(users).where(or(...chunk.map((id) => eq(users.id, id))));
+      for (const o of owners) emailById.set(o.id, o.email ?? null);
+    }
     return c.json({
       success: true,
       total: rows.length,
       data: rows.map((r) => ({
         id: r.id, title: r.title, category: r.category, status: r.status,
         totalChapters: r.totalChapters ?? 0, authorUserId: r.authorUserId, translatorUserId: r.translatorUserId,
+        authorEmail: r.authorUserId ? (emailById.get(r.authorUserId) ?? null) : null,
+        translatorEmail: r.translatorUserId ? (emailById.get(r.translatorUserId) ?? null) : null,
         updatedAt: r.updatedAt?.toISOString() ?? null,
       })),
     });
