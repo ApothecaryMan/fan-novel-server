@@ -147,7 +147,7 @@ git commit -m "test(comments): pin preview-skew contract (busy root must not sta
 **Files:**
 - Modify: `/home/x1carbon/Projects/fan-novel-server/src/routes/comments.ts` lines 463-468
 
-- [ ] **Step 1: Apply the exact edit**
+- [x] **Step 1: Apply the exact edit** (done: ef7d78e + row-normalization amendment)
 
 Old string (exact, lines 463-468):
 ```ts
@@ -191,13 +191,15 @@ Rules for this edit:
 - Drizzle column mapping is `rootId -> "root_id"`, `createdAt -> "created_at"`, `status -> "status"`, `id -> "id"`, table `"comments"` (verified against `/home/x1carbon/Projects/fan-novel-server/src/database/schema.ts` lines 186-207). If `tsc` complains about the `result.rows` shape, adjust ONLY the two `rows` extraction lines; do not restructure the SQL.
 - Memory fallback (lines ~407-414) is UNCHANGED — it already implements oldest-2 correctly.
 
-- [ ] **Step 2: Typecheck**
+> **AMENDMENT 2026-09-22 (applied in ef7d78e):** the `rows`-extraction + loop above is SUPERSEDED. `db.execute()` returns raw driver rows (snake_case keys, no Drizzle camelCase mapping; bigint as string|number; timestamps as strings on neon-http), so `k.rootId` would be `undefined` → TypeError → HTTP 500 on any page with previews (memory-mode tests can't catch this). The committed code normalizes each raw row to `CommentRow` (exact key map, `Number()` for bigint ids, `new Date()` for timestamps) and pushes only when `rk != null && previews.has(rk) && length < 2`. SQL text unchanged.
+
+- [x] **Step 2: Typecheck** (done: exit 0, ef7d78e)
 
 Run (in `/home/x1carbon/Projects/fan-novel-server`):
 ```bash
 npx tsc --noEmit
 ```
-Expected: exit 0.
+Expected: exit 0. (done: exit 0, ef7d78e)
 
 **Done criteria:** `tsc` clean; the `Promise.all(page.map` preview block is gone (`grep -n "perRoot" src/routes/comments.ts` returns nothing); memory branch untouched.
 **Commit:**
