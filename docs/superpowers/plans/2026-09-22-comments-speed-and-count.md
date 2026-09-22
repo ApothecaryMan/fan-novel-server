@@ -291,7 +291,7 @@ git commit -m "perf(comments): single COUNT(*) FILTER query on count endpoint (b
   - (b) DB branch root `count(*)` (pre-Task-3 line ~451 — before the Task 3 edit point, unaffected)
   - (c) DB branch `total: Number(n ?? page.length)` return (pre-Task-3 line ~484 — AFTER the Task 3 edit point, shifted down by the window-query block; locate by exact string)
 
-- [ ] **Step 1: Edit the DB branch — count only on first page**
+- [x] **Step 1: Edit the DB branch — count only on first page** (done: b645148)
 
 Old string (exact, line 451):
 ```ts
@@ -320,7 +320,7 @@ New string:
     return c.json({ success: true, total: rootTotal, data, pagination: { limit, nextCursor, hasMore } });
 ```
 
-- [ ] **Step 2: Edit the memory branch identically (same contract in dev/open mode)**
+- [x] **Step 2: Edit the memory branch identically (same contract in dev/open mode)** (done: b645148)
 
 Old string (exact fragment, line 421):
 ```ts
@@ -332,7 +332,7 @@ New string:
     return c.json({ success: true, total: cursor ? null : all.length, data, pagination: { limit, nextCursor, hasMore: nextCursor !== null } });
 ```
 
-- [ ] **Step 3: Typecheck + tests**
+- [x] **Step 3: Typecheck + tests** (done: exit 0, 12 passed, no test updates needed, b645148)
 
 Run (in `/home/x1carbon/Projects/fan-novel-server`):
 ```bash
