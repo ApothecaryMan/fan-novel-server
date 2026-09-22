@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
-import { and, desc, eq, gte, lte, asc } from 'drizzle-orm';
+import { and, desc, eq, gte, lte, asc, inArray, sql } from 'drizzle-orm';
 import { db, isDbAvailable, noteDbFailure } from '../database/db.js';
 import { chapters, novels } from '../database/schema.js';
 import { NOVELS_STORE, type NovelData } from './novels.js';
@@ -74,8 +74,14 @@ type ChapterRow = typeof chapters.$inferSelect;
 function rowToListItem(r: ChapterRow) {
   return {
     id: r.id, novelId: r.novelId, chapterNumber: r.chapterNumber, title: r.title,
-    wordCount: r.wordCount ?? 0, createdAt: r.createdAt?.toISOString() ?? new Date().toISOString(),
+    wordCount: r.wordCount ?? 0, hash: (r as { contentHash?: string | null }).contentHash ?? null,
+    createdAt: r.createdAt?.toISOString() ?? new Date().toISOString(),
   };
+}
+
+async function sha256Hex(s: string): Promise<string> {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s ?? ''));
+  return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
 function rowToContent(r: ChapterRow) {
@@ -254,9 +260,10 @@ chaptersRouter.get('/:novelId/chapters', async (c) => {
 
   if (isDbAvailable()) {
     try {
-      const all = await db.select().from(chapters).where(eq(chapters.novelId, novelId)).orderBy(order);
-      const total = all.length;
-      const items = all.slice((page - 1) * limit, page * limit).map(rowToListItem);
+      const where = eq(chapters.novelId, novelId);
+      const [{ total }] = await db.select({ total: sql<number>`count(*)::int` }).from(chapters).where(where);
+      const rows = await db.select().from(chapters).where(where).orderBy(order).limit(limit).offset((page - 1) * limit);
+      const items = rows.map(rowToListItem);
       c.header('Cache-Control', 'public, max-age=300, stale-while-revalidate=3600');
       return c.json({ success: true, total, data: items, pagination: { page, limit, total, totalPages: Math.max(1, Math.ceil(total / limit)) } });
     } catch (err) {
@@ -268,6 +275,59 @@ chaptersRouter.get('/:novelId/chapters', async (c) => {
   const total = sorted.length;
   const items = sorted.slice((page - 1) * limit, page * limit).map((ch) => ({ id: ch.id, novelId: ch.novelId, chapterNumber: ch.chapterNumber, title: ch.title, wordCount: ch.wordCount, createdAt: ch.createdAt }));
   return c.json({ success: true, total, data: items, pagination: { page, limit, total, totalPages: Math.max(1, Math.ceil(total / limit)) } });
+});
+
+// GET /api/v1/novels/:novelId/chapters/manifest — ultra-light change detection.
+// Returns [{ n, hash, words }] for ALL chapters (no pagination, no titles).
+// Lets clients download only new/changed chapters instead of full re-crawls.
+chaptersRouter.get('/:novelId/chapters/manifest', async (c) => {
+  const novelId = c.req.param('novelId');
+  if (isDbAvailable()) {
+    try {
+      const rows = await db.select({
+        chapterNumber: chapters.chapterNumber,
+        contentHash: chapters.contentHash,
+        wordCount: chapters.wordCount,
+      }).from(chapters).where(eq(chapters.novelId, novelId)).orderBy(asc(chapters.chapterNumber));
+      const items = rows.map((r) => ({ n: r.chapterNumber, hash: r.contentHash ?? null, words: r.wordCount ?? 0 }));
+      c.header('Cache-Control', 'public, max-age=300, stale-while-revalidate=3600');
+      return c.json({ success: true, total: items.length, data: items });
+    } catch (err) {
+      console.error('[chapters] db manifest failed', err); noteDbFailure();
+    }
+  }
+  const list = CHAPTERS_STORE.get(novelId) || [];
+  return c.json({
+    success: true, total: list.length,
+    data: [...list].sort((a, b) => a.chapterNumber - b.chapterNumber).map((ch) => ({ n: ch.chapterNumber, hash: null, words: ch.wordCount ?? 0 })),
+  });
+});
+
+const batchSchema = z.object({
+  numbers: z.array(z.number().int().min(1)).min(1).max(100),
+});
+
+// POST /api/v1/novels/:novelId/chapters/batch — fetch up to 100 chapter
+// contents in ONE round trip (bulk download without N sequential requests).
+chaptersRouter.post('/:novelId/chapters/batch', async (c) => {
+  const novelId = c.req.param('novelId');
+  const parsed = batchSchema.safeParse(await c.req.json().catch(() => null));
+  if (!parsed.success) return c.json({ success: false, error: 'numbers[1..100] مطلوبة' }, 400);
+  const nums = [...new Set(parsed.data.numbers)].sort((a, b) => a - b);
+
+  if (isDbAvailable()) {
+    try {
+      const rows = await db.select().from(chapters)
+        .where(and(eq(chapters.novelId, novelId), inArray(chapters.chapterNumber, nums)))
+        .orderBy(asc(chapters.chapterNumber));
+      return c.json({ success: true, total: rows.length, data: rows.map(rowToContent) });
+    } catch (err) {
+      console.error('[chapters] db batch failed', err); noteDbFailure();
+    }
+  }
+  const list = CHAPTERS_STORE.get(novelId) || [];
+  const found = list.filter((ch) => nums.includes(ch.chapterNumber)).sort((a, b) => a.chapterNumber - b.chapterNumber);
+  return c.json({ success: true, total: found.length, data: found });
 });
 
 // GET /api/v1/novels/:novelId/chapters/:chapterNumber
@@ -322,7 +382,8 @@ chaptersRouter.post('/:novelId/chapters', prodGuard(requireAuthOrPat, ensureNove
       const chapterNumber = body.chapterNumber ?? existing.length + 1;
       if (existing.some((r) => r.chapterNumber === chapterNumber)) return c.json({ success: false, error: 'رقم الفصل موجود مسبقاً' }, 409);
       const inserted = await db.insert(chapters).values({
-        novelId, chapterNumber, title: body.title, contentRaw: body.content, wordCount, createdAt: new Date(),
+        novelId, chapterNumber, title: body.title, contentRaw: body.content, wordCount,
+        contentHash: await sha256Hex(body.content), createdAt: new Date(),
       }).returning();
       await db.update(novels).set({ totalChapters: existing.length + 1, updatedAt: new Date() }).where(eq(novels.id, novelId));
       return c.json({ success: true, message: 'تم إضافة الفصل بنجاح', data: rowToContent(inserted[0]) }, 201);
@@ -364,6 +425,7 @@ chaptersRouter.put('/:novelId/chapters/:chapterNumber', prodGuard(requireAuthOrP
       await db.update(chapters).set({
         title: parsed.data.title ?? undefined,
         contentRaw: parsed.data.content ?? undefined,
+        contentHash: parsed.data.content != null ? await sha256Hex(parsed.data.content) : undefined,
         wordCount,
       }).where(eq(chapters.id, rows[0].id));
       const updated = await db.select().from(chapters).where(eq(chapters.id, rows[0].id)).limit(1);

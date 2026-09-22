@@ -1,6 +1,6 @@
 {
-  "id": "9075ddc5-9e28-4000-8bac-af219fa9c54f",
-  "prevId": "c0a86b47-60d1-4ef8-a67a-6d85f2e922f0",
+  "id": "aec64cb5-1d1b-447a-bc3f-20fb17791317",
+  "prevId": "9075ddc5-9e28-4000-8bac-af219fa9c54f",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -138,6 +138,12 @@
         "content_raw": {
           "name": "content_raw",
           "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "content_hash": {
+          "name": "content_hash",
+          "type": "varchar(64)",
           "primaryKey": false,
           "notNull": false
         },

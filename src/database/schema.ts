@@ -50,6 +50,7 @@ export const chapters = pgTable('chapters', {
   chapterNumber: integer('chapter_number').notNull(),
   title: varchar('title', { length: 255 }).notNull(),
   contentRaw: text('content_raw'),
+  contentHash: varchar('content_hash', { length: 64 }),
   wordCount: integer('word_count').default(0),
   viewsCount: integer('views_count').default(0),
   createdAt: timestamp('created_at').defaultNow().notNull()

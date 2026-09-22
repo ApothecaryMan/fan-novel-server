@@ -57,6 +57,13 @@
       "when": 1790093612090,
       "tag": "0008_opposite_malice",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1790102873232,
+      "tag": "0008_add_content_hash",
+      "breakpoints": true
     }
   ]
 }
