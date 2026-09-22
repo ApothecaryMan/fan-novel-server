@@ -6,34 +6,117 @@ import { requireAuth } from '../middleware/auth.js';
 
 export const profileRouter = new Hono();
 
-export function xpForTotals(totalSeconds: number, totalWords: number): number {
+// Mirror of Fan Novel app src/features/stats/readingLevels.ts (same table,
+// same tier names after T3/T4 swap). Server never invents its own formula:
+// input is active minutes = floor(totalSeconds / 60).
+export const MAX_LEVEL = 50;
+export const LEVELS_PER_TIER = 10;
+export const TIER_STEPS_HOURS = [1, 2, 4, 8, 15] as const;
+
+export interface TierMeta {
+  tier: number;
+  nameKey: `levels.tier${1 | 2 | 3 | 4 | 5}`;
+  nameAr: string;
+  nameEn: string;
+  color: string;
+  soft: string;
+}
+
+export const TIER_META: TierMeta[] = [
+  { tier: 1, nameKey: 'levels.tier1', nameAr: 'مبتدئ', nameEn: 'Beginner', color: '#4CAF50', soft: '#81A684' },
+  { tier: 2, nameKey: 'levels.tier2', nameAr: 'قارئ', nameEn: 'Reader', color: '#5B8DEF', soft: '#7E9CCB' },
+  { tier: 3, nameKey: 'levels.tier3', nameAr: 'خبير', nameEn: 'Expert', color: '#FF7043', soft: '#CC8B6C' },
+  { tier: 4, nameKey: 'levels.tier4', nameAr: 'مهووس', nameEn: 'Devourer', color: '#9B72CF', soft: '#A493C4' },
+  { tier: 5, nameKey: 'levels.tier5', nameAr: 'أسطورة', nameEn: 'Legend', color: '#FFB300', soft: '#C7A24B' },
+];
+
+export interface LevelRow {
+  level: number;
+  tier: number;
+  positionInTier: number;
+  stepHours: number;
+  deltaHours: number;
+  deltaMinutes: number;
+  cumulativeHours: number;
+  cumulativeMinutes: number;
+}
+
+function buildLevelTable(): LevelRow[] {
+  const rows: LevelRow[] = [];
+  let cumulative = 0;
+  for (let level = 1; level <= MAX_LEVEL; level++) {
+    const tier = Math.ceil(level / LEVELS_PER_TIER);
+    const positionInTier = ((level - 1) % LEVELS_PER_TIER) + 1;
+    const stepHours = TIER_STEPS_HOURS[tier - 1];
+    const deltaHours = stepHours * positionInTier;
+    cumulative += deltaHours;
+    rows.push({ level, tier, positionInTier, stepHours, deltaHours,
+      deltaMinutes: deltaHours * 60, cumulativeHours: cumulative, cumulativeMinutes: cumulative * 60 });
+  }
+  return rows;
+}
+
+export const LEVEL_TABLE: LevelRow[] = buildLevelTable();
+
+export function minutesToReach(level: number): number {
+  if (level <= 1) return 0;
+  if (level > MAX_LEVEL) return LEVEL_TABLE[MAX_LEVEL - 1].cumulativeMinutes;
+  return LEVEL_TABLE[level - 2].cumulativeMinutes;
+}
+
+export function tierOfLevel(level: number): number {
+  const clamped = Math.min(MAX_LEVEL, Math.max(1, Math.floor(level)));
+  return Math.ceil(clamped / LEVELS_PER_TIER);
+}
+
+export function isTierEntryLevel(level: number): boolean {
+  return level > 1 && level <= MAX_LEVEL && (level - 1) % LEVELS_PER_TIER === 0;
+}
+
+export interface LevelInfo {
+  level: number;
+  tier: number;
+  tierMeta: TierMeta;
+  isTierEntry: boolean;
+  isMax: boolean;
+  progress: number;
+  totalMinutes: number;
+  currentRequiredHours: number;
+  nextRequiredHours: number | null;
+  minutesIntoLevel: number;
+  minutesToNext: number;
+}
+
+export function getLevelFromMinutes(totalActiveMinutes: number): LevelInfo {
+  const total = Number.isFinite(totalActiveMinutes) ? Math.max(0, Math.floor(totalActiveMinutes)) : 0;
+  let level = 1;
+  for (let t = 1; t < MAX_LEVEL; t++) {
+    if (total >= LEVEL_TABLE[t - 1].cumulativeMinutes) level = t + 1;
+    else break;
+  }
+  const tier = tierOfLevel(level);
+  const currentRequired = minutesToReach(level);
+  const isMax = level >= MAX_LEVEL;
+  const nextRequired = isMax ? null : minutesToReach(level + 1);
+  const span = (nextRequired ?? LEVEL_TABLE[MAX_LEVEL - 1].cumulativeMinutes) - currentRequired;
+  const progress = isMax && total >= LEVEL_TABLE[MAX_LEVEL - 1].cumulativeMinutes ? 1
+    : span > 0 ? Math.min(1, Math.max(0, (total - currentRequired) / span)) : 1;
+  return { level, tier, tierMeta: TIER_META[tier - 1], isTierEntry: isTierEntryLevel(level), isMax,
+    progress, totalMinutes: total, currentRequiredHours: currentRequired / 60,
+    nextRequiredHours: nextRequired === null ? null : nextRequired / 60,
+    minutesIntoLevel: total - currentRequired,
+    minutesToNext: nextRequired === null ? 0 : Math.max(0, nextRequired - total) };
+}
+
+export function getLevelFromSeconds(totalSeconds: number): LevelInfo {
   const s = Number.isFinite(totalSeconds) && totalSeconds > 0 ? Math.floor(totalSeconds) : 0;
-  const w = Number.isFinite(totalWords) && totalWords > 0 ? Math.floor(totalWords) : 0;
-  return s + w;
-}
-
-export function levelForXp(xp: number): number {
-  const safe = Number.isFinite(xp) && xp > 0 ? Math.floor(xp) : 0;
-  return 1 + Math.floor(Math.sqrt(safe / 1000));
-}
-
-export function xpThresholdForLevel(level: number): number {
-  const l = Math.max(1, Math.floor(level));
-  return 1000 * (l - 1) * (l - 1);
-}
-
-export function rankForLevel(level: number): string {
-  if (level >= 20) return 'Diamond';
-  if (level >= 10) return 'Gold';
-  if (level >= 5) return 'Silver';
-  return 'Bronze';
+  return getLevelFromMinutes(Math.floor(s / 60));
 }
 
 export function streakFromReadDays(readDays: string[], today = new Date()): number {
   const set = new Set(readDays.filter(Boolean));
   let streak = 0;
   const cursor = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()));
-  // Allow streak to start yesterday (today not read yet).
   const key = (d: Date) => d.toISOString().slice(0, 10);
   if (!set.has(key(cursor))) cursor.setUTCDate(cursor.getUTCDate() - 1);
   while (set.has(key(cursor))) {
@@ -55,7 +138,7 @@ function toPublic(u: any) {
 }
 
 // GET /api/v1/users/me/profile — single-request account screen payload.
-// Auth + counts + server-computed level/rank. Full lists stay in sync/pull.
+// Level uses the exact app table (active minutes); full lists stay in sync/pull.
 profileRouter.get('/me/profile', requireAuth, async (c) => {
   const sub = String(c.get('authUser')?.sub ?? '');
   if (!sub) return c.json({ error: 'account not found' }, 401);
@@ -82,20 +165,14 @@ profileRouter.get('/me/profile', requireAuth, async (c) => {
     const sessions = Number(sessRows[0]?.total ?? 0);
     const totalSeconds = Number(sessRows[0]?.seconds ?? 0);
     const totalWords = Number(sessRows[0]?.words ?? 0);
-    const xp = xpForTotals(totalSeconds, totalWords);
-    const level = levelForXp(xp);
-    const rank = rankForLevel(level);
-    const cur = xpThresholdForLevel(level);
-    const next = xpThresholdForLevel(level + 1);
-    const progressToNext = next > cur ? Math.min(1, Math.max(0, (xp - cur) / (next - cur))) : 1;
-    const nextLevelAt = Math.max(0, next - xp);
+    const levelInfo = getLevelFromSeconds(totalSeconds);
     const streakDays = streakFromReadDays(dayRows.map((r) => r.readDay).filter(Boolean));
 
     return c.json({
       success: true,
       user: toPublic(row),
       stats: { library, history, sessions, totalSeconds, totalWords, streakDays },
-      xp, level, rank, progressToNext, nextLevelAt,
+      ...levelInfo,
     });
   } catch (error) {
     noteDbFailure();
