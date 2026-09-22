@@ -36,7 +36,7 @@ export function identityDb() {
       if (nextInsertError) { const error = nextInsertError; nextInsertError = null; throw error; }
       if (table !== users) return [];
       const row = { id: crypto.randomUUID(), email: null, googleSubject: null, externalId: null,
-        username: null, displayName: null, passwordHash: null, avatarUrl: null, bannerUrl: null,
+        username: null, displayName: null, passwordHash: null, avatarUrl: null, bannerUrl: null, bio: null,
         role: 'reader', isAuthor: false, isTranslator: false, createdAt: new Date(), updatedAt: new Date(), ...value } as Row;
       for (const key of ['externalId', 'googleSubject', 'email', 'username'] as const) {
         if (row[key] !== null && rows.some((existing) => existing[key] === row[key])) throw { code: '23505' };

@@ -22,6 +22,7 @@ function publicUser(u: typeof users.$inferSelect) {
   return {
     id: u.id, externalId: u.externalId, email: u.email, username: u.username,
     displayName: u.displayName, avatarUrl: u.avatarUrl, bannerUrl: u.bannerUrl,
+    bio: u.bio ?? null, status: u.bio ?? null,
     role: u.role, isAuthor: u.isAuthor, isTranslator: u.isTranslator,
     createdAt: u.createdAt?.toISOString() ?? null,
   };

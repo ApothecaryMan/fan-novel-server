@@ -17,7 +17,21 @@ export function isUniqueConflict(error: unknown): boolean {
 export function cleanMediaUrl(url?: string | null): string | undefined {
   if (typeof url !== 'string') return undefined;
   const value = url.trim();
-  return /^https?:\/\//i.test(value) ? value.slice(0, 2000) : undefined;
+  if (!value) return undefined;
+  if (/^https?:\/\//i.test(value)) return value.slice(0, 2000);
+  // Server-hosted uploads (POST /api/v1/upload/cover returns a relative
+  // /uploads/covers/<file> URL). Accept the safe subset so avatars/banners
+  // uploaded here persist across reinstalls instead of being rejected.
+  if (/^\/uploads\/covers\/[\w.\-]+\.(png|jpg|jpeg|webp|gif)$/i.test(value)) return value.slice(0, 2000);
+  return undefined;
+}
+
+export function cleanBio(value?: string | null): string | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim().slice(0, 500);
+  return trimmed.length === 0 ? null : trimmed;
 }
 
 type DisplayInput = { name?: string; username?: string; avatarUrl?: string; bannerUrl?: string };

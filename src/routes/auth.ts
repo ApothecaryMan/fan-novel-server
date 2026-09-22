@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { eq } from 'drizzle-orm';
 import { HTTPException } from 'hono/http-exception';
 import { verifyGoogleIdToken } from './googleIdentity.js';
-import { cleanMediaUrl, isUniqueConflict, resolveGoogleAccount } from './googleAccount.js';
+import { cleanBio, cleanMediaUrl, isUniqueConflict, resolveGoogleAccount } from './googleAccount.js';
 import { db, isDbAvailable, noteDbFailure } from '../database/db.js';
 import { users } from '../database/schema.js';
 import { requireAuth, signToken } from '../middleware/auth.js';
@@ -32,6 +32,7 @@ function toPublic(u: any) {
     id: u.externalId ?? u.id, externalId: u.externalId ?? u.id, email: u.email,
     name: u.displayName ?? null, username: u.username ?? null,
     avatarUrl: u.avatarUrl, bannerUrl: u.bannerUrl ?? null,
+    bio: u.bio ?? null, status: u.bio ?? null,
     role: u.role ?? 'reader', isAuthor: Boolean(u.isAuthor), isTranslator: Boolean(u.isTranslator),
     provider: 'google',
   };
@@ -71,7 +72,7 @@ authRouter.post('/google', async (c) => {
       const displayName = (input.name || email.split('@')[0]).slice(0, 100);
       const explicit = typeof input.username === 'string' && USERNAME_RE.test(input.username) ? input.username : null;
       user = { id: externalId, externalId, googleSubject: identity?.sub ?? null, email,
-        displayName, username: explicit,
+        displayName, username: explicit, bio: null,
         avatarUrl: cleanMediaUrl(input.avatarUrl) ?? null, bannerUrl: cleanMediaUrl(input.bannerUrl) ?? null,
         role: bootstrapAdmin ? 'admin' : 'reader' };
       memUsers.push(user);
@@ -144,11 +145,13 @@ authRouter.get('/username/availability', requireAuth, async (c) => {
   }
 });
 // PATCH /api/v1/auth/me — explicit profile edit (display name, handle,
-// avatar, banner). Unlike POST /google (fill-or-heal), this overwrites:
-// media URLs must be remote http(s) — device file URIs are rejected.
+// bio/status, avatar, banner). Unlike POST /google (fill-or-heal), this overwrites:
+// media URLs must be remote http(s) or server /uploads/covers/* — device file URIs are rejected.
 const profilePatchSchema = z.object({
   name: z.string().min(1).max(100).optional(),
   username: z.string().regex(USERNAME_RE, 'اسم المستخدم: 3-20 حرف (أحرف وأرقام و_)').optional(),
+  bio: z.string().max(500).nullable().optional(),
+  status: z.string().max(500).nullable().optional(),
   avatarUrl: z.string().max(2000).nullable().optional(),
   bannerUrl: z.string().max(2000).nullable().optional(),
 });
@@ -158,14 +161,18 @@ authRouter.patch('/me', requireAuth, async (c) => {
   const sub = payload.sub ?? '';
   const parsed = profilePatchSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return c.json({ error: 'بيانات الملف الشخصي غير صالحة', issues: parsed.error.issues }, 400);
-  const { name, username, avatarUrl, bannerUrl } = parsed.data;
-  if (name === undefined && username === undefined && avatarUrl === undefined && bannerUrl === undefined) {
+  const { name, username, bio, status, avatarUrl, bannerUrl } = parsed.data;
+  const bioInput = bio !== undefined ? bio : status;
+  if (name === undefined && username === undefined && bioInput === undefined && avatarUrl === undefined && bannerUrl === undefined) {
     return c.json({ error: 'لا يوجد ما يتم تحديثه' }, 400);
   }
   for (const [label, url] of [['avatarUrl', avatarUrl], ['bannerUrl', bannerUrl]] as const) {
     if (url !== undefined && url !== null && !cleanMediaUrl(url)) {
-      return c.json({ error: `${label} يجب أن يكون رابط صورة http(s)` }, 400);
+      return c.json({ error: `${label} يجب أن يكون رابط صورة http(s) أو /uploads/covers/` }, 400);
     }
+  }
+  if (bioInput !== undefined && bioInput !== null && cleanBio(bioInput) === undefined) {
+    return c.json({ error: 'bio غير صالح' }, 400);
   }
 
   if (isDbAvailable() && (getEnv().isProd || !sub.startsWith('dev_'))) {
@@ -184,6 +191,7 @@ authRouter.patch('/me', requireAuth, async (c) => {
       const patch: Record<string, unknown> = { updatedAt: new Date() };
       if (username !== undefined) patch.username = username;
       if (name !== undefined) patch.displayName = name;
+      if (bioInput !== undefined) patch.bio = cleanBio(bioInput);
       if (avatarUrl !== undefined) patch.avatarUrl = avatarUrl === null ? null : cleanMediaUrl(avatarUrl);
       if (bannerUrl !== undefined) patch.bannerUrl = bannerUrl === null ? null : cleanMediaUrl(bannerUrl);
       const [updated] = await db.update(users).set(patch).where(eq(users.id, row.id)).returning();
@@ -218,6 +226,7 @@ authRouter.patch('/me', requireAuth, async (c) => {
     user.username = username;
   }
   if (name !== undefined) user.displayName = name;
+  if (bioInput !== undefined) user.bio = cleanBio(bioInput);
   if (avatarUrl !== undefined) user.avatarUrl = avatarUrl === null ? null : cleanMediaUrl(avatarUrl);
   if (bannerUrl !== undefined) user.bannerUrl = bannerUrl === null ? null : cleanMediaUrl(bannerUrl);
   return c.json({ success: true, user: toPublic(user) });

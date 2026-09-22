@@ -13,6 +13,7 @@ export const users = pgTable('users', {
   passwordHash: text('password_hash'),
   avatarUrl: text('avatar_url'),
   bannerUrl: text('banner_url'),
+  bio: varchar('bio', { length: 500 }),
   role: varchar('role', { length: 20 }).default('reader').notNull(), // 'reader' | 'admin'
   isAuthor: boolean('is_author').default(false).notNull(),
   isTranslator: boolean('is_translator').default(false).notNull(),
