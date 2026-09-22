@@ -215,7 +215,7 @@ git commit -m "perf(comments): single window-function query for reply previews (
 **Goal:** Prove the window query preserves the exact observable contract.
 **Files:** none (verification only).
 
-- [ ] **Step 1: Run comments tests UNMODIFIED**
+- [x] **Step 1: Run comments tests UNMODIFIED** (done: 12 passed, no test edits)
 
 Run (in `/home/x1carbon/Projects/fan-novel-server`):
 ```bash
