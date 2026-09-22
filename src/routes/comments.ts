@@ -418,7 +418,7 @@ commentsNovelsRouter.get('/:novelId/comments', async (c) => {
       : null;
     const callerForCache = getEnv().syncOpen ? null : await getCaller(c);
     if (wantStatus !== undefined) { c.header('Cache-Control', 'no-store'); c.header('Vary', 'Authorization'); } else if (callerForCache?.row) { c.header('Cache-Control', 'private, max-age=30'); c.header('Vary', 'Authorization'); } else { c.header('Cache-Control', 'public, max-age=60, stale-while-revalidate=60'); }
-    return c.json({ success: true, total: all.length, data, pagination: { limit, nextCursor, hasMore: nextCursor !== null } });
+    return c.json({ success: true, total: cursor ? null : all.length, data, pagination: { limit, nextCursor, hasMore: nextCursor !== null } });
   }
 
   try {
@@ -448,7 +448,14 @@ commentsNovelsRouter.get('/:novelId/comments', async (c) => {
     const hasMore = rows.length > limit;
     const page = hasMore ? rows.slice(0, limit) : rows;
 
-    const [{ n }] = await db.select({ n: sql<number>`count(*)::int` }).from(comments).where(base);
+    // S2: root total only on the first page (no cursor). Later pages return
+    // total: null; clients fall back to the first-page cached total or the
+    // count endpoint. Saves 1 HTTPS round trip per scroll page on neon-http.
+    let rootTotal: number | null = null;
+    if (!cursor) {
+      const [{ n }] = await db.select({ n: sql<number>`count(*)::int` }).from(comments).where(base);
+      rootTotal = Number(n ?? page.length);
+    }
 
     // liked-by-me batch
     const liked = new Set<number>();
@@ -520,7 +527,7 @@ commentsNovelsRouter.get('/:novelId/comments', async (c) => {
       : null;
     const callerForCache = getEnv().syncOpen ? null : await getCaller(c);
     if (wantStatus !== undefined) { c.header('Cache-Control', 'no-store'); c.header('Vary', 'Authorization'); } else if (callerForCache?.row) { c.header('Cache-Control', 'private, max-age=30'); c.header('Vary', 'Authorization'); } else { c.header('Cache-Control', 'public, max-age=60, stale-while-revalidate=60'); }
-    return c.json({ success: true, total: Number(n ?? page.length), data, pagination: { limit, nextCursor, hasMore } });
+    return c.json({ success: true, total: rootTotal, data, pagination: { limit, nextCursor, hasMore } });
   } catch (err) {
     console.error('[comments] db list failed', err);
     noteDbFailure();
