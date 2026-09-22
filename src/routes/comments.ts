@@ -545,9 +545,10 @@ commentsNovelsRouter.get('/:novelId/comments/count', async (c) => {
   try {
     const chapterCond = chapter !== undefined ? eq(comments.chapterNumber, chapter) : sql`${comments.chapterNumber} IS NULL`;
     const base = and(eq(comments.novelId, novelId), chapterCond, eq(comments.status, 'visible'));
-    const [{ n: total }] = await db.select({ n: sql<number>`count(*)::int` }).from(comments).where(base);
-    const [{ n: roots }] = await db.select({ n: sql<number>`count(*)::int` }).from(comments)
-      .where(and(base, sql`${comments.parentId} IS NULL`));
+    const [{ total, roots }] = await db.select({
+      total: sql<number>`count(*)::int`,
+      roots: sql<number>`count(*) filter (where ${comments.parentId} is null)::int`,
+    }).from(comments).where(base);
     c.header('Cache-Control', 'public, max-age=60, stale-while-revalidate=60');
     return c.json({ success: true, data: { total: Number(total ?? 0), roots: Number(roots ?? 0) } });
   } catch (err) {
