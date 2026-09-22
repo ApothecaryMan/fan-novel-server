@@ -825,7 +825,7 @@ git commit -m "feat(app): drawer reuses fresh HUD badge count; nullable list tot
 - Modify: `/home/x1carbon/Projects/Fan Novel/app/reader/[chapterId].tsx` (add prefetch to the Task 8 effect's `run`)
 - Modify: `/home/x1carbon/Projects/Fan Novel/src/components/reader/CommentsDrawer.tsx` (seed from page cache on open)
 
-- [ ] **Step 1: Extend the Task 8 `run` to also prefetch the first page**
+- [x] **Step 1: Extend the Task 8 `run` to also prefetch the first page** (done: b58b3cc)
 
 In the Task 8 `run` closure (the `void (async () => {...})()` inside `[chapterId].tsx`), AFTER the `setBadge(...)` / `setNativeCommentCount(c.total)` lines, append:
 
@@ -847,7 +847,7 @@ In the Task 8 `run` closure (the `void (async () => {...})()` inside `[chapterId
 
 Notes: `nativeCommentsApi` is already dynamically imported in that closure — reuse the binding, do not import twice. `cancelled` is in scope. Limit 20 matches the drawer's default page size. On failure the drawer falls back to its normal open-load (no user-visible change).
 
-- [ ] **Step 2: Drawer seeds threads from the page cache, then refreshes (SWR)**
+- [x] **Step 2: Drawer seeds threads from the page cache, then refreshes (SWR)** (done: b58b3cc)
 
 Replace the WHOLE IIFE opening through the reset block from Task 9 (exact old —
 must match the Task 9 result verbatim, including the reset comment):
@@ -935,7 +935,7 @@ New:
 block. Reuse the existing dynamic-import style for the cache module; the
 tree helper stays on its static import.)
 
-- [ ] **Step 3: App typecheck + tests**
+- [x] **Step 3: App typecheck + tests** (done: exit 0, 385 passed, b58b3cc)
 
 Run (in `/home/x1carbon/Projects/Fan Novel`):
 ```bash
