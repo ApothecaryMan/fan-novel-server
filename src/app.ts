@@ -9,6 +9,7 @@ import { chaptersRouter, chaptersTimelineRouter } from './routes/chapters.js';
 import { commentsNovelsRouter, commentsRouter, adminCommentsRouter } from './routes/comments.js';
 import { uploadRouter } from './routes/upload.js';
 import { authRouter } from './routes/auth.js';
+import { profileRouter } from './routes/profile.js';
 import { authorKeysRouter } from './routes/authorKeys.js';
 import { syncRouter } from './routes/sync.js';
 import { authorRouter } from './routes/author.js';
@@ -33,6 +34,7 @@ export function createApp() {
   if (!env.isProd) app.use('*', prettyJSON());
 
   app.use('/api/v1/auth/*', rateLimit(30));
+  app.use('/api/v1/users/*', rateLimit(30));
   app.use('/api/v1/author/keys*', rateLimit(10));
   app.use('/api/v1/upload/*', rateLimit(20));
   app.use('/api/v1/admin/*', rateLimit(60));
@@ -113,6 +115,7 @@ export function createApp() {
   });
 
   app.route('/api/v1/auth', authRouter);
+  app.route('/api/v1/users', profileRouter);
   app.route('/api/v1/author/keys', authorKeysRouter);
   app.route('/api/v1/sync', syncRouter);
   app.route('/api/v1/author', authorRouter);
@@ -153,6 +156,7 @@ export function createApp() {
         syncPush: 'POST /api/v1/sync/push',
         syncPull: 'POST /api/v1/sync/pull',
         syncStats: 'POST /api/v1/sync/stats',
+        userProfile: 'GET /api/v1/users/me/profile',
       },
     });
   });
