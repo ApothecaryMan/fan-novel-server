@@ -959,7 +959,7 @@ git commit -m "feat(app): idle-prefetch first comments page; drawer opens stale-
 - Modify: `/home/x1carbon/Projects/Fan Novel/src/features/comments/nativeApi.ts` (`req`, `listRoots`, `count`)
 - Modify: `/home/x1carbon/Projects/Fan Novel/src/components/reader/CommentsDrawer.tsx` (effect cleanup aborts)
 
-- [ ] **Step 1: Thread an optional AbortSignal through `req`/`listRoots`/`count`**
+- [x] **Step 1: Thread an optional AbortSignal through `req`/`listRoots`/`count`** (done: e478792)
 
 In `nativeApi.ts`, old (exact, lines 90-94):
 ```ts
@@ -1083,7 +1083,7 @@ New:
 
 Abort-error mapping: `req`'s catch maps aborts via `transportCode(e)` (already handles `AbortError` as timeout/network — verify by reading `nativeErrors.ts` `transportCode`; if it does NOT special-case abort names, add NO new mapping — the drawer's catch already treats unknown codes with the generic toast, and the `cancelled` flag suppresses all handling. Do not invent a new error code.)
 
-- [ ] **Step 2: Drawer aborts in-flight load on effect cleanup**
+- [x] **Step 2: Drawer aborts in-flight load on effect cleanup** (done: e478792)
 
 In `CommentsDrawer.tsx` native effect: add a ref at component top-level (next to `loadingMoreId`, line 154). Old (exact, line 154):
 ```tsx
@@ -1134,7 +1134,7 @@ New:
 
 The abort fires a rejection inside the IIFE's try → caught by the existing catch → `if (cancelled) return` suppresses toast/warn. No new error UI. The 60s count poll is NOT aborted (it has its own lifecycle); only the open-load is.
 
-- [ ] **Step 3: App typecheck + tests**
+- [x] **Step 3: App typecheck + tests** (done: exit 0, 45 comment tests, e478792)
 
 Run (in `/home/x1carbon/Projects/Fan Novel`):
 ```bash
