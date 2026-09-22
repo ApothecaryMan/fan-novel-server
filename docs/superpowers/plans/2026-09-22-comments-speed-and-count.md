@@ -223,7 +223,7 @@ npx vitest run src/routes/comments.test.ts
 ```
 Expected: all pass, including the Task 2 skew test, with zero test-file edits since Task 2.
 
-- [ ] **Step 2: Confirm no other test file references previews**
+- [x] **Step 2: Confirm no other test file references previews** (done: only comments.test.ts)
 
 Run (in `/home/x1carbon/Projects/fan-novel-server`):
 ```bash
@@ -242,7 +242,7 @@ Expected: hits only in `src/routes/comments.test.ts` (the skew + capped-at-2 blo
 **Files:**
 - Modify: `/home/x1carbon/Projects/fan-novel-server/src/routes/comments.ts` (count DB branch; line numbers below are pre-Task-3 — locate blocks by their exact strings, since Task 3 shifts later lines down)
 
-- [ ] **Step 1: Apply the exact edit**
+- [x] **Step 1: Apply the exact edit** (done: b522b7d; note: file-wide count(*) grep = 5 hits incl. pre-existing cooldown/list/replies uses — count DB branch now one select)
 
 Old string (exact, lines 509-511):
 ```ts
@@ -265,7 +265,7 @@ Then update the response line (exact old, line 513):
 ```
 That line is UNCHANGED in text — verify it still reads exactly that (the destructured names now come from the single-row select). No edit needed if it matches; if the variable names differ after your edit, fix them to `total`/`roots` so the response stays byte-identical.
 
-- [ ] **Step 2: Typecheck + count-path tests**
+- [x] **Step 2: Typecheck + count-path tests** (done: exit 0, 12 passed, b522b7d)
 
 Run (in `/home/x1carbon/Projects/fan-novel-server`):
 ```bash
