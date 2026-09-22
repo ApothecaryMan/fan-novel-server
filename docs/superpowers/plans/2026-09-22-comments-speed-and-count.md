@@ -356,7 +356,7 @@ git commit -m "perf(comments): list total only on first page (null on cursor pag
 - Create: `/home/x1carbon/Projects/Fan Novel/src/features/comments/nativeCommentsCache.ts` (full contents below)
 - Create: `/home/x1carbon/Projects/Fan Novel/src/features/comments/nativeCommentsCache.test.ts` (full contents below)
 
-- [ ] **Step 1: Create `nativeCommentsCache.ts` with this EXACT content**
+- [x] **Step 1: Create `nativeCommentsCache.ts` with this EXACT content** (done: c178aea, app repo)
 
 ```ts
 // Shared cache for native comment counts + first pages.
@@ -457,7 +457,7 @@ export function clearNativeCommentsCache(): void {
 }
 ```
 
-- [ ] **Step 2: Create `nativeCommentsCache.test.ts` with this EXACT content**
+- [x] **Step 2: Create `nativeCommentsCache.test.ts` with this EXACT content** (done: c178aea)
 
 ```ts
 import { describe, it, expect, beforeEach } from 'vitest';
@@ -503,7 +503,7 @@ describe('nativeCommentsCache', () => {
 });
 ```
 
-- [ ] **Step 3: Run the new app tests**
+- [x] **Step 3: Run the new app tests** (done: 3 passed + typecheck clean, c178aea)
 
 Run (in `/home/x1carbon/Projects/Fan Novel`):
 ```bash
