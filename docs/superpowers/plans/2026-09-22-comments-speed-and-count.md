@@ -1156,7 +1156,7 @@ git commit -m "fix(app): abort stale native comments list/count on drawer reopen
 **Goal:** Prove nothing broke end-to-end. No deploy step — the coordinator deploys separately.
 **Files:** none (verification only).
 
-- [ ] **Step 1: Server full gates**
+- [x] **Step 1: Server full gates** (done: 153 passed, typecheck+build clean)
 
 Run (in `/home/x1carbon/Projects/fan-novel-server`):
 ```bash
@@ -1170,7 +1170,7 @@ npm run typecheck && npm run build
 ```
 Expected: both exit 0, `dist/` emitted.
 
-- [ ] **Step 2: App full gates**
+- [x] **Step 2: App full gates** (done: 386 passed, typecheck clean)
 
 Run (in `/home/x1carbon/Projects/Fan Novel`):
 ```bash
@@ -1184,7 +1184,7 @@ npm run typecheck
 ```
 Expected: exit 0.
 
-- [ ] **Step 3: Contract grep audit (server)**
+- [x] **Step 3: Contract grep audit (server)** (done: N+1 gone; 5 count(*) hits explained — cooldown guard + first-page block + merged pair + replies total)
 
 Run (in `/home/x1carbon/Projects/fan-novel-server`):
 ```bash
