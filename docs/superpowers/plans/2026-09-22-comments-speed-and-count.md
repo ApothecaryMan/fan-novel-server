@@ -78,7 +78,7 @@ Expected: all tests pass. Note the exact passing count for later comparison.
 **Files:**
 - Modify: `/home/x1carbon/Projects/fan-novel-server/src/routes/comments.test.ts` (append one `it` block; do not alter existing blocks)
 
-- [ ] **Step 1: Append this exact test block** (insert after the existing `'error bodies carry codes; replies total is true; previews capped at 2'` block, before the cache-header test):
+- [x] **Step 1: Append this exact test block** (done: 9c258b4) (insert after the existing `'error bodies carry codes; replies total is true; previews capped at 2'` block, before the cache-header test):
 
 ```ts
 it('preview skew: a root with many children does not starve later roots', async () => {
@@ -124,7 +124,7 @@ two (2 roots + 11 children total). The 10 children on root one are the skew
 load that would starve root two under the old `LIMIT(roots*2+10)`
 implementation.
 
-- [ ] **Step 2: Run the extended suite**
+- [x] **Step 2: Run the extended suite** (done: 12 passed, 9c258b4)
 
 Run (in `/home/x1carbon/Projects/fan-novel-server`):
 ```bash
