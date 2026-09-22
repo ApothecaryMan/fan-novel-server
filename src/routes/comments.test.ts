@@ -230,6 +230,42 @@ describe('comments API (memory fallback, open mode)', () => {
     expect(((await cur.json()) as any).code).toBe('invalid_cursor');
   });
 
+  it('preview skew: a root with many children does not starve later roots', async () => {
+    const app = openApp();
+    const novel = `skew_${Date.now()}`;
+    const mk = (body: string) =>
+      app.request(`/api/v1/novels/${novel}/comments`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ body }),
+      });
+    const r1: any = await (await mk('skew root one')).json();
+    const r2: any = await (await mk('skew root two')).json();
+    const id1 = Number(String(r1.data.id).replace('app_', ''));
+    const id2 = Number(String(r2.data.id).replace('app_', ''));
+    const ts = Date.now();
+    for (let i = 0; i < 10; i++) {
+      await app.request(`/api/v1/novels/${novel}/comments`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ body: `skew child ${i} ${ts}`, parentId: id1 }),
+      });
+    }
+    await app.request(`/api/v1/novels/${novel}/comments`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ body: `skew lone ${ts}`, parentId: id2 }),
+    });
+    const list: any = await (await app.request(`/api/v1/novels/${novel}/comments?limit=10`)).json();
+    expect(list.success).toBe(true);
+    const got1 = list.data.find((c: any) => c.id === r1.data.id);
+    const got2 = list.data.find((c: any) => c.id === r2.data.id);
+    expect(got1).toBeDefined();
+    expect(got2).toBeDefined();
+    expect(got1.preview.length).toBe(2);
+    expect(got2.preview.length).toBe(1);
+    expect(got2.preview[0].body).toBe(`skew lone ${ts}`);
+    const times1 = got1.preview.map((k: any) => new Date(k.createdAt).getTime());
+    expect(times1[0]).toBeLessThanOrEqual(times1[1]);
+  });
+
   it('list cache header is public in anonymous open mode', async () => {
     const app = openApp();
     const res = await app.request(`/api/v1/novels/cache_${Date.now()}/comments`);
