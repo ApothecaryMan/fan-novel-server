@@ -651,7 +651,7 @@ git commit -m "feat(app): HUD badge shows native TOTAL count for server novels (
 **Files:**
 - Modify: `/home/x1carbon/Projects/Fan Novel/src/components/reader/CommentsDrawer.tsx` (native load effect, lines 278-343)
 
-- [ ] **Step 1: Apply the exact edit to the native load effect**
+- [x] **Step 1: Apply the exact edit to the native load effect** (done: 8feb0a7, app repo)
 
 Old string (exact, lines 281-291):
 ```tsx
@@ -756,7 +756,7 @@ the end of the `.finally(...)` closing (the full
 chain, just before `const iv = setInterval`), and put the new block in its
 place. The 60s count re-poll interval (lines 329-338) and cleanup (`cancelled = true; clearInterval(iv);`) STAY EXACTLY AS-IS. The pending-merge block is preserved verbatim inside the IIFE. The `totalCount` memo (lines 192-217) is UNCHANGED — `nativeCount` seeded from the badge flows through the same path.
 
-- [ ] **Step 2: Update `NativePage` for nullable S2 total**
+- [x] **Step 2: Update `NativePage` for nullable S2 total** (done: 8feb0a7)
 
 In `/home/x1carbon/Projects/Fan Novel/src/features/comments/nativeApi.ts`, old string (exact, lines 75-80):
 ```ts
@@ -801,7 +801,7 @@ New string:
 
 Check every other consumer of `page.total` / `NativePage.total` for type errors: `grep -rn "\.total" src/features/comments/ src/components/reader/CommentsDrawer.tsx`. Known consumers: drawer `setNativeCount(page.total)` (now guarded by null check in Step 1), `nativeThreadToNodes` (no total), `CommentsList siteTotal` (site-only, untouched). Fix any `tsc` complaint by null-guarding at the use site — never by coercing `?? 0` at the boundary (that would reintroduce a wrong zero on cursor pages).
 
-- [ ] **Step 3: App typecheck**
+- [x] **Step 3: App typecheck** (done: exit 0, 8feb0a7)
 
 Run (in `/home/x1carbon/Projects/Fan Novel`):
 ```bash
