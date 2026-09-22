@@ -526,7 +526,7 @@ git commit -m "feat(app): shared native comments badge/page cache (HUD + drawer,
 **Files:**
 - Modify: `/home/x1carbon/Projects/Fan Novel/app/reader/[chapterId].tsx`
 
-- [ ] **Step 1: Add the native badge effect + state (mirrors the site-count pattern)**
+- [x] **Step 1: Add the native badge effect + state (mirrors the site-count pattern)** (done: c73e421, app repo)
 
 Old string (exact, lines 129-131):
 ```tsx
@@ -594,7 +594,7 @@ Placement + dependency notes (follow exactly):
 - Dynamic `import()` (not top-level) because `nativeApi` lazily pulls `services/api` + auth store, which cannot be parsed in the node test env.
 - `chapterNum ?? undefined`: the count endpoint omits `chapter` for the novel wall (server default), matching list/count scope rule.
 
-- [ ] **Step 2: Render the native count in the badge (site novels unchanged)**
+- [x] **Step 2: Render the native count in the badge (site novels unchanged)** (done: c73e421)
 
 Old string (exact, lines 391-401):
 ```tsx
@@ -628,7 +628,7 @@ New string:
 
 Why `??` is safe here: site mode and native mode are mutually exclusive (a source either exposes `getComments` or is `internal:published`, never both — CommentsDrawer lines 147-151). One of them is always null, so `??` selects the live one and stays icon-only when both are null.
 
-- [ ] **Step 3: App typecheck**
+- [x] **Step 3: App typecheck** (done: exit 0, c73e421)
 
 Run (in `/home/x1carbon/Projects/Fan Novel`):
 ```bash
