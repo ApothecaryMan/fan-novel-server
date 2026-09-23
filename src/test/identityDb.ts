@@ -1,11 +1,19 @@
 import { vi } from 'vitest';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import type { SQL } from 'drizzle-orm';
-import { users } from '../database/schema.js';
+import { comments, users } from '../database/schema.js';
 
 type Row = typeof users.$inferSelect;
+
+export interface FakeCommentSeed {
+  userId: string | null;
+  status: string;
+  likesCount?: number | null;
+}
+
 export function identityDb() {
   const rows: Row[] = [];
+  const commentRows: { userId: string | null; status: string; likesCount: number | null }[] = [];
   let unavailable = false;
   let failure: unknown = null;
   let nextInsertError: unknown = null;
@@ -19,14 +27,45 @@ export function identityDb() {
     if (!key) throw new Error('unexpected test query');
     return row[key] === query.params[0];
   }
+  // Parse a comments WHERE clause generically: each `"comments"."<col>"`
+  // maps positionally to the same-index query param (drizzle emits $1, $2... in order).
+  function commentFilter(condition?: SQL): { userId?: string | null; status?: string } {
+    if (!condition) return {};
+    const query = dialect.sqlToQuery(condition);
+    const cols = [...query.sql.matchAll(/"comments"\."([a-z_]+)"/g)].map((m) => m[1]);
+    const out: { userId?: string | null; status?: string } = {};
+    cols.forEach((col, i) => {
+      if (col === 'user_id') out.userId = query.params[i] as string | null;
+      if (col === 'status') out.status = query.params[i] as string;
+    });
+    return out;
+  }
   function check() { if (failure) throw failure; }
-  function query(table: unknown, condition?: SQL): any {
-    const execute = async () => { check(); return table === users ? rows.filter((r) => matches(r, condition)) : []; };
+  function query(table: unknown, condition?: SQL, fields?: unknown): any {
+    const execute = async () => {
+      check();
+      if (table === users) return rows.filter((r) => matches(r, condition));
+      if (table === comments) {
+        const filter = commentFilter(condition);
+        const visible = commentRows.filter((cm) =>
+          (filter.userId === undefined || cm.userId === filter.userId) &&
+          (filter.status === undefined || cm.status === filter.status));
+        if (fields !== null && typeof fields === 'object' && fields !== undefined &&
+          ('commentsCount' in (fields as Record<string, unknown>) ||
+           'likesReceived' in (fields as Record<string, unknown>))) {
+          const commentsCount = visible.length;
+          const likesReceived = visible.reduce((sum, cm) => sum + (cm.likesCount ?? 0), 0);
+          return [{ commentsCount, likesReceived }];
+        }
+        return visible;
+      }
+      return [];
+    };
     const builder = {
-      where: (value: SQL) => query(table, value),
+      where: (value: SQL) => query(table, value, fields),
       limit: (_value: number) => execute(),
       orderBy: (_value: unknown) => builder,
-      then: (resolve: (value: Row[]) => unknown, reject?: (reason: unknown) => unknown) => execute().then(resolve, reject),
+      then: (resolve: (value: any[]) => unknown, reject?: (reason: unknown) => unknown) => execute().then(resolve, reject),
     };
     return builder;
   }
@@ -63,12 +102,17 @@ export function identityDb() {
     };
     return { returning: execute, then: (resolve: (value: Row[]) => unknown, reject?: (reason: unknown) => unknown) => execute().then(resolve, reject) };
   } }) }));
-  const database = { select: vi.fn(() => ({ from: (table: unknown) => query(table) })), insert, update };
-  return { rows, db: database, isDbAvailable: () => !unavailable, noteDbFailure: vi.fn(),
+  const database = { select: vi.fn((fields?: unknown) => ({ from: (table: unknown) => query(table, undefined, fields) })), insert, update };
+  function seedComments(list: FakeCommentSeed[]) {
+    for (const item of list) {
+      commentRows.push({ userId: item.userId, status: item.status, likesCount: item.likesCount ?? 0 });
+    }
+  }
+  return { rows, commentRows, seedComments, db: database, isDbAvailable: () => !unavailable, noteDbFailure: vi.fn(),
     unavailable: (value: boolean) => { unavailable = value; },
     fail: (value: unknown) => { failure = value; },
     failNextInsert: (value: unknown) => { nextInsertError = value; },
-    reset: () => { rows.length = 0; unavailable = false; failure = null; nextInsertError = null;
+    reset: () => { rows.length = 0; commentRows.length = 0; unavailable = false; failure = null; nextInsertError = null;
       insert.mockClear(); update.mockClear(); database.select.mockClear(); },
   };
 }
