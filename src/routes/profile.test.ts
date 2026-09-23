@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Hono } from 'hono';
 import { requestId } from 'hono/request-id';
 import { identityDb, productionBindings } from '../test/identityDb.js';
-import { setWorkerEnv } from '../config/env.js';
+import { getEnv, setWorkerEnv } from '../config/env.js';
+import { users } from '../database/schema.js';
 import { TIER_META, getLevelFromMinutes, getLevelFromSeconds, isTierEntryLevel, minutesToReach, streakFromReadDays, tierOfLevel } from './profile.js';
 
 const holder = vi.hoisted(() => ({ fake: null as ReturnType<typeof identityDb> | null }));
@@ -81,5 +82,144 @@ describe('GET /users/me/profile', () => {
     const res = await app.request('/users/me/profile', { headers: { Authorization: `Bearer ${token}` } });
     expect(res.status).toBe(503);
     expect(await res.text()).not.toMatch(/private-db-password|lvl2@test/);
+  });
+});
+describe('GET /users/:id/profile (public)', () => {
+  const A1_UUID = '11111111-1111-4111-8111-111111111111';
+  const A1_EXTERNAL = 'google_sub1';
+  const A1_EMAIL = 'author1@test.com';
+  const B_UUID = '22222222-2222-4222-8222-222222222222';
+
+  async function seedAuthorA() {
+    await fake().db.insert(users).values({ id: A1_UUID, externalId: A1_EXTERNAL,
+      email: A1_EMAIL, displayName: 'Author One', username: 'authorone',
+      avatarUrl: 'https://cdn.test/a1.png', bannerUrl: null, bio: 'hello bio',
+      role: 'reader', isAuthor: true, isTranslator: false }).returning();
+  }
+
+  it('resolves the same author by UUID and by externalId with identical identity', async () => {
+    await seedAuthorA();
+    fake().seedComments([{ userId: A1_UUID, status: 'visible', likesCount: 1 }]);
+    const byUuid = await app.request(`/users/${A1_UUID}/profile`);
+    const byExt = await app.request(`/users/${A1_EXTERNAL}/profile`);
+    expect(byUuid.status).toBe(200);
+    expect(byExt.status).toBe(200);
+    const a: any = await byUuid.json();
+    const b: any = await byExt.json();
+    expect(a).toMatchObject({ success: true, stats: { commentsCount: 1, likesReceived: 1 } });
+    expect(b.user).toEqual(a.user);
+    expect(a.user).toMatchObject({ id: A1_EXTERNAL, externalId: A1_EXTERNAL,
+      name: 'Author One', username: 'authorone', role: 'reader',
+      isAuthor: true, isTranslator: false, provider: 'google', status: 'hello bio', bio: 'hello bio' });
+  });
+
+  it('counts visible only (pending/hidden/deleted excluded, replies included)', async () => {
+    await seedAuthorA();
+    fake().seedComments([
+      { userId: A1_UUID, status: 'visible', likesCount: 0 },
+      { userId: A1_UUID, status: 'visible', likesCount: 0 },
+      { userId: A1_UUID, status: 'pending', likesCount: 0 },
+      { userId: A1_UUID, status: 'hidden', likesCount: 0 },
+      { userId: A1_UUID, status: 'deleted', likesCount: 0 },
+    ]);
+    const res = await app.request(`/users/${A1_UUID}/profile`);
+    expect(res.status).toBe(200);
+    const body: any = await res.json();
+    expect(body.stats.commentsCount).toBe(2);
+  });
+
+  it('sums likes over visible rows only and zeroes COALESCE for authors with none visible', async () => {
+    await seedAuthorA();
+    await fake().db.insert(users).values({ id: B_UUID, externalId: 'google_subB',
+      email: 'b@test.com', displayName: 'B', role: 'reader' }).returning();
+    fake().seedComments([
+      { userId: A1_UUID, status: 'visible', likesCount: 3 },
+      { userId: A1_UUID, status: 'visible', likesCount: 5 },
+      { userId: A1_UUID, status: 'hidden', likesCount: 100 },
+      { userId: B_UUID, status: 'hidden', likesCount: 7 },
+    ]);
+    const a: any = await (await app.request(`/users/${A1_UUID}/profile`)).json();
+    expect(a.stats).toEqual({ commentsCount: 2, likesReceived: 8 });
+    const b: any = await (await app.request(`/users/${B_UUID}/profile`)).json();
+    expect(b.stats).toEqual({ commentsCount: 0, likesReceived: 0 });
+  });
+
+  it('never exposes email (key absent, address absent from serialized body)', async () => {
+    await seedAuthorA();
+    fake().seedComments([]);
+    const res = await app.request(`/users/${A1_EXTERNAL}/profile`);
+    expect(res.status).toBe(200);
+    const body: any = await res.json();
+    expect(body.user).not.toHaveProperty('email');
+    expect(JSON.stringify(body)).not.toContain(A1_EMAIL);
+    expect(Object.keys(body.user).sort()).toEqual(['avatarUrl', 'bannerUrl', 'bio',
+      'externalId', 'id', 'isAuthor', 'isTranslator', 'name', 'provider', 'role', 'status', 'username']);
+  });
+
+  it('sends the exact public cache header on success; 404 for unknown ids', async () => {
+    await seedAuthorA();
+    fake().seedComments([]);
+    const res = await app.request(`/users/${A1_UUID}/profile`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('Cache-Control')).toBe('public, max-age=60, stale-while-revalidate=60');
+    expect(res.headers.get('Vary')).toBeNull();
+    const unknownUuid = await app.request('/users/33333333-3333-4333-8333-333333333333/profile');
+    expect(unknownUuid.status).toBe(404);
+    expect(await unknownUuid.json()).toEqual({ success: false, code: 'user_not_found', error: 'user not found' });
+    const unknownExt = await app.request('/users/google_nonexistent/profile');
+    expect(unknownExt.status).toBe(404);
+    expect(await unknownExt.json()).toEqual({ success: false, code: 'user_not_found', error: 'user not found' });
+    expect(unknownUuid.headers.get('Cache-Control') ?? '').not.toContain('public');
+  });
+
+  it('400 invalid_id for whitespace-only id; 503 without leak on storage failure', async () => {
+    const empty = await app.request('/users/%20/profile');
+    expect(empty.status).toBe(400);
+    expect(await empty.json()).toEqual({ success: false, code: 'invalid_id', error: 'invalid user id' });
+    await seedAuthorA();
+    fake().fail(new Error('secret-driver-detail'));
+    const res = await app.request(`/users/${A1_UUID}/profile`);
+    expect(res.status).toBe(503);
+    const text = await res.text();
+    expect(text).not.toContain('secret-driver-detail');
+    expect(text).not.toContain(A1_EMAIL);
+    expect(await JSON.parse(text)).toEqual({ success: false, code: 'account_unavailable', error: 'account storage unavailable' });
+    expect(fake().noteDbFailure).toHaveBeenCalled();
+  });
+
+  it('memory fallback in non-prod returns zeros for known fixtures and 404 for unknown', async () => {
+    vi.stubGlobal('__WORKER_ENV__', { ...productionBindings, NODE_ENV: 'development', DATABASE_URL: undefined });
+    setWorkerEnv({ ...productionBindings, NODE_ENV: 'development', DATABASE_URL: undefined } as any);
+    expect(getEnv().isProd).toBe(false);
+    fake().unavailable(true);
+    try {
+      const created = await app.request('/auth/google', { method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: 'mem@test.com', name: 'Mem Fixture' }) });
+      expect(created.status).toBe(200);
+      const res = await app.request('/users/dev_mem@test.com/profile');
+      expect(res.status).toBe(200);
+      const body: any = await res.json();
+      expect(body).toMatchObject({ success: true, stats: { commentsCount: 0, likesReceived: 0 } });
+      expect(body.user).not.toHaveProperty('email');
+      expect(body.user.externalId).toBe('dev_mem@test.com');
+      expect(res.headers.get('Cache-Control')).toBe('public, max-age=60, stale-while-revalidate=60');
+      const miss = await app.request('/users/dev_ghost@test.com/profile');
+      expect(miss.status).toBe(404);
+      expect(await miss.json()).toEqual({ success: false, code: 'user_not_found', error: 'user not found' });
+    } finally {
+      fake().unavailable(false);
+      vi.stubGlobal('__WORKER_ENV__', undefined);
+      setWorkerEnv(productionBindings);
+    }
+  });
+
+  it('private /me/profile still works byte-for-byte (regression)', async () => {
+    const { token }: any = await (await loginAs('regress-1', 'regress@test.com')).json();
+    const res = await app.request('/users/me/profile', { headers: { Authorization: `Bearer ${token}` } });
+    expect(res.status).toBe(200);
+    const body: any = await res.json();
+    expect(body.user.email).toBe('regress@test.com');
+    expect(body.stats).toMatchObject({ library: 0, history: 0, sessions: 0 });
   });
 });
