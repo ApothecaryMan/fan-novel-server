@@ -1,8 +1,10 @@
 import { Hono } from 'hono';
 import { and, count, eq, isNull, sql } from 'drizzle-orm';
 import { db, isDbAvailable, noteDbFailure } from '../database/db.js';
-import { readingHistory, readingSessions, userLibrary, users } from '../database/schema.js';
+import { comments, readingHistory, readingSessions, userLibrary, users } from '../database/schema.js';
 import { requireAuth } from '../middleware/auth.js';
+import { getEnv } from '../config/env.js';
+import { findMemoryUser } from './auth.js';
 
 export const profileRouter = new Hono();
 
@@ -178,5 +180,59 @@ profileRouter.get('/me/profile', requireAuth, async (c) => {
     noteDbFailure();
     console.warn(JSON.stringify({ event: 'profile.storage', requestId: c.get('requestId') ?? 'no-id', outcome: 'unavailable' }));
     return c.json({ error: 'account storage unavailable' }, 503);
+  }
+});
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// Public projection: identical to toPublic() except the `email` key is ABSENT
+// (destructured away, never null) so publicly cacheable bodies cannot leak PII.
+function toPublicSafe(u: any) {
+  const { email: _email, ...rest } = toPublic(u);
+  return rest;
+}
+
+// GET /api/v1/users/:id/profile — public author card for comment avatar taps.
+// No auth. :id accepts users.id (UUID) or users.externalId (google_<sub>, dev_<email>).
+// Registered AFTER /me/profile so Hono never routes the literal `me` here.
+profileRouter.get('/:id/profile', async (c) => {
+  const raw = String(c.req.param('id') ?? '').trim();
+  if (!raw) return c.json({ success: false, code: 'invalid_id', error: 'invalid user id' }, 400);
+  // Memory fallback (no DB): non-prod resolves dev fixtures with zeroed stats;
+  // production without storage fails closed.
+  if (!isDbAvailable()) {
+    if (getEnv().isProd) {
+      return c.json({ success: false, code: 'account_unavailable', error: 'account storage unavailable' }, 503);
+    }
+    const mem = findMemoryUser(raw);
+    if (!mem) return c.json({ success: false, code: 'user_not_found', error: 'user not found' }, 404);
+    c.header('Cache-Control', 'public, max-age=60, stale-while-revalidate=60');
+    return c.json({ success: true, user: toPublicSafe(mem), stats: { commentsCount: 0, likesReceived: 0 } });
+  }
+  try {
+    let row: any = null;
+    // UUID-first: comment author chips carry the users.id UUID (dominant tap path).
+    // A UUID-shaped externalId still resolves via the externalId fallthrough below.
+    if (UUID_RE.test(raw)) {
+      [row] = await db.select().from(users).where(eq(users.id, raw)).limit(1);
+    }
+    if (!row) {
+      [row] = await db.select().from(users).where(eq(users.externalId, raw)).limit(1);
+    }
+    if (!row) return c.json({ success: false, code: 'user_not_found', error: 'user not found' }, 404);
+    // Single aggregate over the RESOLVED uuid; visible rows only (replies included,
+    // pending/hidden/deleted excluded; orphaned user_id IS NULL rows never match).
+    const [statsRow] = await db.select({
+      commentsCount: count(),
+      likesReceived: sql<number>`COALESCE(SUM(${comments.likesCount}), 0)`,
+    }).from(comments).where(and(eq(comments.userId, row.id), eq(comments.status, 'visible')));
+    const commentsCount = Number(statsRow?.commentsCount ?? 0);
+    const likesReceived = Number(statsRow?.likesReceived ?? 0);
+    c.header('Cache-Control', 'public, max-age=60, stale-while-revalidate=60');
+    return c.json({ success: true, user: toPublicSafe(row), stats: { commentsCount, likesReceived } });
+  } catch (error) {
+    noteDbFailure();
+    console.warn(JSON.stringify({ event: 'profile.storage', requestId: c.get('requestId') ?? 'no-id', outcome: 'unavailable' }));
+    return c.json({ success: false, code: 'account_unavailable', error: 'account storage unavailable' }, 503);
   }
 });
