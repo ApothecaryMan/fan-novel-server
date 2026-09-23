@@ -14,6 +14,13 @@ export const authRouter = new Hono();
 // Explicit development/test fixtures only. Never consult these in production.
 const memUsers: any[] = [];
 
+// Read-only memory-fixture lookup for the public profile route (non-prod, no DB).
+// externalId match first (dev fixtures are keyed by externalId, with id === externalId),
+// then id match; returns the stored object (do NOT mutate) or null.
+export function findMemoryUser(raw: string): any | null {
+  return memUsers.find((u) => u.externalId === raw) ?? memUsers.find((u) => u.id === raw) ?? null;
+}
+
 const googleSchema = z.object({
   name: z.string().max(100).optional(),
   username: z.string().regex(USERNAME_RE, 'اسم المستخدم: 3-20 حرف (أحرف وأرقام و_)').optional(),
