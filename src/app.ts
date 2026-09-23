@@ -157,6 +157,7 @@ export function createApp() {
         syncPull: 'POST /api/v1/sync/pull',
         syncStats: 'POST /api/v1/sync/stats',
         userProfile: 'GET /api/v1/users/me/profile',
+        userPublicProfile: 'GET /api/v1/users/:id/profile',
       },
     });
   });
