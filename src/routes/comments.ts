@@ -674,6 +674,9 @@ commentsNovelsRouter.get('/:novelId/comments/:commentId/replies', async (c) => {
     const page = kids.slice(start, start + limit);
     const last = page[page.length - 1];
     const nextCursor = last && kids.length > start + limit ? encodeCursor({ t: new Date(last.createdAt).getTime(), i: last.id }) : null;
+    const memCaller = getEnv().syncOpen ? null : await getCaller(c);
+    if (memCaller?.row) { c.header('Cache-Control', 'private, max-age=30'); c.header('Vary', 'Authorization'); }
+    else { c.header('Cache-Control', 'public, max-age=60, stale-while-revalidate=60'); }
     return c.json({ success: true, total: kids.length, data: page.map((m) => memToApi(m, 0)), pagination: { limit, nextCursor, hasMore: nextCursor !== null } });
   }
   try {
@@ -695,6 +698,12 @@ commentsNovelsRouter.get('/:novelId/comments/:commentId/replies', async (c) => {
     const lookup = await buildAuthorLookup(page.map((r) => r.userId).filter(Boolean) as string[]);
     const last = page[page.length - 1];
     const nextCursor = last && hasMore ? encodeCursor({ t: new Date(last.createdAt as unknown as string).getTime(), i: last.id }) : null;
+    // This endpoint always filters to status='visible' and takes no `status`
+    // param, so there is no moderator branch. A signed-in reader still gets
+    // personal `myVote` state, so only anonymous reads are publicly cacheable.
+    const repliesCaller = getEnv().syncOpen ? null : await getCaller(c);
+    if (repliesCaller?.row) { c.header('Cache-Control', 'private, max-age=30'); c.header('Vary', 'Authorization'); }
+    else { c.header('Cache-Control', 'public, max-age=60, stale-while-revalidate=60'); }
     return c.json({
       success: true, total: Number((await db.select({ n: sql<number>`count(*)::int` }).from(comments).where(base))[0]?.n ?? page.length),
       data: page.map((r) => toApi(r, authorOf(r.userId, lookup), 0)),
