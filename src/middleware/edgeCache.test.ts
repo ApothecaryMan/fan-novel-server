@@ -52,7 +52,11 @@ beforeEach(() => {
   cache = fakeCache();
   app = build(cache);
 });
-afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
+afterEach(() => {
+  delete (globalThis as unknown as { caches?: unknown }).caches;
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
 
 const LIST = '/api/v1/novels/n1/comments?chapter=70';
 const executionCtx = {
@@ -60,8 +64,33 @@ const executionCtx = {
   passThroughOnException: () => {},
   props: {} as Record<string, unknown>,
 };
-const get = (p: string, init?: RequestInit) => app.fetch(new Request(`https://x.dev${p}`, init), { caches: cache }, executionCtx);
+// The Workers runtime exposes `caches` as a GLOBAL, not as an env binding, so
+// the fake must be installed on globalThis. Mocking it on `env` would pass
+// while production silently bypasses the cache entirely.
+const get = (p: string, init?: RequestInit) => {
+  (globalThis as unknown as { caches?: unknown }).caches = cache.default ? cache : undefined;
+  return app.fetch(new Request(`https://x.dev${p}`, init), {}, executionCtx);
+};
 const authed = (p: string) => get(p, { headers: { Authorization: 'Bearer secret' } });
+
+describe('edgeCacheComments: runtime contract', () => {
+  // Regression: the first implementation read `c.env.caches`. In Workers,
+  // `caches` is a global, so that was always undefined and the cache silently
+  // never engaged in production — while the old test still passed, because it
+  // had mocked `caches` on env and therefore encoded the same mistake.
+  it('reads the cache from the GLOBAL caches, not from env', async () => {
+    const res = await get(LIST);
+    expect(res.headers.get('X-Comments-Cache')).toBe('MISS');
+    expect(cache.size).toBe(1);
+  });
+
+  it('falls through cleanly when the runtime provides no global caches', async () => {
+    delete (globalThis as unknown as { caches?: unknown }).caches;
+    const res = await app.request(LIST);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('X-Comments-Cache')).toBeNull();
+  });
+});
 
 describe('edgeCacheComments: caching the public anonymous read', () => {
   it('serves a second identical read from the edge without re-running the route', async () => {
@@ -99,7 +128,7 @@ describe('edgeCacheComments: never serves or stores personalised data', () => {
     // Defence in depth: a route bug that labels a signed-in response `public`
     // must still not poison the shared cache.
     const app2 = build(cache, '{"ok":true}', 'public, max-age=60');
-    await app2.fetch(new Request(`https://x.dev${LIST}`, { headers: { Authorization: 'Bearer s' } }), { caches: cache }, executionCtx);
+    await app2.fetch(new Request(`https://x.dev${LIST}`, { headers: { Authorization: 'Bearer s' } }), {}, executionCtx);
     expect(cache.size).toBe(0);
   });
 
@@ -112,9 +141,9 @@ describe('edgeCacheComments: never serves or stores personalised data', () => {
   });
 
   it('refuses to store a response the route marked private or no-store', async () => {
-    await build(cache, '{"ok":true}', 'private, max-age=30').fetch(new Request(`https://x.dev${LIST}`), { caches: cache }, executionCtx);
+    await build(cache, '{"ok":true}', 'private, max-age=30').fetch(new Request(`https://x.dev${LIST}`), {}, executionCtx);
     expect(cache.size).toBe(0);
-    await build(cache, '{"ok":true}', 'no-store').fetch(new Request(`https://x.dev${LIST}`), { caches: cache }, executionCtx);
+    await build(cache, '{"ok":true}', 'no-store').fetch(new Request(`https://x.dev${LIST}`), {}, executionCtx);
     expect(cache.size).toBe(0);
   });
 
@@ -126,7 +155,7 @@ describe('edgeCacheComments: never serves or stores personalised data', () => {
       c.header('Vary', 'Authorization');
       return c.json({ ok: true });
     });
-    await app3.fetch(new Request(`https://x.dev${LIST}`), { caches: cache }, executionCtx);
+    await app3.fetch(new Request(`https://x.dev${LIST}`), {}, executionCtx);
     expect(cache.size).toBe(0);
   });
 });
@@ -174,7 +203,7 @@ describe('edgeCacheComments: scope and safety limits', () => {
     const app4 = new Hono();
     app4.use('*', edgeCacheComments());
     app4.get('*', (c) => c.json({ error: 'x' }, 404, { 'Cache-Control': 'public, max-age=60' }));
-    const res = await app4.fetch(new Request(`https://x.dev${LIST}`), { caches: cache }, executionCtx);
+    const res = await app4.fetch(new Request(`https://x.dev${LIST}`), {}, executionCtx);
     expect(res.status).toBe(404);
     expect(cache.size).toBe(0);
   });

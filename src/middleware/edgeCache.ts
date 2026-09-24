@@ -27,11 +27,19 @@ import { getEnv, isWorkersRuntime } from '../config/env.js';
 const CACHE_TTL_SECONDS = 60;
 
 /**
- * Cloudflare exposes the zone cache as `caches.default`, which is not part of
- * the standard `Cache` interface, so it is typed here rather than cast at each
- * call site.
+ * Cloudflare exposes the zone cache through the GLOBAL `caches` object
+ * (`caches.default`). It is NOT an `env` binding — `env` only carries bindings
+ * such as the R2 bucket — so it must be read off globalThis, not c.env.
+ * The standard `Cache` type has no `default`, hence the local type.
  */
 type EdgeCache = Cache & { default: Cache };
+
+function edgeCaches(): EdgeCache | null {
+  // The DOM lib types globalThis.caches as CacheStorage (no `default`), so read
+  // it structurally rather than fighting the global declaration.
+  const c = (globalThis as unknown as { caches?: { default?: Cache } }).caches;
+  return c?.default ? ({ default: c.default } as EdgeCache) : null;
+}
 
 /** Public, anonymous-safe comment reads. Anything else falls through untouched. */
 function isCacheablePath(pathname: string): boolean {
@@ -54,8 +62,8 @@ export function edgeCacheComments(): MiddlewareHandler {
     if (url.searchParams.has('status')) return next();
     if (!isCacheablePath(url.pathname)) return next();
 
-    const cache = (c.env as { caches?: EdgeCache }).caches;
-    if (!cache?.default) return next();
+    const cache = edgeCaches();
+    if (!cache) return next();
 
     const cacheUrl = new URL(url.toString());
     // Normalise so logically identical requests share one entry.
