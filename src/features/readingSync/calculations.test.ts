@@ -114,6 +114,26 @@ describe('reading sync v2 contracts', () => {
     expect(() => parseFreeSession({ ...validFreeSession, ...override })).toThrow('completion_mismatch');
   });
 
+  it('enforces the core ID, range, finite-number, and v2 version boundaries', () => {
+    const invalidSessions = [
+      { clientSessionId: '_starts-with-punctuation' },
+      { novelId: 'x'.repeat(101) },
+      { chapterId: 0 },
+      { seconds: 86_401 },
+      { progressPercent: 101 },
+      { completed: 'true' },
+      { ts: Number.POSITIVE_INFINITY },
+      { ts: 1.5 },
+    ];
+    for (const override of invalidSessions) {
+      expect(() => parseFreeSession({ ...validFreeSession, ...override })).toThrow();
+    }
+    const envelope = { syncVersion: 2 as const, user: { externalId: 'subject-1' }, sessions: [] };
+    expect(freePushSchema.safeParse(envelope).success).toBe(true);
+    expect(freePushSchema.safeParse({ ...envelope, plan: 'pro' }).success).toBe(false);
+    expect(freePushSchema.safeParse({ ...envelope, syncVersion: 1 }).success).toBe(false);
+  });
+
   it('rejects Pro fields in a Free session and accepts a complete Pro session', () => {
     expect(() => parseFreeSession({ ...validFreeSession, words: 10 })).toThrow('pro_fields_not_allowed');
     expect(proSessionSchema.safeParse({ ...validProSession, content: 'secret' }).success).toBe(false);
