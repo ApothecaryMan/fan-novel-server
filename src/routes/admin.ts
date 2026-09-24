@@ -1,10 +1,11 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
-import { count, desc, eq, ilike, or } from 'drizzle-orm';
+import { and, count, desc, eq, ilike, or } from 'drizzle-orm';
 import { db, isDbAvailable, noteDbFailure } from '../database/db.js';
 import { novels, roleRequests, users } from '../database/schema.js';
 import { requireAuth } from '../middleware/auth.js';
 import { getCaller } from '../middleware/ownership.js';
+import { parseAdminUserRoles } from './adminUserFilters.js';
 
 export const adminRouter = new Hono();
 
@@ -28,15 +29,27 @@ function publicUser(u: typeof users.$inferSelect) {
   };
 }
 
-// GET /api/v1/admin/users?page&limit&q (q searches email/username/displayName)
+// GET /api/v1/admin/users?page&limit&q&roles (q searches email/username/displayName; roles is a CSV of admin, author, translator, reader)
 adminRouter.get('/users', async (c) => {
   if (!isDbAvailable()) return c.json({ error: 'database not configured' }, 503);
   const page = Math.max(1, Number(c.req.query('page') ?? 1) || 1);
   const limit = Math.min(100, Math.max(1, Number(c.req.query('limit') ?? 20) || 20));
   const q = (c.req.query('q') ?? '').trim().slice(0, 100);
-  const where = q
+  const roleFilter = parseAdminUserRoles(c.req.query('roles'));
+  if (roleFilter.invalid !== null) return c.json({ error: 'invalid role filter' }, 400);
+  const roleClauses = roleFilter.roles.map((role) => {
+    switch (role) {
+      case 'admin': return eq(users.role, 'admin');
+      case 'author': return eq(users.isAuthor, true);
+      case 'translator': return eq(users.isTranslator, true);
+      case 'reader': return and(eq(users.role, 'reader'), eq(users.isAuthor, false), eq(users.isTranslator, false));
+    }
+  });
+  const roleWhere = roleClauses.length > 0 ? or(...roleClauses) : undefined;
+  const searchWhere = q
     ? or(ilike(users.email, `%${q}%`), ilike(users.username, `%${q}%`), ilike(users.displayName, `%${q}%`))
     : undefined;
+  const where = roleWhere && searchWhere ? and(roleWhere, searchWhere) : roleWhere ?? searchWhere;
   try {
     const rows = where
       ? await db.select().from(users).where(where).orderBy(desc(users.createdAt)).limit(limit).offset((page - 1) * limit)
