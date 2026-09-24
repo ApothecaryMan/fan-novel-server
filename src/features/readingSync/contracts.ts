@@ -18,6 +18,7 @@ export const MAX_COLLECTION_ROWS = 500;
 export const MAX_NOVEL_ID_LENGTH = 100;
 export const MAX_SECONDS_PER_SESSION = 86_400;
 export const MAX_WORDS_PER_SESSION = 1_000_000;
+export const MAX_WPM = 1_000;
 
 export const CLIENT_SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
 
@@ -172,7 +173,9 @@ function strictObject<T extends z.ZodRawShape>(
   }, z.object(shape).strict());
 }
 
-function withCompletionConsistency<T extends z.ZodTypeAny>(schema: T) {
+function withCompletionConsistency<T extends z.ZodTypeAny>(
+  schema: T,
+): z.ZodEffects<T, z.output<T>, z.input<T>> {
   return schema.superRefine((value, ctx) => {
     if (value === null || typeof value !== 'object') return;
     const candidate = value as { progressPercent?: unknown; completed?: unknown };
@@ -184,6 +187,26 @@ function withCompletionConsistency<T extends z.ZodTypeAny>(schema: T) {
         path: ['completed'],
         message: 'completion_mismatch',
         params: { code: 'completion_mismatch' },
+      });
+    }
+  });
+}
+
+function withProWordPlausibility<T extends z.ZodTypeAny>(
+  schema: T,
+): z.ZodEffects<T, z.output<T>, z.input<T>> {
+  return schema.superRefine((value, ctx) => {
+    if (value === null || typeof value !== 'object') return;
+    const candidate = value as { seconds?: unknown; words?: unknown };
+    if (typeof candidate.seconds !== 'number' || typeof candidate.words !== 'number') return;
+
+    const maxWords = Math.floor((MAX_WPM * candidate.seconds) / 60);
+    if (candidate.words > maxWords) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['words'],
+        message: 'implausible_word_count',
+        params: { code: 'implausible_word_count', maxWords },
       });
     }
   });
@@ -256,7 +279,9 @@ const proSessionBaseSchema = strictObject(proSessionShape, {
   ],
   forbiddenCode: 'forbidden_field',
 });
-export const proSessionSchema = withCompletionConsistency(proSessionBaseSchema);
+export const proSessionSchema = withProWordPlausibility(
+  withCompletionConsistency(proSessionBaseSchema),
+);
 
 const freeStatsShape = {
   level: z.number().finite().int().min(1).max(50),
@@ -292,7 +317,7 @@ const completedNovelSchema = strictObject({
   title: z.string().trim().max(255).nullable().optional(),
 });
 
-export const proStatsSchema = strictObject({
+const proStatsBaseSchema = strictObject({
   asOfDay: readDaySchema,
   level: z.number().finite().int().min(1).max(50),
   tier: z.number().finite().int().min(1).max(5),
@@ -302,17 +327,49 @@ export const proStatsSchema = strictObject({
   currentStreakDays: nonNegativeInteger(),
   longestStreakDays: nonNegativeInteger(),
   totalWords: nonNegativeInteger(),
-  averageWPM: z.number().finite().min(0).max(1000),
+  averageWPM: z.number().finite().int().min(0).max(MAX_WPM),
   uniqueInAppCompletedChapters: nonNegativeInteger(),
   combinedTotalChaptersCompleted: nonNegativeInteger(),
   last7DaysActivity: z.array(activityDaySchema).length(7),
   yearlyActivity: z.record(readDaySchema, nonNegativeInteger()),
   hourlyDistribution: z.array(nonNegativeInteger()).length(24),
-  genreDistribution: z.record(z.string().trim().min(1).max(100), percentage()),
+  genreDistribution: z.record(z.string().trim().min(1).max(100), percentage().int()),
   mostReadNovels: z.array(mostReadNovelSchema).max(100),
   mostReadNovelsTruncated: z.boolean(),
   completedNovels: z.array(completedNovelSchema),
 });
+
+function withRemainingTimeConsistency<T extends z.ZodTypeAny>(
+  schema: T,
+): z.ZodEffects<T, z.output<T>, z.input<T>> {
+  return schema.superRefine((value, ctx) => {
+    if (value === null || typeof value !== 'object') return;
+    const candidate = value as {
+      level?: unknown;
+      remainingTime?: { seconds?: unknown; minutes?: unknown };
+    };
+    if (typeof candidate.level !== 'number'
+      || candidate.remainingTime === null
+      || typeof candidate.remainingTime !== 'object') return;
+
+    const atMaxLevel = candidate.level === 50;
+    const secondsIsNull = candidate.remainingTime.seconds === null;
+    const minutesIsNull = candidate.remainingTime.minutes === null;
+    const remainingTimeIsValid = atMaxLevel
+      ? secondsIsNull && minutesIsNull
+      : !secondsIsNull && !minutesIsNull;
+    if (!remainingTimeIsValid) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['remainingTime'],
+        message: 'remaining_time_mismatch',
+        params: { code: 'remaining_time_mismatch' },
+      });
+    }
+  });
+}
+
+export const proStatsSchema = withRemainingTimeConsistency(proStatsBaseSchema);
 
 const categoryIdsSchema = z.array(z.string().trim().min(1).max(100)).max(100);
 
@@ -371,18 +428,18 @@ export const readingSyncNovelMetadataSchema = strictObject({
   forbiddenCode: 'forbidden_field',
 });
 
-const freePushShape = {
+const freeReadingSyncPushShape = {
   syncVersion: syncVersionSchema,
   user: syncUserSchema,
   deviceId: deviceIdSchema,
   sessions: z.array(freeSessionSchema).max(MAX_SESSIONS_PER_PUSH),
 };
-export const freePushSchema = strictObject(freePushShape, {
+export const freeReadingSyncPushSchema = strictObject(freeReadingSyncPushShape, {
   forbiddenKeys: FREE_ENVELOPE_FORBIDDEN_KEYS,
   forbiddenCode: 'pro_fields_not_allowed',
 });
 
-const proPushShape = {
+const proReadingSyncPushShape = {
   syncVersion: syncVersionSchema,
   user: syncUserSchema,
   deviceId: deviceIdSchema,
@@ -392,17 +449,17 @@ const proPushShape = {
   chapterStates: z.array(readingSyncChapterStateSchema).max(MAX_COLLECTION_ROWS).optional(),
   novels: z.array(readingSyncNovelMetadataSchema).max(MAX_COLLECTION_ROWS).optional(),
 };
-export const proPushSchema = strictObject(proPushShape, {
+export const proReadingSyncPushSchema = strictObject(proReadingSyncPushShape, {
   forbiddenKeys: ['content', 'cover', 'coverUrl', 'filePath', 'scrollY'],
   forbiddenCode: 'forbidden_field',
 });
 
-const freePullShape = {
+const freeReadingSyncPullShape = {
   syncVersion: syncVersionSchema,
   user: syncUserSchema,
   deviceId: deviceIdSchema,
 };
-export const freePullSchema = strictObject(freePullShape, {
+export const freeReadingSyncPullSchema = strictObject(freeReadingSyncPullShape, {
   forbiddenKeys: FREE_ENVELOPE_FORBIDDEN_KEYS,
   forbiddenCode: 'pro_fields_not_allowed',
 });
@@ -414,31 +471,96 @@ export const readingStatsQuerySchema = strictObject({
   year: z.number().finite().int().min(1).max(9999),
 });
 
-const proPullShape = {
+const proReadingSyncPullShape = {
   syncVersion: syncVersionSchema,
   user: syncUserSchema,
   deviceId: deviceIdSchema,
   readingStats: readingStatsQuerySchema,
 };
-export const proPullSchema = strictObject(proPullShape);
+export const proReadingSyncPullSchema = strictObject(proReadingSyncPullShape);
 
 // A plan-neutral union is useful to a route after it has resolved the plan;
 // neither branch accepts a client-supplied `plan` key.
-export const readingSyncPushSchema = z.union([freePushSchema, proPushSchema]);
-export const readingSyncPullSchema = z.union([freePullSchema, proPullSchema]);
+export const readingSyncPushSchema = z.union([
+  freeReadingSyncPushSchema,
+  proReadingSyncPushSchema,
+]);
+export const readingSyncPullSchema = z.union([
+  freeReadingSyncPullSchema,
+  proReadingSyncPullSchema,
+]);
 
-// Descriptive aliases for callers that use the full feature name.
+const successSchema = z.literal(true);
+const acceptedSessionIdsSchema = z.array(clientSessionIdSchema).max(MAX_SESSIONS_PER_PUSH);
+
+export const freeReadingSyncAppliedCountsSchema = strictObject({
+  sessions: nonNegativeInteger(),
+});
+export const proReadingSyncAppliedCountsSchema = strictObject({
+  sessions: nonNegativeInteger(),
+  library: nonNegativeInteger(),
+  history: nonNegativeInteger(),
+  chapterStates: nonNegativeInteger(),
+  novels: nonNegativeInteger(),
+});
+
+export const freeReadingSyncPushResponseSchema = strictObject({
+  success: successSchema,
+  plan: z.literal('free'),
+  serverNow: epochMilliseconds(),
+  applied: freeReadingSyncAppliedCountsSchema,
+  acceptedSessionIds: acceptedSessionIdsSchema,
+  stats: freeStatsSchema,
+});
+
+export const proReadingSyncPushResponseSchema = strictObject({
+  success: successSchema,
+  plan: z.literal('pro'),
+  serverNow: epochMilliseconds(),
+  applied: proReadingSyncAppliedCountsSchema,
+  acceptedSessionIds: acceptedSessionIdsSchema,
+  stats: proStatsSchema,
+});
+
+export const readingSyncPushResponseSchema = z.union([
+  freeReadingSyncPushResponseSchema,
+  proReadingSyncPushResponseSchema,
+]);
+
+export const freeReadingSyncPullResponseSchema = strictObject({
+  success: successSchema,
+  plan: z.literal('free'),
+  stats: freeStatsSchema,
+});
+
+export const readingSyncLibraryPageSchema = strictObject({
+  rows: z.array(readingSyncLibraryItemSchema).max(MAX_COLLECTION_ROWS),
+  nextCursor: cursorSchema,
+});
+export const readingSyncHistoryPageSchema = strictObject({
+  rows: z.array(readingSyncHistoryItemSchema).max(MAX_COLLECTION_ROWS),
+  nextCursor: cursorSchema,
+});
+export const readingSyncSessionPageSchema = strictObject({
+  rows: z.array(proSessionSchema).max(MAX_COLLECTION_ROWS),
+  nextCursor: cursorSchema,
+});
+
+export const proReadingSyncPullResponseSchema = strictObject({
+  success: successSchema,
+  plan: z.literal('pro'),
+  library: readingSyncLibraryPageSchema,
+  history: readingSyncHistoryPageSchema,
+  sessions: readingSyncSessionPageSchema,
+  stats: proStatsSchema,
+});
+
+export const readingSyncPullResponseSchema = z.union([
+  freeReadingSyncPullResponseSchema,
+  proReadingSyncPullResponseSchema,
+]);
+
 export const readingSyncUserSchema = syncUserSchema;
-export const freeReadingSessionSchema = freeSessionSchema;
-export const proReadingSessionSchema = proSessionSchema;
-export const freeReadingSyncPushSchema = freePushSchema;
-export const proReadingSyncPushSchema = proPushSchema;
-export const freeReadingSyncPullSchema = freePullSchema;
-export const proReadingSyncPullSchema = proPullSchema;
-export const freePushEnvelopeSchema = freePushSchema;
-export const proPushEnvelopeSchema = proPushSchema;
-export const freePullEnvelopeSchema = freePullSchema;
-export const proPullEnvelopeSchema = proPullSchema;
 export const freeStatsProjectionSchema = freeStatsSchema;
 export const proStatsProjectionSchema = proStatsSchema;
 export const readingSyncVersionSchema = syncVersionSchema;
@@ -449,17 +571,44 @@ export type FreeSession = z.infer<typeof freeSessionSchema>;
 export type ProSession = z.infer<typeof proSessionSchema>;
 export type FreeStats = z.infer<typeof freeStatsSchema>;
 export type ProStats = z.infer<typeof proStatsSchema>;
+export type ProRemainingTime = z.infer<typeof remainingTimeSchema>;
+export type ProActivityDay = z.infer<typeof activityDaySchema>;
+export type ProMostReadNovel = z.infer<typeof mostReadNovelSchema>;
+export type ProCompletedNovel = z.infer<typeof completedNovelSchema>;
 export type ReadingSyncUser = z.infer<typeof syncUserSchema>;
-export type FreePushEnvelope = z.infer<typeof freePushSchema>;
-export type ProPushEnvelope = z.infer<typeof proPushSchema>;
-export type FreePullEnvelope = z.infer<typeof freePullSchema>;
-export type ProPullEnvelope = z.infer<typeof proPullSchema>;
-export type FreePush = FreePushEnvelope;
-export type ProPush = ProPushEnvelope;
-export type FreePull = FreePullEnvelope;
-export type ProPull = ProPullEnvelope;
-export type ReadingSyncPushEnvelope = z.infer<typeof readingSyncPushSchema>;
-export type ReadingSyncPullEnvelope = z.infer<typeof readingSyncPullSchema>;
+export type FreeReadingSyncPush = z.infer<typeof freeReadingSyncPushSchema>;
+export type ProReadingSyncPush = z.infer<typeof proReadingSyncPushSchema>;
+export type ReadingSyncPush = z.infer<typeof readingSyncPushSchema>;
+export type FreeReadingSyncPull = z.infer<typeof freeReadingSyncPullSchema>;
+export type ProReadingSyncPull = z.infer<typeof proReadingSyncPullSchema>;
+export type ReadingSyncPull = z.infer<typeof readingSyncPullSchema>;
+export type FreeReadingSyncAppliedCounts = z.infer<typeof freeReadingSyncAppliedCountsSchema>;
+export type ProReadingSyncAppliedCounts = z.infer<typeof proReadingSyncAppliedCountsSchema>;
+export type ReadingSyncAppliedCounts =
+  | FreeReadingSyncAppliedCounts
+  | ProReadingSyncAppliedCounts;
+export type FreeReadingSyncPushResponse = z.infer<typeof freeReadingSyncPushResponseSchema>;
+export type ProReadingSyncPushResponse = z.infer<typeof proReadingSyncPushResponseSchema>;
+export type ReadingSyncPushResponse = z.infer<typeof readingSyncPushResponseSchema>;
+export type FreeReadingSyncPullResponse = z.infer<typeof freeReadingSyncPullResponseSchema>;
+export type ProReadingSyncPullResponse = z.infer<typeof proReadingSyncPullResponseSchema>;
+export type ReadingSyncPullResponse = z.infer<typeof readingSyncPullResponseSchema>;
+export interface FreeReadingStatsSnapshot {
+  plan: 'free';
+  stats: FreeStats;
+}
+export interface ProReadingStatsSnapshot {
+  plan: 'pro';
+  stats: ProStats;
+}
+export type ReadingStatsSnapshot = FreeReadingStatsSnapshot | ProReadingStatsSnapshot;
+export type ReadingSyncPage<T> = {
+  rows: T[];
+  nextCursor: string | null;
+};
+export type ReadingSyncLibraryPage = z.infer<typeof readingSyncLibraryPageSchema>;
+export type ReadingSyncHistoryPage = z.infer<typeof readingSyncHistoryPageSchema>;
+export type ReadingSyncSessionPage = z.infer<typeof readingSyncSessionPageSchema>;
 export type ReadingStatsQuery = z.infer<typeof readingStatsQuerySchema>;
 export type ReadingSyncLibraryItem = z.infer<typeof readingSyncLibraryItemSchema>;
 export type ReadingSyncHistoryItem = z.infer<typeof readingSyncHistoryItemSchema>;
@@ -471,6 +620,8 @@ export type ReadingSyncErrorCode =
   | 'forbidden_field'
   | 'unknown_key'
   | 'completion_mismatch'
+  | 'implausible_word_count'
+  | 'remaining_time_mismatch'
   | 'invalid_sync_payload';
 
 function issueCode(issue: z.ZodIssue): string | null {
@@ -488,17 +639,16 @@ export class ReadingSyncContractError extends Error {
     const isZodError = error instanceof z.ZodError;
     const issues = isZodError ? error.issues : [];
     const discoveredCodes = issues.map(issueCode).filter((code): code is string => Boolean(code));
-    const code = (
-      discoveredCodes.includes('pro_fields_not_allowed')
-        ? 'pro_fields_not_allowed'
-        : discoveredCodes.includes('forbidden_field')
-          ? 'forbidden_field'
-          : discoveredCodes.includes('completion_mismatch')
-            ? 'completion_mismatch'
-            : discoveredCodes.includes('unknown_key')
-              ? 'unknown_key'
-              : 'invalid_sync_payload'
-    ) as ReadingSyncErrorCode;
+    const priority: readonly ReadingSyncErrorCode[] = [
+      'pro_fields_not_allowed',
+      'forbidden_field',
+      'completion_mismatch',
+      'implausible_word_count',
+      'remaining_time_mismatch',
+      'unknown_key',
+    ];
+    const code = priority.find((candidate) => discoveredCodes.includes(candidate))
+      ?? 'invalid_sync_payload';
     const detail = issues.length > 0 ? issues.map((issue) => issue.message).join('; ') : 'invalid payload';
     super(`${code}: ${detail}`);
     this.name = 'ReadingSyncContractError';
@@ -533,27 +683,21 @@ export function parseProStats(input: unknown): ProStats {
   return parseContract(proStatsSchema, input);
 }
 
-export function parseFreePushEnvelope(input: unknown): FreePushEnvelope {
-  return parseContract(freePushSchema, input);
+export function parseFreeReadingSyncPush(input: unknown): FreeReadingSyncPush {
+  return parseContract(freeReadingSyncPushSchema, input);
 }
 
-export function parseProPushEnvelope(input: unknown): ProPushEnvelope {
-  return parseContract(proPushSchema, input);
+export function parseProReadingSyncPush(input: unknown): ProReadingSyncPush {
+  return parseContract(proReadingSyncPushSchema, input);
 }
 
-export function parseFreePullEnvelope(input: unknown): FreePullEnvelope {
-  return parseContract(freePullSchema, input);
+export function parseFreeReadingSyncPull(input: unknown): FreeReadingSyncPull {
+  return parseContract(freeReadingSyncPullSchema, input);
 }
 
-export function parseProPullEnvelope(input: unknown): ProPullEnvelope {
-  return parseContract(proPullSchema, input);
+export function parseProReadingSyncPull(input: unknown): ProReadingSyncPull {
+  return parseContract(proReadingSyncPullSchema, input);
 }
-
-// Short aliases make the parser convenient in route tests and calculation code.
-export const parseFreePush = parseFreePushEnvelope;
-export const parseProPush = parseProPushEnvelope;
-export const parseFreePull = parseFreePullEnvelope;
-export const parseProPull = parseProPullEnvelope;
 
 /** Serialize only the four Free fields, even when given a Pro-shaped value. */
 export function freeProjection(input: FreeStats | ProStats): FreeStats {
