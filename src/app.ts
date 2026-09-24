@@ -15,6 +15,7 @@ import { syncRouter } from './routes/sync.js';
 import { authorRouter } from './routes/author.js';
 import { adminRouter } from './routes/admin.js';
 import { rateLimit } from './middleware/rateLimit.js';
+import { edgeCacheComments } from './middleware/edgeCache.js';
 import { checkDb, db, initDb, isDbAvailable, noteDbFailure } from './database/db.js';
 import { coverBlobs } from './database/schema.js';
 import { eq } from 'drizzle-orm';
@@ -40,6 +41,12 @@ export function createApp() {
   app.use('/api/v1/admin/*', rateLimit(60));
   app.use('/api/v1/novels/*/comments*', rateLimit(60));
   app.use('/api/v1/comments/*', rateLimit(60));
+
+  // Edge cache for anonymous comment reads. Must run BEFORE the routes so a
+  // public read can be served without touching Neon at all. It self-disables
+  // for any request carrying Authorization, a moderator `status` param, or in
+  // LAN mode, and never caches the watermark endpoint. No-ops on Node.
+  app.use(edgeCacheComments());
 
   // Ensure DB is initialized (pg Pool on Node, neon-http on Workers) before routes run.
   app.use('*', async (_c, next) => {
