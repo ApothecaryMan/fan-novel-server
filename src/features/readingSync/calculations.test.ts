@@ -8,6 +8,7 @@ import {
   parseFreeSession,
   proProjection,
   proSessionSchema,
+  proStatsSchema,
 } from './contracts.js';
 
 const validFreeSession = {
@@ -54,6 +55,11 @@ const validProStats = {
 };
 
 describe('reading sync v2 contracts', () => {
+  it('accepts the complete Pro statistics projection shape', () => {
+    expect(proStatsSchema.parse(validProStats)).toEqual(validProStats);
+    expect(proStatsSchema.safeParse({ ...validProStats, yearlyActivity: { invalid: 1 } }).success).toBe(false);
+  });
+
   it('projects Free stats to exactly the four allowlisted keys', () => {
     const projection = freeProjection({
       ...validProStats,
