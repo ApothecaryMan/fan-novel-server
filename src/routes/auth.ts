@@ -34,7 +34,17 @@ const googleSchema = z.object({
 // Canonical handle rules live in ./usernames.js (mirrors the mobile app).
 import { USERNAME_RE, UsernameTakenError, suggestUsernames } from './usernames.js';
 
+function toIso(value: unknown): string | null {
+  if (value instanceof Date) return isNaN(value.getTime()) ? null : value.toISOString();
+  if (typeof value === 'string' && value) {
+    const d = new Date(value);
+    return isNaN(d.getTime()) ? null : d.toISOString();
+  }
+  return null;
+}
+
 function toPublic(u: any) {
+  const joined = toIso(u.createdAt);
   return {
     id: u.externalId ?? u.id, externalId: u.externalId ?? u.id, email: u.email,
     name: u.displayName ?? null, username: u.username ?? null,
@@ -42,6 +52,7 @@ function toPublic(u: any) {
     bio: u.bio ?? null, status: u.bio ?? null,
     role: u.role ?? 'reader', isAuthor: Boolean(u.isAuthor), isTranslator: Boolean(u.isTranslator),
     provider: 'google',
+    createdAt: joined, memberSince: joined,
   };
 }
 
@@ -93,7 +104,7 @@ authRouter.post('/google', async (c) => {
       user = { id: externalId, externalId, googleSubject: identity?.sub ?? null, email,
         displayName, username: explicit, bio: null,
         avatarUrl: cleanMediaUrl(input.avatarUrl) ?? null, bannerUrl: cleanMediaUrl(input.bannerUrl) ?? null,
-        role: memSeed ? 'admin' : 'reader' };
+        role: memSeed ? 'admin' : 'reader', createdAt: new Date(), updatedAt: new Date() };
       memUsers.push(user);
     } else {
       user.email = email;

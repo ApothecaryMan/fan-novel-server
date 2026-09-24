@@ -153,7 +153,19 @@ describe('GET /users/:id/profile (public)', () => {
     expect(body.user).not.toHaveProperty('email');
     expect(JSON.stringify(body)).not.toContain(A1_EMAIL);
     expect(Object.keys(body.user).sort()).toEqual(['avatarUrl', 'bannerUrl', 'bio',
-      'externalId', 'id', 'isAuthor', 'isTranslator', 'name', 'provider', 'role', 'status', 'username']);
+      'createdAt', 'externalId', 'id', 'isAuthor', 'isTranslator', 'memberSince', 'name', 'provider', 'role', 'status', 'username']);
+  });
+
+  it('exposes join date as ISO createdAt + memberSince on public and private profiles', async () => {
+    await seedAuthorA();
+    fake().seedComments([]);
+    const pub: any = await (await app.request(`/users/${A1_UUID}/profile`)).json();
+    expect(pub.user.createdAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect(pub.user.memberSince).toBe(pub.user.createdAt);
+    const { token }: any = await (await loginAs('join-1', 'join@test.com')).json();
+    const priv: any = await (await app.request('/users/me/profile', { headers: { Authorization: `Bearer ${token}` } })).json();
+    expect(priv.user.createdAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect(priv.user.memberSince).toBe(priv.user.createdAt);
   });
 
   it('sends the exact public cache header on success; 404 for unknown ids', async () => {

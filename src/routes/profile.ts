@@ -128,7 +128,17 @@ export function streakFromReadDays(readDays: string[], today = new Date()): numb
   return streak;
 }
 
+function toIso(value: unknown): string | null {
+  if (value instanceof Date) return isNaN(value.getTime()) ? null : value.toISOString();
+  if (typeof value === 'string' && value) {
+    const d = new Date(value);
+    return isNaN(d.getTime()) ? null : d.toISOString();
+  }
+  return null;
+}
+
 function toPublic(u: any) {
+  const joined = toIso(u.createdAt);
   return {
     id: u.externalId ?? u.id, externalId: u.externalId ?? u.id, email: u.email,
     name: u.displayName ?? null, username: u.username ?? null,
@@ -136,6 +146,7 @@ function toPublic(u: any) {
     bio: u.bio ?? null, status: u.bio ?? null,
     role: u.role ?? 'reader', isAuthor: Boolean(u.isAuthor), isTranslator: Boolean(u.isTranslator),
     provider: 'google',
+    createdAt: joined, memberSince: joined,
   };
 }
 

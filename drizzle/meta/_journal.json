@@ -55,14 +55,14 @@
       "idx": 7,
       "version": "7",
       "when": 1790093612090,
-      "tag": "0008_opposite_malice",
+      "tag": "0007_bio",
       "breakpoints": true
     },
     {
       "idx": 8,
       "version": "7",
       "when": 1790102873232,
-      "tag": "0008_add_content_hash",
+      "tag": "0009_add_content_hash",
       "breakpoints": true
     }
   ]
