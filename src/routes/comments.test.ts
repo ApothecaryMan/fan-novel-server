@@ -272,6 +272,69 @@ describe('comments API (memory fallback, open mode)', () => {
     expect(res.headers.get('cache-control')).toContain('public');
   });
 
+  it('preview shows the NEWEST replies, rendered oldest to newest', async () => {
+    const app = openApp();
+    const novel = `prev_${Date.now()}`;
+    const root: any = await (await app.request(`/api/v1/novels/${novel}/comments`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ body: 'root for preview order' }),
+    })).json();
+    const rid = Number(String(root.data.id).replace('app_', ''));
+    // 3 replies: the preview cap is 2, so "first" must be pushed out.
+    for (const label of ['r1', 'r2', 'r3']) {
+      await app.request(`/api/v1/novels/${novel}/comments`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ body: label, parentId: rid }),
+      });
+    }
+    const list: any = await (await app.request(`/api/v1/novels/${novel}/comments`)).json();
+    const shown = list.data[0].preview.map((p: any) => p.body);
+    // Newest 2 selected (r2, r3 — not r1), then ordered oldest→newest.
+    expect(shown).toEqual(['r2', 'r3']);
+  });
+
+  it('watermark moves only when the thread changes, and is never cached', async () => {
+    const app = openApp();
+    const novel = `wm_${Date.now()}`;
+    const wm = async () => {
+      const res = await app.request(`/api/v1/novels/${novel}/comments/watermark`);
+      expect(res.status).toBe(200);
+      // A cached watermark would freeze live updates, so it must be no-store.
+      expect(res.headers.get('cache-control')).toContain('no-store');
+      return (await res.json() as any).data;
+    };
+    const empty = await wm();
+    expect(empty.watermark).toBe('0');
+    expect(empty.total).toBe(0);
+
+    const posted: any = await (await app.request(`/api/v1/novels/${novel}/comments`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ body: 'first comment' }),
+    })).json();
+    const afterPost = await wm();
+    expect(afterPost.watermark).not.toBe('0');
+    expect(afterPost.total).toBe(1);
+
+    // A read must not move the token (otherwise clients would refetch forever).
+    expect((await wm()).watermark).toBe(afterPost.watermark);
+
+    const rid = Number(String(posted.data.id).replace('app_', ''));
+    await app.request(`/api/v1/novels/${novel}/comments`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ body: 'a reply', parentId: rid }),
+    });
+    const afterReply = await wm();
+    expect(afterReply.watermark).not.toBe(afterPost.watermark);
+    expect(afterReply.total).toBe(2);
+
+    // chapter scope is isolated from the novel wall
+    const scoped = await (await app.request(`/api/v1/novels/${novel}/comments/watermark?chapter=5`)).json();
+    expect(scoped.data.watermark).toBe('0');
+    const bad = await app.request(`/api/v1/novels/${novel}/comments/watermark?chapter=abc`);
+    expect(bad.status).toBe(400);
+    expect(((await bad.json()) as any).code).toBe('invalid_query');
+  });
+
   it('owner toggle closes posting (403 comments_closed) and reopens it', async () => {
     const app = openApp();
     const created: any = await (await app.request('/api/v1/novels', {

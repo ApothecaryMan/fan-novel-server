@@ -422,12 +422,14 @@ commentsNovelsRouter.get('/:novelId/comments', async (c) => {
     }
     const page = all.slice(start, start + limit);
     const roots = page.map((m) => memToApi(m, 0));
-    // reply preview: oldest 2 visible children per root
+    // reply preview: NEWEST 2 visible children per root, rendered oldest→newest
     const data = roots.map((r) => {
       const rid = Number(String(r.id).replace('app_', ''));
       const kids = [...MEM.values()].filter((m) => m.rootId === rid && (visibleOnly ? m.status === 'visible' : true))
-        .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id - b.id).slice(0, 2)
-        .map((m) => memToApi(m, 0));
+        .sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id - a.id).slice(0, 2)
+        .map((m) => memToApi(m, 0))
+        .sort((a, b) => a.createdAt.localeCompare(b.createdAt)
+          || Number(String(a.id).replace('app_', '')) - Number(String(b.id).replace('app_', '')));
       return { ...r, preview: kids };
     });
     const last = page[page.length - 1];
@@ -486,7 +488,12 @@ commentsNovelsRouter.get('/:novelId/comments', async (c) => {
       }
     }
     // reply preview: ONE round trip via window function (neon-http: each
-    // query = HTTPS). Oldest ≤2 visible children per listed root.
+    // query = HTTPS). NEWEST ≤2 visible children per listed root, so a
+    // just-posted reply is always in the inline preview. (Was oldest-first,
+    // which hid new replies on any thread with more than 2 children.)
+    // Rows are re-sorted ascending on the client-facing `preview` array
+    // (see below) so rendering order stays oldest→newest; only the SELECT
+    // picks the newest.
     const previews = new Map<number, CommentRow[]>();
     if (page.length) {
       const ids = page.map((r) => r.id);
@@ -494,11 +501,11 @@ commentsNovelsRouter.get('/:novelId/comments', async (c) => {
       const result = await db.execute(sql`
         SELECT c.* FROM (
           SELECT c.*,
-            ROW_NUMBER() OVER (PARTITION BY c."root_id" ORDER BY c."created_at" ASC, c."id" ASC) AS rn
+            ROW_NUMBER() OVER (PARTITION BY c."root_id" ORDER BY c."created_at" DESC, c."id" DESC) AS rn
           FROM "comments" c
           WHERE c."root_id" IN (${sql.join(ids.map((id) => sql`${id}`), sql`, `)})
           ${statusFilter}
-        ) c WHERE c.rn <= 2 ORDER BY c."created_at" ASC, c."id" ASC
+        ) c WHERE c.rn <= 2 ORDER BY c."created_at" DESC, c."id" DESC
       `);
       const rawRows = ((result as unknown as { rows?: Record<string, unknown>[] }).rows ?? result) as unknown as Record<string, any>[];
       for (const r of page) previews.set(r.id, []);
@@ -535,7 +542,11 @@ commentsNovelsRouter.get('/:novelId/comments', async (c) => {
     const lookup = await buildAuthorLookup([...page.map((r) => r.userId).filter(Boolean) as string[], ...previewUids]);
     const data = page.map((r) => ({
       ...toApi(r, authorOf(r.userId, lookup), (liked.has(r.id) ? 1 : 0) as 1 | -1 | 0),
-      preview: (previews.get(r.id) ?? []).map((k) => toApi(k, authorOf(k.userId, lookup), 0)),
+      // The window selected the NEWEST 2; render them oldest→newest.
+      preview: (previews.get(r.id) ?? [])
+        .map((k) => toApi(k, authorOf(k.userId, lookup), 0))
+        .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+          || Number(String(a.id).replace('app_', '')) - Number(String(b.id).replace('app_', ''))),
     }));
     const last = page[page.length - 1];
     const nextCursor = last && hasMore
@@ -550,6 +561,50 @@ commentsNovelsRouter.get('/:novelId/comments', async (c) => {
     console.error('[comments] db list failed', err);
     noteDbFailure();
     return c.json({ success: false, error: 'تعذر تحميل التعليقات' }, 500);
+  }
+});
+
+// GET /api/v1/novels/:novelId/comments/watermark?chapter
+// Cheap change-detection token for live-refresh polling: clients poll this
+// (~90 bytes) and only re-fetch the full list when `watermark` moves. Uses
+// the existing comments_roots_new index, so it costs one indexed aggregate
+// per poll instead of transferring the whole thread.
+commentsNovelsRouter.get('/:novelId/comments/watermark', async (c) => {
+  const novelId = c.req.param('novelId');
+  const chapterRaw = c.req.query('chapter');
+  const chapter = chapterRaw !== undefined ? Number(chapterRaw) : undefined;
+  if (chapterRaw !== undefined && (!Number.isInteger(chapter) || (chapter as number) < 1)) {
+    return c.json({ success: false, code: 'invalid_query', error: 'رقم الفصل غير صالح' }, 400);
+  }
+  // `updatedAt` catches edits/moderation too, not just new inserts, so a
+  // hidden+restored comment re-appears without a full list poll.
+  const stamp = (d: unknown) => (d instanceof Date ? d.toISOString() : new Date(String(d)).toISOString());
+  if (!isDbAvailable()) {
+    const all = memList(novelId, chapter, true);
+    const latest = all.reduce<MemComment | null>((acc, m) => (!acc || m.createdAt > acc.createdAt ? m : acc), null);
+    c.header('Cache-Control', 'no-store');
+    return c.json({ success: true, data: { watermark: latest ? `${latest.id}:${latest.createdAt}` : '0', total: all.length } });
+  }
+  try {
+    const chapterCond = chapter !== undefined ? eq(comments.chapterNumber, chapter) : sql`${comments.chapterNumber} IS NULL`;
+    const base = and(eq(comments.novelId, novelId), chapterCond, eq(comments.status, 'visible'));
+    const [row] = await db.select({
+      maxId: sql<number>`coalesce(max(${comments.id}), 0)::int`,
+      maxCreated: sql<Date>`max(${comments.createdAt})`,
+      maxUpdated: sql<Date>`max(${comments.updatedAt})`,
+      total: sql<number>`count(*)::int`,
+    }).from(comments).where(base);
+    const watermark = row?.maxId
+      ? `${Number(row.maxId)}:${stamp(row.maxCreated ?? row.maxUpdated ?? new Date(0))}`
+      : '0';
+    // no-store: this token exists to defeat caching; a cached watermark would
+    // freeze live updates until the TTL expired.
+    c.header('Cache-Control', 'no-store');
+    return c.json({ success: true, data: { watermark, total: Number(row?.total ?? 0) } });
+  } catch (err) {
+    console.error('[comments] db watermark failed', err);
+    noteDbFailure();
+    return c.json({ success: false, error: 'تعذر التحقق من التحديثات' }, 500);
   }
 });
 
