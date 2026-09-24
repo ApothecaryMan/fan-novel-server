@@ -154,6 +154,30 @@ imageResizeRouter.get('/resize', async (c) => {
     return c.json({ success: false, code: parsed.code, error: parsed.error }, parsed.status as 400 | 403);
   }
 
+  const width = Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, Number(c.req.query('w') ?? 0) || 0));
+
+  // Cloudflare does NOT cache Worker responses just because they carry
+  // Cache-Control, so the Cache API has to be used explicitly — otherwise every
+  // image view re-fetches a 2.8MB original from the source site (3-25s each).
+  // `caches` is a global, not an env binding.
+  const edgeCache = (globalThis as unknown as { caches?: { default?: Cache } }).caches;
+  const cache = edgeCache?.default;
+  const cacheKey = new Request(c.req.url, { method: 'GET' });
+
+  if (cache) {
+    // Guarded: a cache outage must degrade to a normal origin fetch, never a 500.
+    try {
+      const hit = await cache.match(cacheKey);
+      if (hit) {
+        const h = new Headers(hit.headers);
+        h.set('X-Image-Cache', 'HIT');
+        return new Response(hit.body, { status: 200, headers: h });
+      }
+    } catch {
+      /* fall through to origin */
+    }
+  }
+
   const result = await safeFetch(parsed.url);
   if (!result.ok) {
     return c.json({ success: false, code: result.code, error: result.error }, result.status as 400 | 403 | 502);
@@ -181,7 +205,6 @@ imageResizeRouter.get('/resize', async (c) => {
     return c.json({ success: false, code: 'too_large', error: 'image too large to proxy' }, 413);
   }
 
-  const width = Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, Number(c.req.query('w') ?? 0) || 0));
   const headers: Record<string, string> = {
     'Content-Type': type,
     // Immutable enough for a content-addressed upstream path, and explicitly
@@ -190,9 +213,21 @@ imageResizeRouter.get('/resize', async (c) => {
     'X-Content-Type-Options': 'nosniff',
     'Content-Security-Policy': "default-src 'none'; sandbox",
     'Timing-Allow-Origin': '*',
+    'X-Image-Cache': 'MISS',
   };
   // Echo the requested width so the client can cache-bust on resize intent.
   if (width) headers['X-Fan-Novel-Width'] = String(width);
+
+  // Store a copy for the edge. `caches.default.put` is fire-and-forget in
+  // production; the await only matters for deterministic tests, and a failed
+  // put must never break the response, so it is guarded.
+  if (cache) {
+    try {
+      await cache.put(cacheKey, new Response(body, { status: 200, headers: { ...headers, 'X-Image-Cache': 'MISS' } }));
+    } catch {
+      /* cache quota/size exceeded — serve uncached rather than fail */
+    }
+  }
 
   return new Response(body, { status: 200, headers });
 });

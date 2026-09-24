@@ -47,6 +47,55 @@ describe('image resize: happy path', () => {
     const res = await get(`url=${encodeURIComponent('https://img.truthnovel.top/x.jpg')}`);
     expect(res.status).toBe(200);
   });
+
+  // Cloudflare does not cache Worker responses merely because they carry
+  // Cache-Control, so the Cache API must be used explicitly or every view
+  // re-downloads a multi-MB original from the source site.
+  describe('edge caching', () => {
+    function fakeCache() {
+      const store = new Map<string, { body: ArrayBuffer; headers: Headers }>();
+      return {
+        default: {
+          async match(r: Request) {
+            const e = store.get(r.url);
+            return e ? new Response(e.body, { status: 200, headers: e.headers }) : undefined;
+          },
+          async put(r: Request, res: Response) {
+            store.set(r.url, { body: await res.arrayBuffer(), headers: new Headers(res.headers) });
+          },
+        } as unknown as Cache,
+      };
+    }
+
+    afterEach(() => { delete (globalThis as unknown as { caches?: unknown }).caches; });
+
+    it('serves the second identical request from the edge', async () => {
+      (globalThis as unknown as { caches?: unknown }).caches = fakeCache();
+      const origin = vi.fn(async () => img());
+      vi.stubGlobal('fetch', origin);
+      const q = `url=${encodeURIComponent(ALLOWED)}&w=1080`;
+
+      const first = await get(q);
+      expect(first.headers.get('X-Image-Cache')).toBe('MISS');
+      const second = await get(q);
+      expect(second.headers.get('X-Image-Cache')).toBe('HIT');
+      // The whole point: the origin was hit exactly once.
+      expect(origin).toHaveBeenCalledTimes(1);
+    });
+
+    it('still serves the image when the edge cache is unavailable', async () => {
+      (globalThis as unknown as { caches?: unknown }).caches = {
+        default: {
+          match: async () => { throw new Error('cache down'); },
+          put: async () => { throw new Error('cache down'); },
+        } as unknown as Cache,
+      };
+      vi.stubGlobal('fetch', vi.fn(async () => img()));
+      // Must not 500 just because the cache is broken.
+      const res = await get(`url=${encodeURIComponent(ALLOWED)}`);
+      expect(res.status).toBe(200);
+    });
+  });
 });
 
 // ---- SSRF boundary ----
