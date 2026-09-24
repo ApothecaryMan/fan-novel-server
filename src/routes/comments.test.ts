@@ -271,4 +271,60 @@ describe('comments API (memory fallback, open mode)', () => {
     const res = await app.request(`/api/v1/novels/cache_${Date.now()}/comments`);
     expect(res.headers.get('cache-control')).toContain('public');
   });
+
+  it('owner toggle closes posting (403 comments_closed) and reopens it', async () => {
+    const app = openApp();
+    const created: any = await (await app.request('/api/v1/novels', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: 'رواية التبديل', author: 'كاتب', category: 'فانتازيا' }),
+    })).json();
+    expect(created.success).toBe(true);
+    const novelId = created.data.id as string;
+    expect(created.data.commentsEnabled).toBe(true);
+
+    const close = await app.request(`/api/v1/novels/${novelId}/comments`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: false }),
+    });
+    expect(close.status).toBe(200);
+    expect(((await close.json()) as any).data.commentsEnabled).toBe(false);
+
+    const detail: any = await (await app.request(`/api/v1/novels/${novelId}`)).json();
+    expect(detail.data.commentsEnabled).toBe(false);
+
+    const blocked = await app.request(`/api/v1/novels/${novelId}/comments`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ body: 'محاولة أثناء الإغلاق' }),
+    });
+    expect(blocked.status).toBe(403);
+    expect(((await blocked.json()) as any).code).toBe('comments_closed');
+
+    // Reads still work while closed.
+    const list = await app.request(`/api/v1/novels/${novelId}/comments`);
+    expect(list.status).toBe(200);
+
+    const open = await app.request(`/api/v1/novels/${novelId}/comments`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: true }),
+    });
+    expect(open.status).toBe(200);
+
+    const post = await app.request(`/api/v1/novels/${novelId}/comments`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ body: 'تعليق بعد الفتح' }),
+    });
+    expect(post.status).toBe(201);
+
+    const bad = await app.request(`/api/v1/novels/${novelId}/comments`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    expect(bad.status).toBe(400);
+
+    const missing = await app.request('/api/v1/novels/no_such_novel_xyz/comments', {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: false }),
+    });
+    expect(missing.status).toBe(404);
+  });
 });

@@ -37,6 +37,7 @@ export const novels = pgTable('novels', {
   coverUrl: text('cover_url').notNull(),
   summary: text('summary').notNull(),
   featuredRank: integer('featured_rank'),
+  commentsEnabled: boolean('comments_enabled').default(true).notNull(),
   authorUserId: uuid('author_user_id').references(() => users.id, { onDelete: 'set null' }),
   translatorUserId: uuid('translator_user_id').references(() => users.id, { onDelete: 'set null' }),
   createdAt: timestamp('created_at').defaultNow().notNull(),

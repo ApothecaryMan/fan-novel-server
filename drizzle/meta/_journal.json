@@ -64,6 +64,13 @@
       "when": 1790102873232,
       "tag": "0009_add_content_hash",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1790102873233,
+      "tag": "0010_novel_comments_toggle",
+      "breakpoints": true
     }
   ]
 }

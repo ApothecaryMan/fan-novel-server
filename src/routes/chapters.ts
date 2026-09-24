@@ -59,7 +59,7 @@ function ensureSeedData() {
       id: '1', title: 'سيد الكينونة الأبدية', author: 'جينغ شو', category: 'فانتازيا',
       status: 'مستمرة', rating: 4.8, readersCount: '12.4k', totalChapters: 46,
       coverUrl: '', summary: 'في عالم تتصادم فيه قوى السحر والداو...',
-      tags: ['فانتازيا', 'مغامرات'], createdAt: twoHoursAgo, updatedAt: twentyMinsAgo,
+      tags: ['فانتازيا', 'مغامرات'], commentsEnabled: true, createdAt: twoHoursAgo, updatedAt: twentyMinsAgo,
     });
   }
   CHAPTERS_STORE.set('1', [

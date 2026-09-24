@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { and, asc, desc, eq, gt, inArray, lt, or, sql } from 'drizzle-orm';
 import { db, isDbAvailable, noteDbFailure } from '../database/db.js';
 import { chapters, comments, commentModLog, commentVotes, novels, users } from '../database/schema.js';
+import { NOVELS_STORE } from './novels.js';
 import { requireAuth } from '../middleware/auth.js';
 import { getCaller } from '../middleware/ownership.js';
 import { rateLimit } from '../middleware/rateLimit.js';
@@ -327,6 +328,23 @@ async function novelExists(novelId: string): Promise<NovelCheck> {
   return 'exists'; // memory fallback accepts any novel id
 }
 
+/** Novel comments switch. Pre-migration NULL rows read as open. */
+async function novelCommentsOpen(novelId: string): Promise<'open' | 'closed' | 'unknown'> {
+  if (isDbAvailable()) {
+    try {
+      const rows = await db.select({ open: novels.commentsEnabled }).from(novels).where(eq(novels.id, novelId)).limit(1);
+      if (!rows[0]) return 'unknown'; // novelCheck already 404s genuinely missing rows
+      return rows[0].open === false ? 'closed' : 'open';
+    } catch (err) {
+      console.error('[comments] comments-enabled lookup failed', err);
+      noteDbFailure();
+      return 'unknown';
+    }
+  }
+  const mem = NOVELS_STORE.get(novelId);
+  return mem && (mem as { commentsEnabled?: boolean }).commentsEnabled === false ? 'closed' : 'open';
+}
+
 async function chapterExists(novelId: string, chapterNumber: number): Promise<boolean> {
   if (!isDbAvailable()) return true;
   try {
@@ -638,6 +656,9 @@ commentsNovelsRouter.post('/:novelId/comments', prodGuard(requireAuth, rateLimit
   const novelCheck = await novelExists(novelId);
   if (novelCheck === 'missing') return c.json({ success: false, code: 'novel_not_found', error: 'الرواية غير موجودة' }, 404);
   if (novelCheck === 'unknown') return c.json({ success: false, code: 'novel_not_found', error: 'تعذر التحقق' }, 503);
+  if ((await novelCommentsOpen(novelId)) === 'closed') {
+    return c.json({ success: false, code: 'comments_closed', error: 'التعليقات مغلقة لهذه الرواية' }, 403);
+  }
   if (chapterNumber !== undefined && !(await chapterExists(novelId, chapterNumber))) {
     return c.json({ success: false, code: 'chapter_not_found', error: 'الفصل غير موجود' }, 404);
   }

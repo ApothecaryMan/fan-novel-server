@@ -24,6 +24,7 @@ export interface NovelData {
   coverUrl: string;
   summary: string;
   tags: string[];
+  commentsEnabled: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -48,6 +49,7 @@ function toApi(row: NovelRow): NovelData {
     coverUrl: row.coverUrl ?? '',
     summary: row.summary ?? '',
     tags: (row.tags as string[]) ?? [],
+    commentsEnabled: row.commentsEnabled ?? true,
     createdAt: row.createdAt?.toISOString() ?? new Date().toISOString(),
     updatedAt: row.updatedAt?.toISOString() ?? new Date().toISOString(),
   };
@@ -235,7 +237,7 @@ novelsRouter.post('/', prodGuard(requireAuthOrPat), async (c) => {
     translator: body.translator || '', category: body.category, status: body.status || 'مستمرة',
     rating: body.rating ?? 5.0, readersCount: body.readersCount || '0', totalChapters: body.totalChapters ?? 0,
     coverUrl: body.coverUrl || '', summary: body.summary || '', tags: normalizeTags(body.tags),
-    createdAt: now, updatedAt: now,
+    commentsEnabled: true, createdAt: now, updatedAt: now,
   };
   NOVELS_STORE.set(id, novel);
   return c.json({ success: true, message: 'تم إضافة الرواية بنجاح', data: novel }, 201);
@@ -278,6 +280,31 @@ novelsRouter.put('/:id', prodGuard(requireAuthOrPat, ensureNovelOwner()), async 
   const updated: NovelData = { ...existing, ...body, tags: tags ?? existing.tags, updatedAt: new Date().toISOString() };
   NOVELS_STORE.set(id, updated);
   return c.json({ success: true, message: 'تم تعديل بيانات الرواية بنجاح', data: updated });
+});
+
+// PATCH /api/v1/novels/:id/comments — open/close comments (owner or admin).
+// Reads stay available while closed; POST /comments returns 403 when closed.
+const commentsToggleSchema = z.object({ enabled: z.boolean() });
+
+novelsRouter.patch('/:id/comments', prodGuard(requireAuthOrPat, ensureNovelOwner()), async (c) => {
+  const id = c.req.param('id');
+  const parsed = commentsToggleSchema.safeParse(await c.req.json().catch(() => null));
+  if (!parsed.success) return c.json({ success: false, error: 'حقول غير صالحة', issues: parsed.error.issues }, 400);
+  if (isDbAvailable()) {
+    try {
+      const rows = await db.select().from(novels).where(eq(novels.id, id)).limit(1);
+      if (!rows[0]) return c.json({ success: false, error: 'الرواية غير موجودة' }, 404);
+      await db.update(novels).set({ commentsEnabled: parsed.data.enabled, updatedAt: new Date() }).where(eq(novels.id, id));
+      return c.json({ success: true, data: { id, commentsEnabled: parsed.data.enabled } });
+    } catch (err) {
+      console.error('[novels] comments toggle failed', err); noteDbFailure();
+      return c.json({ success: false, error: 'فشل الحفظ' }, 500);
+    }
+  }
+  const existing = NOVELS_STORE.get(id);
+  if (!existing) return c.json({ success: false, error: 'الرواية غير موجودة' }, 404);
+  NOVELS_STORE.set(id, { ...existing, commentsEnabled: parsed.data.enabled, updatedAt: new Date().toISOString() });
+  return c.json({ success: true, data: { id, commentsEnabled: parsed.data.enabled } });
 });
 
 // DELETE /api/v1/novels/:id
