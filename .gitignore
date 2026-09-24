@@ -7,3 +7,9 @@ uploads/
 # Signed extensions repo — generated artifacts & secrets
 extensions-repo/private-key.jwk.json
 extensions-repo/public/
+
+# Expo/EAS mobile build config — owned by the app repo ("Fan Novel").
+# These only appear here when `eas init` is run in the wrong directory, and
+# they carry a different EAS projectId than the real app.
+app.json
+eas.json
