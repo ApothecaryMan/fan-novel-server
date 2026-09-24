@@ -335,6 +335,41 @@ describe('comments API (memory fallback, open mode)', () => {
     expect(((await bad.json()) as any).code).toBe('invalid_query');
   });
 
+  it('watermark moves when a HIDDEN low-id comment is approved', async () => {
+    // The gap a max(created_at) token would miss: approving a comment whose id
+    // is BELOW the newest visible id leaves max(id)/max(created_at) of the
+    // visible set unchanged, so the token must key off updated_at instead.
+    const app = openApp();
+    const novel = `appr_${Date.now()}`;
+    // Post 3 roots; a link-heavy body lands as 'pending' (not visible).
+    const held: any = await (await app.request(`/api/v1/novels/${novel}/comments`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ body: 'see http://a.com and http://b.com now' }),
+    })).json();
+    expect(held.data.status).toBe('pending');
+    for (const label of ['v1', 'v2', 'v3']) {
+      await app.request(`/api/v1/novels/${novel}/comments`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ body: label }),
+      });
+    }
+    const wm = async () => (await (await app.request(`/api/v1/novels/${novel}/comments/watermark`)).json() as any).data;
+    const before = await wm();
+    expect(before.total).toBe(3);
+
+    // Approve the held comment (open mode: moderation is unauthenticated).
+    const id = String(held.data.id).replace('app_', '');
+    const approved = await app.request(`/api/v1/comments/${id}/approve`, { method: 'POST' });
+    expect(approved.status).toBe(200);
+
+    const after = await wm();
+    // The count is recomputed every poll...
+    expect(after.total).toBe(4);
+    // ...and the token MUST move, or an open drawer never refetches to show
+    // the newly approved comment.
+    expect(after.watermark).not.toBe(before.watermark);
+  });
+
   it('owner toggle closes posting (403 comments_closed) and reopens it', async () => {
     const app = openApp();
     const created: any = await (await app.request('/api/v1/novels', {

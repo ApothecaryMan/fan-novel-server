@@ -581,9 +581,12 @@ commentsNovelsRouter.get('/:novelId/comments/watermark', async (c) => {
   const stamp = (d: unknown) => (d instanceof Date ? d.toISOString() : new Date(String(d)).toISOString());
   if (!isDbAvailable()) {
     const all = memList(novelId, chapter, true);
-    const latest = all.reduce<MemComment | null>((acc, m) => (!acc || m.createdAt > acc.createdAt ? m : acc), null);
+    // Same updated_at-based contract as the DB path, so an approve/vote/edit
+    // moves the token in dev exactly as it does in production.
+    const latest = all.reduce<MemComment | null>(
+      (acc, m) => (!acc || m.updatedAt > acc.updatedAt ? m : acc), null);
     c.header('Cache-Control', 'no-store');
-    return c.json({ success: true, data: { watermark: latest ? `${latest.id}:${latest.createdAt}` : '0', total: all.length } });
+    return c.json({ success: true, data: { watermark: latest ? `${latest.id}:${latest.updatedAt}` : '0', total: all.length } });
   }
   try {
     const chapterCond = chapter !== undefined ? eq(comments.chapterNumber, chapter) : sql`${comments.chapterNumber} IS NULL`;
@@ -594,8 +597,14 @@ commentsNovelsRouter.get('/:novelId/comments/watermark', async (c) => {
       maxUpdated: sql<Date>`max(${comments.updatedAt})`,
       total: sql<number>`count(*)::int`,
     }).from(comments).where(base);
+    // Token uses max(updated_at), NOT max(created_at): approving a comment
+    // with a low id (hide->visible) leaves max(id) and max(created_at) of the
+    // visible set untouched, so a created-based token would not move and an
+    // open drawer would never refetch to show it. Every mutation that changes
+    // what a reader sees (insert, edit, vote, hide/restore/approve) bumps
+    // updated_at, so this one column covers all of them.
     const watermark = row?.maxId
-      ? `${Number(row.maxId)}:${stamp(row.maxCreated ?? row.maxUpdated ?? new Date(0))}`
+      ? `${Number(row.maxId)}:${stamp(row.maxUpdated ?? row.maxCreated ?? new Date(0))}`
       : '0';
     // no-store: this token exists to defeat caching; a cached watermark would
     // freeze live updates until the TTL expired.
@@ -1017,6 +1026,7 @@ async function modTransition(c: any, id: number, action: 'hide' | 'restore' | 'a
     if (!m) return c.json({ success: false, code: 'comment_not_found', error: 'التعليق غير موجود' }, 404);
     if (m.status === 'deleted' && action !== 'approve') return c.json({ success: false, code: 'deleted', error: 'التعليق محذوف' }, 409);
     m.status = toStatus;
+    m.updatedAt = new Date().toISOString();
     return c.json({ success: true, message: 'تم', data: memToApi(m, 0) });
   }
   try {
