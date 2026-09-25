@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
   COMPLETION_THRESHOLD,
+  FREE_SESSION_KEYS,
   FREE_STATS_KEYS,
   MAX_COLLECTION_ROWS,
   MAX_SESSIONS_PER_PUSH,
+  PRO_SESSION_KEYS,
   PRO_STATS_KEYS,
   ReadingSyncContractError,
   freeProjection,
@@ -21,10 +23,34 @@ import {
   proReadingSyncPullSchema,
   proSessionSchema,
   proStatsSchema,
+  projectReadingStats,
   readingSyncPullResponseSchema,
   readingSyncPushResponseSchema,
 } from './contracts.js';
-import type { ProStats } from './contracts.js';
+import type {
+  FreeReadingSyncPull,
+  FreeReadingSyncPush,
+  ProReadingSyncPull,
+  ProReadingSyncPush,
+} from './contracts.js';
+
+/**
+ * These type aliases mirror the app repository's request declarations. The
+ * server test keeps a structural fixture so the two repositories stay
+ * independently buildable while still checking the shared wire envelope.
+ */
+type AppSyncEnvelope = {
+  syncVersion: 2;
+  user: { externalId: string };
+  deviceId?: string;
+};
+type AppFreeReadingSyncPush = AppSyncEnvelope & Pick<FreeReadingSyncPush, 'sessions'>;
+type AppProReadingSyncPush = AppSyncEnvelope & Pick<
+  ProReadingSyncPush,
+  'sessions' | 'library' | 'history' | 'chapterStates' | 'novels'
+>;
+type AppFreeReadingSyncPull = AppSyncEnvelope;
+type AppProReadingSyncPull = AppSyncEnvelope & Pick<ProReadingSyncPull, 'readingStats'>;
 
 const validFreeSession = {
   clientSessionId: 'm-abc123-7',
@@ -86,7 +112,7 @@ const validFreePush = {
   syncVersion: 2 as const,
   user: { externalId: 'subject-1' },
   sessions: [validFreeSession],
-};
+} satisfies AppFreeReadingSyncPush & FreeReadingSyncPush;
 
 const validProPush = {
   syncVersion: 2 as const,
@@ -96,12 +122,12 @@ const validProPush = {
   history: [],
   chapterStates: [],
   novels: [],
-};
+} satisfies AppProReadingSyncPush & ProReadingSyncPush;
 
 const validFreePull = {
   syncVersion: 2 as const,
   user: { externalId: 'subject-1' },
-};
+} satisfies AppFreeReadingSyncPull & FreeReadingSyncPull;
 
 const validProPull = {
   syncVersion: 2 as const,
@@ -112,7 +138,7 @@ const validProPull = {
     sessionCursor: null,
     year: 2026,
   },
-};
+} satisfies AppProReadingSyncPull & ProReadingSyncPull;
 
 const validLibraryRow = {
   novelId: '42',
@@ -187,6 +213,62 @@ function expectExactKeys(value: object, expected: readonly string[]) {
 }
 
 describe('reading sync v2 contracts', () => {
+  it('pins the exact session and statistics allowlists', () => {
+    expect(FREE_SESSION_KEYS).toEqual([
+      'clientSessionId',
+      'novelId',
+      'chapterId',
+      'seconds',
+      'progressPercent',
+      'completed',
+      'ts',
+    ]);
+    expect(PRO_SESSION_KEYS).toEqual([
+      'clientSessionId',
+      'novelId',
+      'chapterId',
+      'seconds',
+      'progressPercent',
+      'completed',
+      'ts',
+      'words',
+      'minuteOfDay',
+      'readDay',
+      'genre',
+    ]);
+    expect(FREE_STATS_KEYS).toEqual([
+      'level',
+      'levelProgress',
+      'totalSecondsRead',
+      'uniqueInAppCompletedChapters',
+    ]);
+    expect(PRO_STATS_KEYS).toEqual([
+      'asOfDay',
+      'level',
+      'tier',
+      'levelProgress',
+      'remainingTime',
+      'totalSecondsRead',
+      'currentStreakDays',
+      'longestStreakDays',
+      'totalWords',
+      'averageWPM',
+      'uniqueInAppCompletedChapters',
+      'combinedTotalChaptersCompleted',
+      'last7DaysActivity',
+      'yearlyActivity',
+      'hourlyDistribution',
+      'genreDistribution',
+      'mostReadNovels',
+      'mostReadNovelsTruncated',
+      'completedNovels',
+    ]);
+
+    expectExactKeys(validFreeSession, FREE_SESSION_KEYS);
+    expectExactKeys(validProSession, PRO_SESSION_KEYS);
+    expectExactKeys(validFreeStats, FREE_STATS_KEYS);
+    expectExactKeys(validProStats, PRO_STATS_KEYS);
+  });
   describe('Free and Pro session validation', () => {
     it('normalizes numeric novel IDs and accepts a Free session', () => {
       const parsed = parseFreeSession({ ...validFreeSession, novelId: 42 });
@@ -412,6 +494,30 @@ describe('reading sync v2 contracts', () => {
       }).success).toBe(false);
     });
 
+    it('projects valid Free/Free and Pro/Pro statistics', () => {
+      expect(projectReadingStats('free', validFreeStats)).toEqual(validFreeStats);
+      expect(projectReadingStats('pro', validProStats)).toEqual(validProStats);
+    });
+
+    it('rejects invalid plan/stat pairings at runtime', () => {
+      const callProjectReadingStats = (plan: string, input: unknown) =>
+        Reflect.apply(projectReadingStats, undefined, [plan, input]);
+
+      expect(() => callProjectReadingStats('pro', validFreeStats))
+        .toThrow(ReadingSyncContractError);
+      expect(() => callProjectReadingStats('free', validProStats))
+        .toThrow(ReadingSyncContractError);
+    });
+
+    it('keeps invalid plan/stat pairings out of the public overloads', () => {
+      if (false) {
+        // @ts-expect-error Pro projection requires ProStats.
+        projectReadingStats('pro', validFreeStats);
+        // @ts-expect-error Free projection requires FreeStats.
+        projectReadingStats('free', validProStats);
+      }
+    });
+
     it('projects Free stats to exactly the four allowlisted keys', () => {
       const projection = freeProjection({ ...validProStats, ...validFreeStats });
       expect(projection).toEqual(validFreeStats);
@@ -420,20 +526,22 @@ describe('reading sync v2 contracts', () => {
 
     it('omits every Pro aggregate key from a Free projection', () => {
       const projected = freeProjection(validProStats);
-      for (const key of PRO_STATS_KEYS.filter((key) => !FREE_STATS_KEYS.includes(key as never))) {
+      const freeStatsKeys = new Set<string>(FREE_STATS_KEYS);
+      for (const key of PRO_STATS_KEYS.filter((key) => !freeStatsKeys.has(key))) {
         expect(projected).not.toHaveProperty(key);
       }
     });
 
     it('projects Pro stats to the complete allowlist without leaking unknown keys', () => {
-      const projected = proProjection({ ...validProStats, unexpected: 'must-not-leak' } as unknown as ProStats);
+      const statsWithUnknownKey = { ...validProStats, unexpected: 'must-not-leak' };
+      const projected = proProjection(statsWithUnknownKey);
       expect(projected).toEqual(validProStats);
       expectExactKeys(projected, PRO_STATS_KEYS);
     });
   });
 
   describe('strict push and pull envelopes', () => {
-    it('accepts valid Free and Pro push requests', () => {
+    it('accepts app-valid Free and Pro push and pull envelopes', () => {
       expect(freeReadingSyncPushSchema.parse(validFreePush)).toEqual(validFreePush);
       expect(proReadingSyncPushSchema.parse(validProPush)).toEqual(validProPush);
       expect(freeReadingSyncPullSchema.parse(validFreePull)).toEqual(validFreePull);

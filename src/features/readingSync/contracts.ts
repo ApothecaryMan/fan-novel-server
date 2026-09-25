@@ -22,71 +22,13 @@ export const MAX_WPM = 1_000;
 
 export const CLIENT_SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
 
-export const FREE_STATS_KEYS = [
-  'level',
-  'levelProgress',
-  'totalSecondsRead',
-  'uniqueInAppCompletedChapters',
-] as const;
+/** Derive an allowlist from the schema shape so field renames stay in sync. */
+type ShapeKey<T extends z.ZodRawShape> = Extract<keyof T, string>;
 
-export const PRO_STATS_KEYS = [
-  'asOfDay',
-  'level',
-  'tier',
-  'levelProgress',
-  'remainingTime',
-  'totalSecondsRead',
-  'currentStreakDays',
-  'longestStreakDays',
-  'totalWords',
-  'averageWPM',
-  'uniqueInAppCompletedChapters',
-  'combinedTotalChaptersCompleted',
-  'last7DaysActivity',
-  'yearlyActivity',
-  'hourlyDistribution',
-  'genreDistribution',
-  'mostReadNovels',
-  'mostReadNovelsTruncated',
-  'completedNovels',
-] as const;
+function keysOfShape<T extends z.ZodRawShape>(shape: T): readonly ShapeKey<T>[] {
+  return Object.keys(shape) as ShapeKey<T>[];
+}
 
-const FREE_SESSION_FORBIDDEN_KEYS = [
-  // Pro session dimensions.
-  'words',
-  'minuteOfDay',
-  'readDay',
-  'genre',
-  // Privacy/file fields that are not valid reading evidence.
-  'fullWords',
-  'scrollY',
-  'content',
-  'cover',
-  'filePath',
-  'novelCover',
-  'coverUrl',
-  // Aggregate/client-authoritative fields.
-  ...PRO_STATS_KEYS,
-  'asOfDay',
-  'readingStats',
-  'stats',
-  'summary',
-  'isPro',
-  'statsPlan',
-  'isRead',
-  'isCompleted',
-  'totalWordsRead',
-  'totalChaptersCompleted',
-  'totalNovelsCompleted',
-  'lastReadDate',
-  'last7DaysActivity',
-  'yearlyActivity',
-  'hourlyDistribution',
-  'genreDistribution',
-  'mostReadNovels',
-  'mostReadNovelsTruncated',
-  'completedNovels',
-] as const;
 const FREE_ENVELOPE_FORBIDDEN_KEYS = [
   'library',
   'history',
@@ -212,6 +154,103 @@ function withProWordPlausibility<T extends z.ZodTypeAny>(
   });
 }
 
+const remainingTimeSchema = strictObject({
+  seconds: nonNegativeInteger().nullable(),
+  minutes: nonNegativeInteger().nullable(),
+});
+
+const activityDaySchema = strictObject({
+  date: readDaySchema,
+  activeSeconds: nonNegativeInteger(),
+});
+
+const mostReadNovelSchema = strictObject({
+  novelId: novelIdSchema,
+  title: z.string().trim().max(255).nullable().optional(),
+  activeSeconds: nonNegativeInteger(),
+  words: nonNegativeInteger(),
+  chapters: nonNegativeInteger(),
+});
+
+const completedNovelSchema = strictObject({
+  novelId: novelIdSchema,
+  title: z.string().trim().max(255).nullable().optional(),
+});
+
+const freeStatsShape = {
+  level: z.number().finite().int().min(1).max(50),
+  levelProgress: levelProgress(),
+  totalSecondsRead: nonNegativeInteger(),
+  uniqueInAppCompletedChapters: nonNegativeInteger(),
+};
+
+const proStatsShape = {
+  asOfDay: readDaySchema,
+  level: z.number().finite().int().min(1).max(50),
+  tier: z.number().finite().int().min(1).max(5),
+  levelProgress: levelProgress(),
+  remainingTime: remainingTimeSchema,
+  totalSecondsRead: nonNegativeInteger(),
+  currentStreakDays: nonNegativeInteger(),
+  longestStreakDays: nonNegativeInteger(),
+  totalWords: nonNegativeInteger(),
+  averageWPM: z.number().finite().int().min(0).max(MAX_WPM),
+  uniqueInAppCompletedChapters: nonNegativeInteger(),
+  combinedTotalChaptersCompleted: nonNegativeInteger(),
+  last7DaysActivity: z.array(activityDaySchema).length(7),
+  yearlyActivity: z.record(readDaySchema, nonNegativeInteger()),
+  hourlyDistribution: z.array(nonNegativeInteger()).length(24),
+  genreDistribution: z.record(z.string().trim().min(1).max(100), percentage().int()),
+  mostReadNovels: z.array(mostReadNovelSchema).max(100),
+  mostReadNovelsTruncated: z.boolean(),
+  completedNovels: z.array(completedNovelSchema),
+};
+
+export const FREE_STATS_KEYS = keysOfShape(freeStatsShape);
+export const PRO_STATS_KEYS = keysOfShape(proStatsShape);
+
+const FREE_SESSION_FORBIDDEN_KEYS = [
+  // Pro session dimensions.
+  'words',
+  'minuteOfDay',
+  'readDay',
+  'genre',
+  // Privacy/file fields that are not valid reading evidence.
+  'fullWords',
+  'scrollY',
+  'content',
+  'cover',
+  'filePath',
+  'novelCover',
+  'coverUrl',
+  // Aggregate/client-authoritative fields.
+  ...PRO_STATS_KEYS,
+  'asOfDay',
+  'readingStats',
+  'stats',
+  'summary',
+  'isPro',
+  'statsPlan',
+  'isRead',
+  'isCompleted',
+  'totalWordsRead',
+  'totalChaptersCompleted',
+  'totalNovelsCompleted',
+  'lastReadDate',
+  'last7DaysActivity',
+  'yearlyActivity',
+  'hourlyDistribution',
+  'genreDistribution',
+  'mostReadNovels',
+  'mostReadNovelsTruncated',
+  'completedNovels',
+] as const;
+
+export const freeStatsSchema = strictObject(freeStatsShape, {
+  forbiddenKeys: PRO_STATS_KEYS,
+  forbiddenCode: 'pro_fields_not_allowed',
+});
+
 export const syncUserSchema = strictObject({
   externalId: z.string().trim().min(1).max(255),
 });
@@ -244,28 +283,8 @@ const proSessionShape = {
   genre: z.string().trim().max(100),
 };
 
-export const FREE_SESSION_KEYS = Object.keys(freeSessionShape) as [
-  'clientSessionId',
-  'novelId',
-  'chapterId',
-  'seconds',
-  'progressPercent',
-  'completed',
-  'ts',
-];
-export const PRO_SESSION_KEYS = Object.keys(proSessionShape) as [
-  'clientSessionId',
-  'novelId',
-  'chapterId',
-  'seconds',
-  'progressPercent',
-  'completed',
-  'ts',
-  'words',
-  'minuteOfDay',
-  'readDay',
-  'genre',
-];
+export const FREE_SESSION_KEYS = keysOfShape(freeSessionShape);
+export const PRO_SESSION_KEYS = keysOfShape(proSessionShape);
 
 const proSessionBaseSchema = strictObject(proSessionShape, {
   forbiddenKeys: [
@@ -283,61 +302,7 @@ export const proSessionSchema = withProWordPlausibility(
   withCompletionConsistency(proSessionBaseSchema),
 );
 
-const freeStatsShape = {
-  level: z.number().finite().int().min(1).max(50),
-  levelProgress: levelProgress(),
-  totalSecondsRead: nonNegativeInteger(),
-  uniqueInAppCompletedChapters: nonNegativeInteger(),
-};
-export const freeStatsSchema = strictObject(freeStatsShape, {
-  forbiddenKeys: PRO_STATS_KEYS,
-  forbiddenCode: 'pro_fields_not_allowed',
-});
-
-const remainingTimeSchema = strictObject({
-  seconds: nonNegativeInteger().nullable(),
-  minutes: nonNegativeInteger().nullable(),
-});
-
-const activityDaySchema = strictObject({
-  date: readDaySchema,
-  activeSeconds: nonNegativeInteger(),
-});
-
-const mostReadNovelSchema = strictObject({
-  novelId: novelIdSchema,
-  title: z.string().trim().max(255).nullable().optional(),
-  activeSeconds: nonNegativeInteger(),
-  words: nonNegativeInteger(),
-  chapters: nonNegativeInteger(),
-});
-
-const completedNovelSchema = strictObject({
-  novelId: novelIdSchema,
-  title: z.string().trim().max(255).nullable().optional(),
-});
-
-const proStatsBaseSchema = strictObject({
-  asOfDay: readDaySchema,
-  level: z.number().finite().int().min(1).max(50),
-  tier: z.number().finite().int().min(1).max(5),
-  levelProgress: levelProgress(),
-  remainingTime: remainingTimeSchema,
-  totalSecondsRead: nonNegativeInteger(),
-  currentStreakDays: nonNegativeInteger(),
-  longestStreakDays: nonNegativeInteger(),
-  totalWords: nonNegativeInteger(),
-  averageWPM: z.number().finite().int().min(0).max(MAX_WPM),
-  uniqueInAppCompletedChapters: nonNegativeInteger(),
-  combinedTotalChaptersCompleted: nonNegativeInteger(),
-  last7DaysActivity: z.array(activityDaySchema).length(7),
-  yearlyActivity: z.record(readDaySchema, nonNegativeInteger()),
-  hourlyDistribution: z.array(nonNegativeInteger()).length(24),
-  genreDistribution: z.record(z.string().trim().min(1).max(100), percentage().int()),
-  mostReadNovels: z.array(mostReadNovelSchema).max(100),
-  mostReadNovelsTruncated: z.boolean(),
-  completedNovels: z.array(completedNovelSchema),
-});
+const proStatsBaseSchema = strictObject(proStatsShape);
 
 function withRemainingTimeConsistency<T extends z.ZodTypeAny>(
   schema: T,
@@ -770,6 +735,19 @@ export function proProjection(input: ProStats): ProStats {
 
 export const projectProStats = proProjection;
 
-export function projectReadingStats(plan: ReadingPlan, input: FreeStats | ProStats): FreeStats | ProStats {
-  return plan === 'free' ? freeProjection(input) : proProjection(input as ProStats);
+type FreeStatsProjectionInput = FreeStats & Partial<Record<
+  Exclude<keyof ProStats, keyof FreeStats>,
+  never
+>>;
+
+export function projectReadingStats(plan: 'free', input: FreeStatsProjectionInput): FreeStats;
+export function projectReadingStats(plan: 'pro', input: ProStats): ProStats;
+export function projectReadingStats(
+  plan: ReadingPlan,
+  input: FreeStats | ProStats,
+): FreeStats | ProStats {
+  if (plan === 'free') {
+    return freeProjection(parseFreeStats(input));
+  }
+  return proProjection(parseProStats(input));
 }
