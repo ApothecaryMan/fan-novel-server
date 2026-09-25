@@ -1,4 +1,5 @@
-import { pgTable, varchar, text, integer, smallint, real, boolean, timestamp, uuid, jsonb, bigint, uniqueIndex, index } from 'drizzle-orm/pg-core';
+import { sql } from 'drizzle-orm';
+import { pgTable, varchar, text, integer, smallint, real, boolean, timestamp, uuid, jsonb, bigint, uniqueIndex, index, check } from 'drizzle-orm/pg-core';
 
 // 1. جدول المستخدمين (Users Table)
 // Production identity is google_<verified subject>; sync cannot create accounts.
@@ -15,11 +16,14 @@ export const users = pgTable('users', {
   bannerUrl: text('banner_url'),
   bio: varchar('bio', { length: 500 }),
   role: varchar('role', { length: 20 }).default('reader').notNull(), // 'reader' | 'admin'
+  readingStatsPlan: varchar('reading_stats_plan', { length: 10 }).default('free').notNull(),
   isAuthor: boolean('is_author').default(false).notNull(),
   isTranslator: boolean('is_translator').default(false).notNull(),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull()
-});
+}, (table) => ({
+  readingStatsPlanCheck: check('users_reading_stats_plan_check', sql`${table.readingStatsPlan} in ('free', 'pro')`)
+}));
 
 // 2. جدول الروايات (Novels Table)
 export const novels = pgTable('novels', {
@@ -90,7 +94,8 @@ export const userLibrary = pgTable('user_library', {
   deletedAt: bigint('deleted_at', { mode: 'number' }),
   receivedAt: timestamp('received_at').defaultNow().notNull()
 }, (table) => ({
-  userLibraryIdx: uniqueIndex('user_library_idx').on(table.userId, table.novelId)
+  userLibraryIdx: uniqueIndex('user_library_idx').on(table.userId, table.novelId),
+  libraryCursorIdx: index('library_user_updated_id_idx').on(table.userId, table.updatedAt, table.id)
 }));
 
 // 6. لقطات القراءة للمزامنة (Sync mirror of mobile reading_history).
@@ -113,7 +118,8 @@ export const readingHistory = pgTable('reading_history', {
   updatedAt: bigint('updated_at', { mode: 'number' }).notNull(),
   receivedAt: timestamp('received_at').defaultNow().notNull()
 }, (table) => ({
-  historyUserNovelChapterIdx: uniqueIndex('history_user_novel_chapter_idx').on(table.userId, table.novelId, table.chapterId)
+  historyUserNovelChapterIdx: uniqueIndex('history_user_novel_chapter_idx').on(table.userId, table.novelId, table.chapterId),
+  historyCursorIdx: index('history_user_read_at_id_idx').on(table.userId, table.readAt, table.id)
 }));
 
 // 7. جلسات القراءة (append-only; idempotent via client_session_id).
@@ -123,6 +129,10 @@ export const readingSessions = pgTable('reading_sessions', {
   clientSessionId: varchar('client_session_id', { length: 64 }).notNull(),
   novelId: varchar('novel_id', { length: 100 }).notNull(),
   chapterId: integer('chapter_id').notNull(),
+  progressPercent: real('progress_percent').default(0).notNull(),
+  completed: boolean('completed').default(false).notNull(),
+  completionSignalPresent: boolean('completion_signal_present').default(false).notNull(),
+  proFieldsPresent: boolean('pro_fields_present').default(false).notNull(),
   seconds: integer('seconds').notNull(),
   words: integer('words').notNull(),
   minuteOfDay: integer('minute_of_day').notNull(),
@@ -131,7 +141,45 @@ export const readingSessions = pgTable('reading_sessions', {
   ts: bigint('ts', { mode: 'number' }).notNull(),
   receivedAt: timestamp('received_at').defaultNow().notNull()
 }, (table) => ({
-  sessionsUserClientIdx: uniqueIndex('sessions_user_client_idx').on(table.userId, table.clientSessionId)
+  sessionsUserClientIdx: uniqueIndex('sessions_user_client_idx').on(table.userId, table.clientSessionId),
+  sessionsUserNovelChapterIdx: index('sessions_user_novel_chapter_idx').on(table.userId, table.novelId, table.chapterId),
+  sessionsUserReadDayIdx: index('sessions_user_read_day_idx').on(table.userId, table.readDay),
+  sessionsUserTsIdIdx: index('sessions_user_ts_id_idx').on(table.userId, table.ts, table.id)
+}));
+
+// Pro read-state snapshots/manual marks. novel_id intentionally has no catalog FK.
+export const readingChapterState = pgTable('reading_chapter_state', {
+  id: serial('id').primaryKey(),
+  userId: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
+  novelId: varchar('novel_id', { length: 100 }).notNull(),
+  chapterId: integer('chapter_id').notNull(),
+  isRead: boolean('is_read').notNull(),
+  origin: varchar('origin', { length: 16 }).notNull(),
+  updatedAt: bigint('updated_at', { mode: 'number' }).notNull(),
+  receivedAt: timestamp('received_at').defaultNow().notNull()
+}, (table) => ({
+  chapterStateUserNovelChapterIdx: uniqueIndex('reading_chapter_state_user_novel_chapter_idx')
+    .on(table.userId, table.novelId, table.chapterId),
+  chapterStateUserNovelIdx: index('reading_chapter_state_user_novel_idx').on(table.userId, table.novelId),
+  chapterStateOriginCheck: check(
+    'reading_chapter_state_origin_check',
+    sql`${table.origin} in ('manual', 'snapshot')`
+  )
+}));
+
+// Small per-user metadata cache for local/extension novels and Pro aggregates.
+export const readingNovels = pgTable('reading_novels', {
+  id: serial('id').primaryKey(),
+  userId: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
+  novelId: varchar('novel_id', { length: 100 }).notNull(),
+  title: varchar('title', { length: 255 }).default('').notNull(),
+  genre: varchar('genre', { length: 100 }).default('').notNull(),
+  sourceId: varchar('source_id', { length: 100 }),
+  totalChapters: integer('total_chapters'),
+  updatedAt: bigint('updated_at', { mode: 'number' }).notNull(),
+  receivedAt: timestamp('received_at').defaultNow().notNull()
+}, (table) => ({
+  readingNovelsUserNovelIdx: uniqueIndex('reading_novels_user_novel_idx').on(table.userId, table.novelId)
 }));
 
 // 8. أغلفة الروايات (DB blob fallback when no object storage is bound).

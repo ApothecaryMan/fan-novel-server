@@ -71,6 +71,20 @@
       "when": 1790102873233,
       "tag": "0010_novel_comments_toggle",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1790318388997,
+      "tag": "0011_reading_stats_sync",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1790318388998,
+      "tag": "0012_pro_reading_data",
+      "breakpoints": true
     }
   ]
 }
