@@ -209,6 +209,15 @@ const proStatsShape = {
 export const FREE_STATS_KEYS = keysOfShape(freeStatsShape);
 export const PRO_STATS_KEYS = keysOfShape(proStatsShape);
 
+/**
+ * Pro aggregates that a Free response must never contain. Derived once here so
+ * every privacy assertion compares against the same derived allowlist instead of
+ * re-filtering the two key lists at each call site.
+ */
+export const PRO_ONLY_STATS_KEYS: readonly string[] = PRO_STATS_KEYS.filter(
+  (key) => !(FREE_STATS_KEYS as readonly string[]).includes(key),
+);
+
 const FREE_SESSION_FORBIDDEN_KEYS = [
   // Pro session dimensions.
   'words',

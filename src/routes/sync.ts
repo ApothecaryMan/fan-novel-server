@@ -5,6 +5,24 @@ import { db, isDbAvailable, noteDbFailure } from '../database/db.js';
 import { users, userLibrary, readingHistory, readingSessions } from '../database/schema.js';
 import { verifySubject } from '../middleware/auth.js';
 import { getEnv } from '../config/env.js';
+import {
+  authoritativePlan,
+  loadFreeStatsForUser,
+  storeFreeSessions,
+} from '../features/readingSync/freeStore.js';
+import {
+  buildFreePullResponse,
+  buildFreePushResponse,
+  claimedExternalId,
+  classifySyncRequest,
+  contractFailureResponse,
+  parseFreeV2Pull,
+  parseFreeV2Push,
+  proPlanNotImplementedResponse,
+  sessionConflictResponse,
+  unsupportedSyncVersionResponse,
+  type SyncFailure,
+} from '../features/readingSync/freeProtocol.js';
 
 export const syncRouter = new Hono();
 
@@ -121,6 +139,92 @@ const dateOrNull = (v: unknown): Date | null => {
   return null;
 };
 
+// ---- Reading statistics v2 (plan-aware). The plan is read from
+// users.reading_stats_plan and never from the request; the Free channel is
+// validated against the strict v2 contract before a single row is written.
+// Pro push/collections are a later task: they fail closed with 501
+// (proPlanNotImplementedResponse) instead of silently serving Free data.
+
+const OWNER_MISMATCH = { error: 'forbidden: token identity does not match user.externalId' } as const;
+const STORAGE_UNAVAILABLE = { error: 'sync database unavailable' } as const;
+
+function fail(c: Context, failure: SyncFailure) {
+  return c.json(failure.body as never, failure.status as never);
+}
+
+/** Owner policy for the v2 channel: identical to the legacy rule, checked
+ *  before parsing so a mismatched caller learns nothing about payload shape. */
+function ownerMismatch(c: Context, authedSub: string | null, body: unknown) {
+  const claimed = claimedExternalId(body);
+  if (authedSub && claimed !== null && authedSub !== claimed) return c.json(OWNER_MISMATCH, 403);
+  return null;
+}
+
+async function pushFreeV2(c: Context, body: unknown, authedSub: string | null) {
+  const mismatch = ownerMismatch(c, authedSub, body);
+  if (mismatch) return mismatch;
+
+  let payload;
+  try {
+    payload = parseFreeV2Push(body);
+  } catch (error) {
+    return fail(c, contractFailureResponse(error));
+  }
+
+  const user = await resolveSyncUser(c, payload.user.externalId);
+  if (user instanceof Response) return user;
+  const plan = authoritativePlan(user);
+  if (plan !== 'free') return fail(c, proPlanNotImplementedResponse(plan));
+
+  let write;
+  let stats;
+  try {
+    write = await storeFreeSessions(user.id, payload.sessions);
+    if (write.conflictingSessionIds.length > 0) {
+      return fail(c, sessionConflictResponse(write.conflictingSessionIds));
+    }
+    stats = await loadFreeStatsForUser(user.id);
+  } catch {
+    // Never surface driver diagnostics, and never leave a half-applied push
+    // looking like a success.
+    noteDbFailure();
+    return c.json(STORAGE_UNAVAILABLE, 503);
+  }
+
+  return c.json(buildFreePushResponse({
+    stats,
+    serverNow: Date.now(),
+    appliedSessions: write.applied,
+    acceptedSessionIds: write.acceptedSessionIds,
+  }));
+}
+
+async function pullFreeV2(c: Context, body: unknown, authedSub: string | null) {
+  const mismatch = ownerMismatch(c, authedSub, body);
+  if (mismatch) return mismatch;
+
+  let payload;
+  try {
+    payload = parseFreeV2Pull(body);
+  } catch (error) {
+    return fail(c, contractFailureResponse(error));
+  }
+
+  const user = await resolveSyncUser(c, payload.user.externalId);
+  if (user instanceof Response) return user;
+  const plan = authoritativePlan(user);
+  if (plan !== 'free') return fail(c, proPlanNotImplementedResponse(plan));
+
+  let stats;
+  try {
+    stats = await loadFreeStatsForUser(user.id);
+  } catch {
+    noteDbFailure();
+    return c.json(STORAGE_UNAVAILABLE, 503);
+  }
+  return c.json(buildFreePullResponse(stats));
+}
+
 // POST /api/v1/sync/push
 syncRouter.post('/push', async (c) => {
   if (!isDbAvailable()) return c.json({ error: 'sync database not configured' }, 503);
@@ -128,10 +232,17 @@ syncRouter.post('/push', async (c) => {
   if (!getEnv().syncOpen && !authedSub) {
     return c.json({ error: 'unauthorized: valid Bearer token required' }, 401);
   }
-  const parsed = pushSchema.safeParse(await c.req.json().catch(() => null));
+  const body = await c.req.json().catch(() => null);
+  const channel = classifySyncRequest(body);
+  if (channel === 'v2') return pushFreeV2(c, body, authedSub);
+  if (channel === 'unsupported') return fail(c, unsupportedSyncVersionResponse());
+  const parsed = pushSchema.safeParse(body);
   if (!parsed.success) return c.json({ error: 'invalid push payload', issues: parsed.error.issues }, 400);
-  const body = parsed.data;
-  const externalId = body.user.externalId;
+  // The legacy channel keeps working from the parsed body exactly as before the
+  // v2 branch existed: classification only needs the raw body, the writer only
+  // ever sees validated fields.
+  const legacyBody = parsed.data;
+  const externalId = legacyBody.user.externalId;
   // Owner policy: an authenticated caller may only sync its own identity.
   if (authedSub && authedSub !== externalId) {
     return c.json({ error: 'forbidden: token identity does not match user.externalId' }, 403);
@@ -141,7 +252,7 @@ syncRouter.post('/push', async (c) => {
   if (user instanceof Response) return user;
 
   let appliedLibrary = 0;
-  for (const e of body.library ?? []) {
+  for (const e of legacyBody.library ?? []) {
     const novelId = String(e.novelId ?? '');
     if (!novelId) continue;
     const updatedAt = clampTs(num(e.updatedAt, now), now);
@@ -189,7 +300,7 @@ syncRouter.post('/push', async (c) => {
   }
 
   let appliedHistory = 0;
-  for (const e of body.history ?? []) {
+  for (const e of legacyBody.history ?? []) {
     const novelId = String(e.novelId ?? '');
     const chapterId = num(e.chapterId, -1);
     if (!novelId || chapterId < 0) continue;
@@ -230,7 +341,7 @@ syncRouter.post('/push', async (c) => {
   }
 
   let appliedSessions = 0;
-  for (const e of body.sessions ?? []) {
+  for (const e of legacyBody.sessions ?? []) {
     const key = typeof e.clientSessionId === 'string' ? e.clientSessionId : '';
     if (!key) continue;
     const r = await db
@@ -262,15 +373,19 @@ syncRouter.post('/pull', async (c) => {
   if (!getEnv().syncOpen && !authedSub) {
     return c.json({ error: 'unauthorized: valid Bearer token required' }, 401);
   }
-  const parsed = pullSchema.safeParse(await c.req.json().catch(() => null));
+  const body = await c.req.json().catch(() => null);
+  const channel = classifySyncRequest(body);
+  if (channel === 'v2') return pullFreeV2(c, body, authedSub);
+  if (channel === 'unsupported') return fail(c, unsupportedSyncVersionResponse());
+  const parsed = pullSchema.safeParse(body);
   if (!parsed.success) return c.json({ error: 'invalid pull payload', issues: parsed.error.issues }, 400);
-  const body = parsed.data;
-  const externalId = body.user.externalId;
+  const legacyBody = parsed.data;
+  const externalId = legacyBody.user.externalId;
   // Owner policy: an authenticated caller may only sync its own identity.
   if (authedSub && authedSub !== externalId) {
     return c.json({ error: 'forbidden: token identity does not match user.externalId' }, 403);
   }
-  const since = num(body?.since, 0);
+  const since = num(legacyBody.since, 0);
   const user = await resolveSyncUser(c, externalId);
   if (user instanceof Response) return user;
 

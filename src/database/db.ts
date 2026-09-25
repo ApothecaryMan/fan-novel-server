@@ -77,6 +77,19 @@ export function noteDbFailure(cooldownMs = 30_000): void {
   dbDownUntil = Date.now() + cooldownMs;
 }
 
+/**
+ * Drop the cached client and close its pool. Production never calls this (the
+ * process lifetime is the cache lifetime); tests that boot and then tear down a
+ * throwaway cluster do, so a later `pg_ctl stop` cannot terminate a still-open
+ * idle pool and log a spurious FATAL connection error.
+ */
+export async function closeDb(): Promise<void> {
+  const pool = nodePool;
+  nodePool = null;
+  cached = null;
+  if (pool) await pool.end();
+}
+
 export async function checkDb(): Promise<boolean> {
   const d = await initDb();
   if (!d) return false;

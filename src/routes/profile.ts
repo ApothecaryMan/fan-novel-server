@@ -5,6 +5,8 @@ import { comments, readingHistory, readingSessions, userLibrary, users } from '.
 import { requireAuth } from '../middleware/auth.js';
 import { getEnv } from '../config/env.js';
 import { findMemoryUser } from './auth.js';
+import { authoritativePlan, loadFreeStatsForUser } from '../features/readingSync/freeStore.js';
+import { freeProjection, proPlanNotImplementedResponse } from '../features/readingSync/freeProtocol.js';
 
 export const profileRouter = new Hono();
 
@@ -150,12 +152,37 @@ function toPublic(u: any) {
   };
 }
 
+// Opt-in query for the plan-scoped reading statistics projection. Absent keeps
+// the legacy payload byte-for-byte identical; an unrecognised value is an
+// explicit 400 so a Pro client is never quietly downgraded to Free stats.
+export const READING_STATS_VERSION_PARAM = 'readingStatsVersion';
+const SUPPORTED_READING_STATS_VERSION = '2';
+
+type ReadingStatsVersionRequest =
+  | { requested: false; version: null }
+  | { requested: true; version: number | null };
+
+function requestedReadingStatsVersion(c: {
+  req: { query: (key: string) => string | undefined };
+}): ReadingStatsVersionRequest {
+  const raw = c.req.query(READING_STATS_VERSION_PARAM);
+  if (raw === undefined) return { requested: false, version: null };
+  if (raw === SUPPORTED_READING_STATS_VERSION) {
+    return { requested: true, version: Number(SUPPORTED_READING_STATS_VERSION) };
+  }
+  return { requested: true, version: null };
+}
+
 // GET /api/v1/users/me/profile — single-request account screen payload.
 // Level uses the exact app table (active minutes); full lists stay in sync/pull.
 profileRouter.get('/me/profile', requireAuth, async (c) => {
   const sub = String(c.get('authUser')?.sub ?? '');
   if (!sub) return c.json({ error: 'account not found' }, 401);
   if (!isDbAvailable()) return c.json({ error: 'account storage unavailable' }, 503);
+  const version = requestedReadingStatsVersion(c);
+  if (version.requested && version.version === null) {
+    return c.json({ error: 'unsupported readingStatsVersion', supported: [2] }, 400);
+  }
   try {
     const [row] = await db.select().from(users).where(eq(users.externalId, sub)).limit(1);
     if (!row) return c.json({ error: 'account not found' }, 401);
@@ -181,11 +208,26 @@ profileRouter.get('/me/profile', requireAuth, async (c) => {
     const levelInfo = getLevelFromSeconds(totalSeconds);
     const streakDays = streakFromReadDays(dayRows.map((r) => r.readDay).filter(Boolean));
 
-    return c.json({
+    const legacyPayload = {
       success: true,
       user: toPublic(row),
       stats: { library, history, sessions, totalSeconds, totalWords, streakDays },
       ...levelInfo,
+    };
+    if (!version.requested) return c.json(legacyPayload);
+
+    // Plan-scoped projection. The plan comes from the users row, and the
+    // response is built key-by-key from the Free allowlist, so no Pro
+    // aggregate (words, WPM, streaks, hourly/genre distribution) can leak.
+    const plan = authoritativePlan(row);
+    if (plan !== 'free') {
+      return c.json(proPlanNotImplementedResponse(plan).body, 501);
+    }
+    return c.json({
+      ...legacyPayload,
+      readingStatsVersion: version.version,
+      plan,
+      readingStats: freeProjection(await loadFreeStatsForUser(row.id)),
     });
   } catch (error) {
     noteDbFailure();
