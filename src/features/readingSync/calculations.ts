@@ -1,5 +1,6 @@
 import {
   COMPLETION_THRESHOLD,
+  MAX_WPM,
   type FreeStats,
   type ProCompletedNovel,
   type ProMostReadNovel,
@@ -9,9 +10,11 @@ import {
 /**
  * Reading-level inputs are deliberately kept separate from the wire session
  * types. A calculation receives normalized rows from storage, not a payload
- * that still needs protocol validation. The fields not used by a particular
- * aggregate are optional so a legacy/Free-origin row can safely be passed to
- * the Pro calculator as well.
+ * that still needs protocol validation.
+ *
+ * `completionSignalPresent` is deliberately required. An absent marker is
+ * materially different from `false`: only an explicit marker can establish
+ * that a completion came from the in-app signal path.
  */
 export interface FreeCalculationSession {
   seconds: number;
@@ -19,24 +22,47 @@ export interface FreeCalculationSession {
   chapterId: number;
   progressPercent: number;
   completed?: boolean;
-  completionSignalPresent?: boolean;
+  completionSignalPresent: boolean;
   clientSessionId?: string;
   ts?: number;
 }
 
-export interface ProCalculationSession extends FreeCalculationSession {
+interface ProCalculationDimensions {
+  words: number;
+  minuteOfDay: number;
+  readDay: string;
+  genre: string | null;
+}
+
+interface ProDimensionsPresent extends FreeCalculationSession {
+  proFieldsPresent: true;
+  words: number;
+  minuteOfDay: number;
+  readDay: string;
+  genre: string | null;
+}
+
+interface ProDimensionsAbsent extends FreeCalculationSession {
+  /** Free-origin rows and legacy rows may not carry Pro dimensions. */
+  proFieldsPresent?: false;
   words?: number;
   minuteOfDay?: number;
   readDay?: string;
   genre?: string | null;
-  proFieldsPresent?: boolean;
 }
+
+/**
+ * Pro rows are discriminated by the storage marker. A row that says its Pro
+ * fields are present must provide every dimension; rows without that marker
+ * retain the legacy/Free compatibility shape.
+ */
+export type ProCalculationSession = ProDimensionsPresent | ProDimensionsAbsent;
 
 export interface ProCalculationChapterState {
   novelId: string | number;
   chapterId: number;
   isRead: boolean;
-  origin?: 'manual' | 'snapshot' | string;
+  origin?: 'manual' | 'snapshot';
   updatedAt?: number;
 }
 
@@ -203,6 +229,26 @@ export function calculateLevel(totalSeconds: number): LevelInfo {
 }
 
 const DAY_MS = 86_400_000;
+const MIN_YEAR = 1;
+const MAX_YEAR = 9999;
+
+function civilDayNumber(year: number, month: number, day: number): number {
+  const date = new Date(0);
+  date.setUTCHours(0, 0, 0, 0);
+  date.setUTCFullYear(year, month - 1, day);
+  return Math.floor(date.getTime() / DAY_MS);
+}
+
+// The public contract accepts four-digit years 0001 through 9999. Keep the
+// arithmetic domain explicit so a seven-day window at the lower boundary can
+// never be rendered as year 0000 (or any other unsupported label).
+const MIN_DAY_NUMBER = civilDayNumber(MIN_YEAR, 1, 1);
+const MAX_DAY_NUMBER = civilDayNumber(MAX_YEAR, 12, 31);
+
+function clampSupportedDayNumber(dayNumber: number): number {
+  if (!Number.isFinite(dayNumber)) return MIN_DAY_NUMBER;
+  return Math.min(MAX_DAY_NUMBER, Math.max(MIN_DAY_NUMBER, Math.floor(dayNumber)));
+}
 
 interface ParsedDay {
   label: string;
@@ -223,7 +269,9 @@ function parseDay(label: unknown): ParsedDay | null {
   const year = Number(normalized.slice(0, 4));
   const month = Number(normalized.slice(5, 7));
   const day = Number(normalized.slice(8, 10));
-  if (year < 1 || month < 1 || month > 12 || day < 1 || day > 31) return null;
+  if (year < MIN_YEAR || year > MAX_YEAR || month < 1 || month > 12 || day < 1 || day > 31) {
+    return null;
+  }
 
   const date = new Date(0);
   date.setUTCHours(0, 0, 0, 0);
@@ -243,7 +291,7 @@ function parseDay(label: unknown): ParsedDay | null {
 }
 
 function dayLabel(dayNumber: number): string {
-  const date = new Date(dayNumber * DAY_MS);
+  const date = new Date(clampSupportedDayNumber(dayNumber) * DAY_MS);
   const year = String(date.getUTCFullYear()).padStart(4, '0');
   const month = String(date.getUTCMonth() + 1).padStart(2, '0');
   const day = String(date.getUTCDate()).padStart(2, '0');
@@ -268,15 +316,23 @@ function asOfDayFrom(
 }
 
 function requestedYear(inputYear: unknown, optionsYear: unknown, asOfDay: ParsedDay): number {
-  const candidate = typeof optionsYear === 'number'
-    ? optionsYear
-    : typeof inputYear === 'number'
-      ? inputYear
-      : Number(asOfDay.label.slice(0, 4));
-  if (!Number.isInteger(candidate) || candidate < 1 || candidate > 9999) {
-    return Number(asOfDay.label.slice(0, 4));
+  const fallbackYear = Number(asOfDay.label.slice(0, 4));
+  // Explicit calculation options win, then the input snapshot, then the
+  // as-of day. Invalid values are ignored at the level where they were
+  // supplied instead of masking a valid lower-precedence value.
+  for (const candidate of [optionsYear, inputYear, fallbackYear]) {
+    if (typeof candidate === 'number'
+      && Number.isInteger(candidate)
+      && candidate >= MIN_YEAR
+      && candidate <= MAX_YEAR) {
+      return candidate;
+    }
   }
-  return candidate;
+  return fallbackYear;
+}
+
+function yearPrefix(year: number): string {
+  return `${String(year).padStart(4, '0')}-`;
 }
 
 function nonNegativeInteger(value: unknown): number {
@@ -328,6 +384,37 @@ function isInAppCompletion(session: FreeCalculationSession): boolean {
     && session.progressPercent >= COMPLETION_THRESHOLD;
 }
 
+function hasValidProDimensions(value: unknown): value is ProCalculationDimensions {
+  if (value === null || typeof value !== 'object') return false;
+  const candidate = value as Partial<ProCalculationDimensions>;
+  return typeof candidate.words === 'number'
+    && Number.isSafeInteger(candidate.words)
+    && candidate.words >= 0
+    && typeof candidate.minuteOfDay === 'number'
+    && Number.isInteger(candidate.minuteOfDay)
+    && candidate.minuteOfDay >= 0
+    && candidate.minuteOfDay <= 1439
+    && typeof candidate.readDay === 'string'
+    && parseDay(candidate.readDay) !== null
+    && (candidate.genre === null || typeof candidate.genre === 'string');
+}
+
+function assertValidProDimensions(session: ProDimensionsPresent): void {
+  if (!hasValidProDimensions(session)) {
+    throw new TypeError(
+      'Malformed Pro calculation session: proFieldsPresent=true requires valid words, minuteOfDay, readDay, and genre',
+    );
+  }
+}
+
+function assertValidProSessions(sessions: readonly ProCalculationSession[]): void {
+  for (const session of sessions) {
+    if (session.proFieldsPresent === true) {
+      assertValidProDimensions(session);
+    }
+  }
+}
+
 function sumSeconds(sessions: readonly FreeCalculationSession[]): number {
   return sessions.reduce((total, session) => addNonNegative(total, session.seconds), 0);
 }
@@ -340,7 +427,9 @@ function hasAcceptedProDimensions(session: ProCalculationSession): boolean {
 }
 
 function creditedWords(session: ProCalculationSession): number {
-  return hasAcceptedProDimensions(session) ? nonNegativeInteger(session.words ?? 0) : 0;
+  if (!hasAcceptedProDimensions(session)) return 0;
+  if (session.proFieldsPresent === true) return nonNegativeInteger(session.words);
+  return nonNegativeInteger(session.words ?? 0);
 }
 
 function sumWords(sessions: readonly ProCalculationSession[]): number {
@@ -351,7 +440,7 @@ function averageWpm(totalWords: number, totalSeconds: number): number {
   if (totalWords <= 0 || totalSeconds <= 0) return 0;
   const minutes = totalSeconds / 60;
   if (!Number.isFinite(minutes) || minutes <= 0) return 0;
-  return Math.min(1000, Math.max(1, Math.round(totalWords / minutes)));
+  return Math.min(MAX_WPM, Math.max(1, Math.round(totalWords / minutes)));
 }
 
 function calculateStreaks(days: Set<number>, asOfDay: number): {
@@ -428,7 +517,8 @@ function latestChapterStates(
 interface NormalizedNovelMetadata {
   novelId: string;
   title?: string | null;
-  genre?: string;
+  genre?: string | null;
+  sourceId?: string | null;
   totalChapters: number | null;
   updatedAt: number | null;
 }
@@ -446,20 +536,46 @@ function normalizeGenre(value: unknown): string | undefined {
   return normalized.length > 0 ? normalized : undefined;
 }
 
+function normalizeSourceId(value: unknown): string | null | undefined {
+  if (value === null) return null;
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.trim();
+  return normalized.length > 0 ? normalized : undefined;
+}
+
 function normalizeTotalChapters(value: unknown): number | null {
   if (typeof value !== 'number' || !Number.isFinite(value)) return null;
   const normalized = Math.floor(value);
   return normalized > 0 && Number.isSafeInteger(normalized) ? normalized : null;
 }
 
-function metadataScore(metadata: {
-  title?: string | null;
-  genre?: string;
-  totalChapters: number | null;
-}): number {
-  return (metadata.title !== undefined ? 1 : 0)
-    + (metadata.genre !== undefined ? 1 : 0)
-    + (metadata.totalChapters !== null ? 1 : 0);
+function preferNonEmptyString(
+  candidate: string | null | undefined,
+  previous: string | null | undefined,
+): string | null | undefined {
+  return candidate !== null && candidate !== undefined && candidate.length > 0
+    ? candidate
+    : previous;
+}
+
+/**
+ * The server treats a newer metadata row as authoritative. At an equal
+ * timestamp, however, rows can be complementary (for example a title from a
+ * library response and chapter count from a snapshot), so merge each field
+ * independently and never let an empty value erase a non-empty one.
+ */
+function mergeEqualTimestampMetadata(
+  previous: NormalizedNovelMetadata,
+  candidate: NormalizedNovelMetadata,
+): NormalizedNovelMetadata {
+  return {
+    novelId: candidate.novelId,
+    title: preferNonEmptyString(candidate.title, previous.title),
+    genre: preferNonEmptyString(candidate.genre, previous.genre),
+    sourceId: preferNonEmptyString(candidate.sourceId, previous.sourceId),
+    totalChapters: candidate.totalChapters ?? previous.totalChapters,
+    updatedAt: candidate.updatedAt,
+  };
 }
 
 function normalizeNovelMetadata(
@@ -473,8 +589,9 @@ function normalizeNovelMetadata(
 
     const candidate: NormalizedNovelMetadata = {
       novelId,
-      title: normalizeTitle(novel.title !== undefined ? novel.title : novel.novelTitle),
+      title: normalizeTitle(novel.title) ?? normalizeTitle(novel.novelTitle),
       genre: normalizeGenre(novel.genre),
+      sourceId: normalizeSourceId(novel.sourceId),
       totalChapters: normalizeTotalChapters(novel.totalChapters),
       updatedAt: typeof novel.updatedAt === 'number' && Number.isFinite(novel.updatedAt)
         ? novel.updatedAt
@@ -486,15 +603,23 @@ function normalizeNovelMetadata(
       return;
     }
 
-    if (candidate.updatedAt === null && previous.updatedAt !== null) return;
-    if (previous.updatedAt !== null && candidate.updatedAt !== null) {
-      if (candidate.updatedAt < previous.updatedAt) return;
-      if (
-        candidate.updatedAt === previous.updatedAt
-        && metadataScore(candidate) < metadataScore(previous)
-      ) return;
+    if (candidate.updatedAt === null) {
+      if (previous.updatedAt === null) {
+        normalized.set(novelId, mergeEqualTimestampMetadata(previous, candidate));
+      }
+      return;
     }
-    normalized.set(novelId, candidate);
+    if (previous.updatedAt === null) {
+      normalized.set(novelId, candidate);
+      return;
+    }
+    if (candidate.updatedAt < previous.updatedAt) return;
+    normalized.set(
+      novelId,
+      candidate.updatedAt === previous.updatedAt
+        ? mergeEqualTimestampMetadata(previous, candidate)
+        : candidate,
+    );
   });
 
   return normalized;
@@ -511,7 +636,7 @@ function genreDistribution(
     if (!hasAcceptedProDimensions(session)) continue;
     const novelId = normalizeNovelId(session.novelId);
     const genre = normalizeGenre(session.genre)
-      ?? (novelId === null ? undefined : metadata.get(novelId)?.genre);
+      ?? (novelId === null ? undefined : normalizeGenre(metadata.get(novelId)?.genre));
     if (genre === undefined) continue;
     counts.set(genre, (counts.get(genre) ?? 0) + 1);
     total += 1;
@@ -626,6 +751,7 @@ export function calculateProStats(
   legacyYear?: number,
 ): ProStats {
   const sessions = input.sessions;
+  assertValidProSessions(sessions);
   const chapterStates = input.chapterStates ?? [];
   const novels = input.novels ?? [];
   const optionObject = typeof options === 'string' ? { asOfDay: options } : options;
@@ -658,7 +784,7 @@ export function calculateProStats(
       readDayNumbers.add(readDay.dayNumber);
       const previous = activeDaySeconds.get(readDay.dayNumber) ?? 0;
       activeDaySeconds.set(readDay.dayNumber, addNonNegative(previous, seconds));
-      if (readDay.label.startsWith(`${year}-`)) {
+      if (readDay.label.startsWith(yearPrefix(year))) {
         const previousYear = activeYearSeconds.get(readDay.dayNumber) ?? 0;
         activeYearSeconds.set(readDay.dayNumber, addNonNegative(previousYear, seconds));
       }
@@ -685,10 +811,14 @@ export function calculateProStats(
 
   const streak = calculateStreaks(readDayNumbers, asOfDay.dayNumber);
   const last7DaysActivity = Array.from({ length: 7 }, (_, index) => {
-    const day = asOfDay.dayNumber - (6 - index);
+    const requestedDay = asOfDay.dayNumber - (6 - index);
+    // There are only seven supported dates before 0001-01-01. Clamp the
+    // label to the contract domain; the out-of-domain slots remain zero so
+    // clamping never multiplies the activity total.
+    const day = clampSupportedDayNumber(requestedDay);
     return {
       date: dayLabel(day),
-      activeSeconds: activeDaySeconds.get(day) ?? 0,
+      activeSeconds: requestedDay === day ? (activeDaySeconds.get(day) ?? 0) : 0,
     };
   });
   const yearlyActivity: Record<string, number> = {};

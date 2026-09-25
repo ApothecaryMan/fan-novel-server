@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   COMPLETION_THRESHOLD,
+  MAX_WPM,
   FREE_SESSION_KEYS,
   FREE_STATS_KEYS,
   MAX_COLLECTION_ROWS,
@@ -725,6 +726,16 @@ describe('pure reading statistics calculations', () => {
     expect(getLevelFromSeconds(Number.MAX_SAFE_INTEGER).tier).toBe(5);
   });
 
+  it('recognizes the 21, 31, and 41 tier-entry thresholds', () => {
+    for (const [level, hours] of [[21, 165], [31, 385], [41, 825]] as const) {
+      const thresholdSeconds = hours * 3600;
+      expect(getLevelFromSeconds(thresholdSeconds - 60).level).toBe(level - 1);
+      const atThreshold = getLevelFromSeconds(thresholdSeconds);
+      expect(atThreshold.level).toBe(level);
+      expect(atThreshold.isTierEntry).toBe(true);
+    }
+  });
+
   it('returns a deterministic empty Free projection and sums only accepted time', () => {
     const stats = calculateFreeStats([]);
     expect(stats).toEqual({
@@ -793,6 +804,18 @@ describe('pure reading statistics calculations', () => {
       mostReadNovelsTruncated: false,
       completedNovels: [],
     });
+    expect(proStatsSchema.parse(stats)).toEqual(stats);
+  });
+
+  it('returns null remaining time at the exact level-50 threshold', () => {
+    const stats = calculateProStats({
+      sessions: [proSession({ seconds: 1500 * 3600, words: 0 })],
+      asOfDay: '2026-09-25',
+    });
+
+    expect(stats.level).toBe(50);
+    expect(stats.tier).toBe(5);
+    expect(stats.remainingTime).toEqual({ seconds: null, minutes: null });
     expect(proStatsSchema.parse(stats)).toEqual(stats);
   });
 
@@ -927,6 +950,31 @@ describe('pure reading statistics calculations', () => {
     expect(proStatsSchema.parse(stats)).toEqual(stats);
   });
 
+  it('caps aggregate WPM at the contract maximum', () => {
+    const stats = calculateProStats({
+      sessions: [proSession({ seconds: 60, words: 2000 })],
+      asOfDay: '2026-09-25',
+    });
+
+    expect(stats.averageWPM).toBe(MAX_WPM);
+    expect(proStatsSchema.parse(stats)).toEqual(stats);
+  });
+
+  it('orders equal-time most-read novels by normalized novel ID', () => {
+    const stats = calculateProStats({
+      sessions: [
+        proSession({ novelId: 'novel-b', seconds: 60, words: 60 }),
+        proSession({ novelId: 'novel-a', seconds: 60, words: 60 }),
+      ],
+      asOfDay: '2026-09-25',
+    });
+
+    expect(stats.mostReadNovels.map((novel) => novel.novelId)).toEqual([
+      'novel-a',
+      'novel-b',
+    ]);
+  });
+
   it('uses yesterday fallback and does not bridge streak gaps', () => {
     const stats = calculateProStats({
       sessions: [
@@ -1006,6 +1054,104 @@ describe('pure reading statistics calculations', () => {
       '2026-03-08': 60,
       '2026-03-09': 60,
     });
+  });
+
+  it('pads low-numbered years and keeps the lower date boundary contract-valid', () => {
+    const yearNine = calculateProStats({
+      sessions: [proSession({ readDay: '0009-01-01', seconds: 60, words: 60 })],
+      year: 9,
+      asOfDay: '0009-01-01',
+    });
+    expect(yearNine.yearlyActivity).toEqual({ '0009-01-01': 60 });
+    expect(proStatsSchema.parse(yearNine)).toEqual(yearNine);
+
+    const lowerBoundary = calculateProStats({
+      sessions: [proSession({ readDay: '0001-01-01', seconds: 60, words: 60 })],
+      year: 1,
+      asOfDay: '0001-01-01',
+    });
+    expect(lowerBoundary.last7DaysActivity).toEqual([
+      { date: '0001-01-01', activeSeconds: 0 },
+      { date: '0001-01-01', activeSeconds: 0 },
+      { date: '0001-01-01', activeSeconds: 0 },
+      { date: '0001-01-01', activeSeconds: 0 },
+      { date: '0001-01-01', activeSeconds: 0 },
+      { date: '0001-01-01', activeSeconds: 0 },
+      { date: '0001-01-01', activeSeconds: 60 },
+    ]);
+    expect(lowerBoundary.yearlyActivity).toEqual({ '0001-01-01': 60 });
+    expect(proStatsSchema.parse(lowerBoundary)).toEqual(lowerBoundary);
+  });
+
+  it('gives explicit calculation options precedence over input and legacy year', () => {
+    const input = {
+      sessions: [
+        proSession({ readDay: '2024-01-01', seconds: 60, words: 60 }),
+        proSession({ readDay: '2025-01-01', seconds: 60, words: 60 }),
+        proSession({ readDay: '2026-01-01', seconds: 60, words: 60 }),
+      ],
+      asOfDay: '2024-01-01',
+      year: 2024,
+    };
+
+    const stats = calculateProStats(input, {
+      asOfDay: '2026-01-01',
+      year: 2026,
+    }, 2025);
+    expect(stats.asOfDay).toBe('2026-01-01');
+    expect(stats.yearlyActivity).toEqual({ '2026-01-01': 60 });
+    expect(proStatsSchema.parse(stats)).toEqual(stats);
+
+    const legacyOptions = calculateProStats(input, '2025-01-01', 2025);
+    expect(legacyOptions.asOfDay).toBe('2025-01-01');
+    expect(legacyOptions.yearlyActivity).toEqual({ '2025-01-01': 60 });
+  });
+
+  it('merges complementary equal-timestamp novel metadata without losing fields', () => {
+    const stats = calculateProStats({
+      sessions: [proSession({ novelId: 'merged-novel', seconds: 60, words: 60 })],
+      chapterStates: [{
+        novelId: 'merged-novel',
+        chapterId: 2,
+        isRead: true,
+        origin: 'manual',
+        updatedAt: 10,
+      }],
+      novels: [
+        {
+          novelId: 'merged-novel',
+          title: 'Merged Title',
+          sourceId: 'site:merged',
+          updatedAt: 10,
+        },
+        {
+          novelId: 'merged-novel',
+          genre: 'Fantasy',
+          totalChapters: 1,
+          sourceId: null,
+          updatedAt: 10,
+        },
+      ],
+      asOfDay: '2026-09-25',
+    });
+
+    expect(stats.mostReadNovels).toEqual([
+      { novelId: 'merged-novel', title: 'Merged Title', activeSeconds: 60, words: 60, chapters: 0 },
+    ]);
+    expect(stats.genreDistribution).toEqual({ Fantasy: 100 });
+    expect(stats.completedNovels).toEqual([{ novelId: 'merged-novel', title: 'Merged Title' }]);
+  });
+
+  it('rejects malformed rows marked as having Pro dimensions', () => {
+    const malformed = {
+      ...proSession(),
+      words: undefined,
+    } as unknown as ProCalculationSession;
+
+    expect(() => calculateProStats({
+      sessions: [malformed],
+      asOfDay: '2026-09-25',
+    })).toThrow(/Malformed Pro calculation session/);
   });
 
   it('deduplicates manual overlap, ignores false state, and truncates most-read novels deterministically', () => {
