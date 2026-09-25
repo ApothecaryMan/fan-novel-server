@@ -160,9 +160,49 @@ function ownerMismatch(c: Context, authedSub: string | null, body: unknown) {
   return null;
 }
 
+/**
+ * Read-only plan probe for the v2 channel.
+ *
+ * Pro push/collections are not implemented, so every plan-aware surface has to
+ * answer a Pro account with the same 501 — including a push whose Pro fields
+ * (`words`, `readDay`, `library`, …) would otherwise trip the strict Free
+ * contract and come back as 403/400. Resolving the plan BEFORE parsing is what
+ * makes that uniform.
+ *
+ * The probe is a single SELECT and is deliberately non-provisioning: a push
+ * from an unknown identity, or a malformed payload of any kind, must never
+ * create a users row. Row creation stays in resolveSyncUser() and is therefore
+ * still gated on a payload that has already passed the Free contract, and the
+ * authoritative plan is re-read from that row before anything is written.
+ *
+ * `null` means "no stored plan yet" (unknown or unclaimed identity) and lets the
+ * request continue to the normal parse → resolve → plan-gate sequence.
+ */
+async function v2PlanProbe(c: Context, body: unknown): Promise<Response | null> {
+  const externalId = claimedExternalId(body);
+  if (externalId === null) return null;
+  try {
+    const [row] = await db
+      .select({ readingStatsPlan: users.readingStatsPlan })
+      .from(users)
+      .where(eq(users.externalId, externalId))
+      .limit(1);
+    if (!row) return null;
+    const plan = authoritativePlan(row);
+    if (plan !== 'free') return fail(c, proPlanNotImplementedResponse(plan));
+    return null;
+  } catch {
+    // A failed probe must not fall through to the permissive path; fail closed.
+    noteDbFailure();
+    return c.json(STORAGE_UNAVAILABLE, 503);
+  }
+}
+
 async function pushFreeV2(c: Context, body: unknown, authedSub: string | null) {
   const mismatch = ownerMismatch(c, authedSub, body);
   if (mismatch) return mismatch;
+  const planGate = await v2PlanProbe(c, body);
+  if (planGate) return planGate;
 
   let payload;
   try {
@@ -173,6 +213,8 @@ async function pushFreeV2(c: Context, body: unknown, authedSub: string | null) {
 
   const user = await resolveSyncUser(c, payload.user.externalId);
   if (user instanceof Response) return user;
+  // Re-read the plan from the resolved row: the probe cannot see a row that is
+  // created by this very request, and the probe may have raced an update.
   const plan = authoritativePlan(user);
   if (plan !== 'free') return fail(c, proPlanNotImplementedResponse(plan));
 
@@ -202,6 +244,8 @@ async function pushFreeV2(c: Context, body: unknown, authedSub: string | null) {
 async function pullFreeV2(c: Context, body: unknown, authedSub: string | null) {
   const mismatch = ownerMismatch(c, authedSub, body);
   if (mismatch) return mismatch;
+  const planGate = await v2PlanProbe(c, body);
+  if (planGate) return planGate;
 
   let payload;
   try {
@@ -340,6 +384,19 @@ syncRouter.post('/push', async (c) => {
     }
   }
 
+  // ---- PLAN GATE (Pro push — not implemented yet) --------------------------
+  // `words`, `minuteOfDay`, `readDay` and `genre` are the Pro reading
+  // dimensions, and the legacy v1 channel above is plan-blind: it stores exactly
+  // what the client sent. When Pro push lands, THIS write must be plan-gated on
+  // the authoritative `users.reading_stats_plan === 'pro'`, and a Free row must
+  // keep the inert defaults plus `proFieldsPresent = false` that
+  // features/readingSync/freeStore.ts writes. Until then a Free account can
+  // keep back-filling Pro aggregates (words, WPM, streaks, hourly/genre
+  // distribution) through the permissive v1 schema — precisely the evidence the
+  // v2 contract refuses to store — so the future Pro projections would read a
+  // history that a Free client wrote. The v2 Free channel above is the
+  // plan-gated reference implementation; do not let the legacy loop diverge
+  // from it unnoticed when Pro lands.
   let appliedSessions = 0;
   for (const e of legacyBody.sessions ?? []) {
     const key = typeof e.clientSessionId === 'string' ? e.clientSessionId : '';

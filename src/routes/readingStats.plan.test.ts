@@ -6,6 +6,7 @@ import { signToken } from '../middleware/auth.js';
 import { users } from '../database/schema.js';
 import {
   FREE_STATS_KEYS,
+  PRO_ONLY_STATS_KEYS,
   PRO_STATS_KEYS,
   freeReadingSyncPullResponseSchema,
 } from '../features/readingSync/contracts.js';
@@ -42,6 +43,36 @@ const freeEnvelope = (sessions: unknown[] = [validSession]) => ({
   deviceId: 'device-a',
   sessions,
 });
+
+// A Pro-shaped v2 push: every one of these keys is what a Pro client actually
+// sends on upgrade, and the strict Free contract answers 403 for all of them.
+const proShapedSession = () => ({
+  ...validSession,
+  words: 120,
+  minuteOfDay: 1380,
+  readDay: '2026-09-25',
+  genre: 'Fantasy',
+});
+
+// Plan-scoped bodies are privacy-checked as a WHOLE: a Pro aggregate must not
+// appear at any depth, so the assertion runs against the serialized text and not
+// only against the nested `readingStats` object a leak would most easily hide in.
+// `level` is deliberately absent from this list because it is a shared Free key —
+// its placement is asserted structurally instead (exactly four keys inside
+// readingStats, and no top-level `level`).
+const PRO_LEAK_KEYS = [
+  ...PRO_ONLY_STATS_KEYS,
+  // Legacy /me/profile aggregates the versioned body must not carry either.
+  'stats', 'library', 'history', 'sessions', 'totalSeconds', 'totalWords', 'streakDays',
+  'tier', 'tierMeta', 'isTierEntry', 'isMax', 'progress', 'totalMinutes',
+  'currentRequiredHours', 'nextRequiredHours', 'minutesIntoLevel', 'minutesToNext',
+];
+
+function expectNoProAggregateInBody(serialized: string) {
+  for (const key of PRO_LEAK_KEYS) {
+    expect(serialized.includes(`"${key}":`)).toBe(false);
+  }
+}
 
 async function post(path: string, body: unknown, bearer: string | null = token) {
   return app.request(path, {
@@ -291,6 +322,70 @@ describe('plan matrix', () => {
     expect(res.status).toBe(200);
     expect((await res.json()).plan).toBe('free');
   });
+
+  // The plan is resolved BEFORE the payload is parsed, so a Pro client sending
+  // the payload it really sends (Pro session dimensions and Pro collections)
+  // gets the documented 501 instead of the Free contract's 403/400: the Pro
+  // surface is unimplemented, not merely mis-shaped, and the status must not
+  // depend on how Pro-shaped the request happened to be.
+  it.each([
+    ['Pro session dimensions', () => push(freeEnvelope([proShapedSession()]))],
+    ['a Pro library collection', () => push({ ...freeEnvelope(), library: [{ novelId: '42' }] })],
+    ['a Pro novels collection', () => push({ ...freeEnvelope(), novels: [{ novelId: '42', title: 'T', genre: 'Fantasy' }] })],
+    ['a malformed v2 push', () => push({ ...freeEnvelope(), sessions: 'not-an-array' })],
+    ['a Pro-shaped v2 pull', () => pull({ syncVersion: 2, user: { externalId: SUBJECT }, readingStats: { year: 2026 } })],
+  ])('fails closed with 501 for a pro account sending %s', async (_label, request) => {
+    await seedUser(SUBJECT, { readingStatsPlan: 'pro' });
+    const res = await request();
+    expect(res.status).toBe(501);
+    const body: any = await res.json();
+    expect(body).toMatchObject({ success: false, code: 'pro_plan_not_implemented', plan: 'pro' });
+    expectNoProAggregateInBody(JSON.stringify(body));
+    expectNoWrites();
+  });
+
+  // The contrast that makes the gate meaningful: the same Pro-shaped payload is
+  // a 403 entitlement violation for a Free account and a 501 unimplemented
+  // surface for a Pro one.
+  it('answers 403 for Free and 501 for Pro on the identical Pro-shaped push', async () => {
+    await seedUser(SUBJECT, { readingStatsPlan: 'free' });
+    expect((await push(freeEnvelope([proShapedSession()]))).status).toBe(403);
+    expectNoWrites();
+    await seedUser('google_pro_subject', { readingStatsPlan: 'pro' });
+    const proToken = await signToken({ id: 'google_pro_subject', email: 'pro@test.com', role: 'reader' });
+    const res = await push({ ...freeEnvelope(), user: { externalId: 'google_pro_subject' } }, proToken);
+    expect(res.status).toBe(501);
+    expect((await res.json()).code).toBe('pro_plan_not_implemented');
+    expectNoWrites();
+  });
+
+  // The pre-parse plan lookup is read-only, so a rejected payload can never
+  // mint an account — not even on the dev provisioning path that a valid Free
+  // payload still takes.
+  it('never provisions a user for a v2 payload the contract rejects', async () => {
+    setWorkerEnv({ ...productionBindings, NODE_ENV: 'test', SYNC_OPEN: 'true' });
+    const stranger = 'google_unknown_subject';
+    const strangerToken = await signToken({ id: stranger, email: 'unknown@test.com', role: 'reader' });
+    const envelope = (sessions: unknown) => ({ syncVersion: 2, user: { externalId: stranger }, sessions });
+    for (const body of [
+      envelope([{ ...validSession, words: 120, readDay: '2026-09-25' }]),
+      envelope([{ ...validSession, seconds: -1 }]),
+      envelope('not-an-array'),
+      { syncVersion: 2, user: { externalId: stranger } },
+      { syncVersion: 2, user: {}, sessions: [] },
+    ]) {
+      const res = await push(body as never, strangerToken);
+      expect(res.status).toBeGreaterThanOrEqual(400);
+      expectNoWrites();
+      expect(fake().rows.some((row) => row.externalId === stranger)).toBe(false);
+    }
+    // The contrast: the dev provisioning path is reached only after a payload
+    // has passed the contract. (The identity fake models `users` alone, so the
+    // following reading_sessions write then fails closed with 503 — irrelevant
+    // to what is asserted here: the users row exists.)
+    await push(envelope([validSession]), strangerToken);
+    expect(fake().rows.some((row) => row.externalId === stranger)).toBe(true);
+  });
 });
 
 describe('v2 pull exposes the derived projection only', () => {
@@ -349,6 +444,11 @@ describe('GET /users/me/profile?readingStatsVersion=2', () => {
     expect(body.plan).toBe('free');
     expect(Object.keys(body.readingStats).sort()).toEqual([...FREE_STATS_KEYS].sort());
     expect(body.readingStats).toEqual({ level: 1, levelProgress: 0, totalSecondsRead: 0, uniqueInAppCompletedChapters: 0 });
+    // Plan-scoped means plan-scoped: the identity fields plus the plan, the
+    // version and the four Free stats — nothing else at the top level.
+    expect(Object.keys(body).sort()).toEqual(['plan', 'readingStats', 'readingStatsVersion', 'success', 'user']);
+    expect(body.success).toBe(true);
+    expect(body.user).toMatchObject({ id: SUBJECT, externalId: SUBJECT, email: `${SUBJECT}@test.com` });
   });
 
   it('omits every Pro aggregate from the serialized body', async () => {
@@ -356,11 +456,14 @@ describe('GET /users/me/profile?readingStatsVersion=2', () => {
     const serialized = await (await app.request('/users/me/profile?readingStatsVersion=2', {
       headers: { Authorization: `Bearer ${token}` },
     })).text();
-    for (const key of ['asOfDay', 'tier', 'remainingTime', 'currentStreakDays', 'longestStreakDays',
-      'totalWords', 'averageWPM', 'combinedTotalChaptersCompleted', 'last7DaysActivity', 'yearlyActivity',
-      'hourlyDistribution', 'genreDistribution', 'mostReadNovels', 'completedNovels']) {
-      expect(JSON.parse(serialized).readingStats).not.toHaveProperty(key);
-    }
+    // Whole-body, not just the nested projection: the legacy payload used to be
+    // spread in, which leaked `stats` and the levelInfo keys at the top level.
+    expectNoProAggregateInBody(serialized);
+    for (const key of PRO_ONLY_STATS_KEYS) expect(JSON.parse(serialized).readingStats).not.toHaveProperty(key);
+    const body = JSON.parse(serialized);
+    expect(body).not.toHaveProperty('stats');
+    expect(body).not.toHaveProperty('level');
+    expect(body.user).not.toHaveProperty('readingStatsPlan');
   });
 
   it.each(['1', '3', 'v2', '', '2.0'])('rejects an unsupported readingStatsVersion=%o with 400', async (value) => {

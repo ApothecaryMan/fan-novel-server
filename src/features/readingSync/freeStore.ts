@@ -23,6 +23,11 @@ import type { FreeSession, FreeStats, ReadingPlan } from './contracts.js';
  * Pro-only columns are NOT NULL, so a Free row must still supply values.
  * These defaults are deliberately empty/zero: they keep the row insertable
  * without inventing evidence a Free client never sent.
+ *
+ * Cross-reference: the legacy v1 session write in routes/sync.ts is still
+ * plan-blind and stores whatever those Pro columns are sent. Pro push must
+ * plan-gate that write (and keep these defaults for Free) so a Free account
+ * cannot back-fill Pro aggregates.
  */
 export const FREE_SESSION_SAFE_DEFAULTS = {
   words: 0,

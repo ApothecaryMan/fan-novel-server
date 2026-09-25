@@ -297,6 +297,28 @@ describe.skipIf(!url)('Free reading plan sync (isolated PostgreSQL)', () => {
     expect(body.applied).toEqual({ sessions: 4 });
   });
 
+  // The completion marker proves the client emitted the in-app signal; it is
+  // what separates a real completion from a legacy row. A valid 84.9% row is
+  // therefore stored as signalled-but-not-completed, and is never counted.
+  it('marks a valid non-completed 84.9% v2 row as signalled but not completed', async () => {
+    const { row, externalId, token } = await createUser();
+    const res = await freePush(externalId, [
+      session({ clientSessionId: 'm-near-1', chapterId: 1, seconds: 120, progressPercent: 84.9, completed: false }),
+    ], token);
+    expect(res.status).toBe(200);
+    const [stored] = await storedRows(row.id);
+    expect(stored).toMatchObject({
+      clientSessionId: 'm-near-1',
+      progressPercent: 84.9,
+      completed: false,
+      completionSignalPresent: true,
+      proFieldsPresent: false,
+    });
+    // Signed but below the boundary: time counts, the chapter does not.
+    const body: any = await res.json();
+    expect(body.stats).toMatchObject({ totalSecondsRead: 120, uniqueInAppCompletedChapters: 0 });
+  });
+
   it('treats a legacy v1 session as time only, never as completion evidence', async () => {
     const { row, externalId, token } = await createUser();
     const legacy = await request('/sync/push', {
@@ -352,6 +374,77 @@ describe.skipIf(!url)('Free reading plan sync (isolated PostgreSQL)', () => {
     expect(await storedRows(pro.row.id)).toHaveLength(0);
   });
 
+  // A Pro client sends the payload it really sends: Pro session dimensions and
+  // Pro collections. The plan is resolved before parsing, so the answer is the
+  // documented 501 (surface unimplemented) rather than the Free contract's
+  // 403/400 (payload shape) — and nothing is stored either way.
+  it('fails a Pro-shaped v2 push closed with 501 and writes nothing', async () => {
+    const pro = await createUser('pro');
+    const free = await createUser('free');
+    const proShapedSession = { ...session(), words: 120, minuteOfDay: 1380, readDay: '2026-09-25', genre: 'Fantasy' };
+    const proShaped = { sessions: [proShapedSession], library: [{ novelId: '42' }] };
+
+    const res = await request('/sync/push', { syncVersion: 2, user: { externalId: pro.externalId }, ...proShaped }, pro.token);
+    expect(res.status).toBe(501);
+    const body: any = await res.json();
+    expect(body).toMatchObject({ success: false, code: 'pro_plan_not_implemented', plan: 'pro' });
+    expect(JSON.stringify(body)).not.toMatch(/level|streak|words/i);
+    expect(await storedRows(pro.row.id)).toHaveLength(0);
+    expect(await database.select().from(schema.userLibrary).where(eq(schema.userLibrary.userId, pro.row.id))).toHaveLength(0);
+
+    // Same payload for a Free account: a 403 entitlement violation, still no rows.
+    const freeRes = await request('/sync/push', { syncVersion: 2, user: { externalId: free.externalId }, ...proShaped }, free.token);
+    expect(freeRes.status).toBe(403);
+    expect((await freeRes.json()).code).toBe('pro_fields_not_allowed');
+    expect(await storedRows(free.row.id)).toHaveLength(0);
+  });
+
+  // The legacy channel is plan-blind by design and must keep writing the same
+  // rows it always did: the v2 plan gate never touches v1 library/history.
+  it('keeps the legacy v1 library and history writes unchanged', async () => {
+    const { row, externalId, token } = await createUser();
+    const legacyPush = () => request('/sync/push', {
+      user: { externalId },
+      library: [{ novelId: '42', sourceId: 'novel-42', categoryIds: ['a'], lastReadChapterId: 7,
+        lastReadChapterNumber: 7, progressPercent: 40, addedAt: '2026-09-20T10:00:00.000Z', updatedAt: 1782000000000 }],
+      history: [{ novelId: '42', novelTitle: 'A Novel', novelAuthor: 'An Author', category: 'Fantasy', sourceId: 'novel-42',
+        chapterId: 7, chapterNumber: 7, chapterTitle: 'Ch 7', progressPercent: 40, readDay: '2026-09-20',
+        readAt: 1782000000000, updatedAt: 1782000000000 }],
+    }, token);
+
+    const first = await legacyPush();
+    expect(first.status).toBe(200);
+    expect(await first.json()).toMatchObject({ success: true, applied: { library: 1, history: 1 } });
+
+    const [library] = await database.select().from(schema.userLibrary).where(eq(schema.userLibrary.userId, row.id));
+    expect(library).toMatchObject({ novelId: '42', sourceId: 'novel-42', categoryIds: ['a'],
+      lastReadChapterId: 7, lastReadChapterNumber: 7, progressPercent: 40 });
+    const [history] = await database.select().from(schema.readingHistory).where(eq(schema.readingHistory.userId, row.id));
+    expect(history).toMatchObject({ novelId: '42', novelTitle: 'A Novel', novelAuthor: 'An Author', category: 'Fantasy',
+      chapterId: 7, chapterNumber: 7, readDay: '2026-09-20', readAt: 1782000000000 });
+
+    // The merge rules are untouched: an identical replay writes nothing.
+    const replay = await legacyPush();
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toMatchObject({ applied: { library: 0, history: 0 } });
+    expect(await database.select().from(schema.userLibrary).where(eq(schema.userLibrary.userId, row.id))).toHaveLength(1);
+    expect(await database.select().from(schema.readingHistory).where(eq(schema.readingHistory.userId, row.id))).toHaveLength(1);
+
+    // A newer client clock does win, as before.
+    const newer = await request('/sync/push', {
+      user: { externalId },
+      library: [{ novelId: '42', progressPercent: 55, updatedAt: 1782000000001 }],
+      history: [{ novelId: '42', chapterId: 7, progressPercent: 55, readAt: 1782000000001, updatedAt: 1782000000001 }],
+    }, token);
+    expect(await newer.json()).toMatchObject({ applied: { library: 1, history: 1 } });
+    const [updatedLibrary] = await database.select().from(schema.userLibrary).where(eq(schema.userLibrary.userId, row.id));
+    expect(updatedLibrary.progressPercent).toBe(55);
+    // Collections are Pro scope, so they stay invisible to the Free projection.
+    const pulled: any = await (await request('/sync/pull', { syncVersion: 2, user: { externalId } }, token)).json();
+    expect(pulled).toEqual({ success: true, plan: 'free',
+      stats: { level: 1, levelProgress: 0, totalSecondsRead: 0, uniqueInAppCompletedChapters: 0 } });
+  });
+
   it('returns the authoritative plan and exactly the Free stats keys', async () => {
     const { externalId, token } = await createUser();
     await freePush(externalId, [session()], token);
@@ -375,22 +468,47 @@ describe.skipIf(!url)('Free reading plan sync (isolated PostgreSQL)', () => {
     }
   });
 
-  it('keeps the legacy profile payload free of plan-scoped keys', async () => {
+  // The versioned body is plan-scoped, not "legacy + extra keys": only the
+  // identity fields, the authoritative plan, the version and the four Free
+  // stats. `stats` and the levelInfo spread are Pro dimensions, so the whole
+  // serialized body is checked for them.
+  it('carries no legacy aggregate in the versioned body', async () => {
     const { externalId, token } = await createUser();
     await freePush(externalId, [session()], token);
     const legacy = await app.request('/users/me/profile', { headers: { Authorization: `Bearer ${token}` } });
     const versioned = await app.request('/users/me/profile?readingStatsVersion=2', { headers: { Authorization: `Bearer ${token}` } });
+    expect(versioned.status).toBe(200);
     const legacyBody: any = await legacy.json();
-    const versionedBody: any = await versioned.json();
+    const versionedText = await versioned.text();
+    const versionedBody: any = JSON.parse(versionedText);
+
+    expect(Object.keys(versionedBody).sort()).toEqual(['plan', 'readingStats', 'readingStatsVersion', 'success', 'user']);
+    // The identity projection is identical on both payloads.
+    expect(versionedBody.user).toEqual(legacyBody.user);
+    // `stats` and the levelInfo spread are Pro dimensions, so no legacy-only key
+    // may appear anywhere in the versioned body — top level or nested.
+    const legacyOnlyKeys = [
+      ...Object.keys(legacyBody)
+        .filter((key) => key !== 'user' && key !== 'success' && !(FREE_STATS_KEYS as readonly string[]).includes(key)),
+      ...Object.keys(legacyBody.stats),
+    ];
+    expect(legacyOnlyKeys).toEqual(expect.arrayContaining(
+      ['stats', 'tier', 'totalWords', 'streakDays', 'minutesToNext', 'library', 'totalSeconds'],
+    ));
+    for (const key of legacyOnlyKeys) {
+      expect(versionedText.includes(`"${key}":`)).toBe(false);
+    }
+    // The four shared Free keys live inside readingStats only, never at the top.
+    for (const key of FREE_STATS_KEYS) {
+      expect(versionedBody).not.toHaveProperty(key);
+      expect(versionedBody.readingStats).toHaveProperty(key);
+    }
+    expect(versionedBody).not.toHaveProperty('stats');
+    // ...and the legacy payload keeps its own shape untouched.
     expect(legacyBody).not.toHaveProperty('readingStats');
     expect(legacyBody).not.toHaveProperty('plan');
     expect(legacyBody).not.toHaveProperty('readingStatsVersion');
-    // Every legacy key survives the versioned response unchanged.
-    for (const [key, value] of Object.entries(legacyBody)) {
-      expect(versionedBody[key]).toEqual(value);
-    }
-    expect(Object.keys(versionedBody).filter((key) => !(key in legacyBody)).sort())
-      .toEqual(['plan', 'readingStats', 'readingStatsVersion']);
+    expect(legacyBody.stats).toEqual({ library: 0, history: 0, sessions: 1, totalSeconds: 83, totalWords: 0, streakDays: 0 });
   });
 
   it('never leaks raw rows or Pro aggregates in a v2 response', async () => {
@@ -412,13 +530,19 @@ describe.skipIf(!url)('Free reading plan sync (isolated PostgreSQL)', () => {
       expect(text).not.toMatch(rawRowPattern);
     }
 
-    // The legacy profile payload keeps its own level/streak fields; the
-    // plan-scoped object must stay inside the Free allowlist.
-    const profile = JSON.parse(await (await app.request('/users/me/profile?readingStatsVersion=2', {
+    // The plan-scoped profile body is checked WHOLE, not only inside
+    // readingStats: the legacy payload used to be spread into it, so a leak
+    // would show up as a top-level `stats`/levelInfo key.
+    const profileText = await (await app.request('/users/me/profile?readingStatsVersion=2', {
       headers: { Authorization: `Bearer ${token}` },
-    })).text());
+    })).text();
+    const profile = JSON.parse(profileText);
     expect(Object.keys(profile.readingStats).sort()).toEqual([...FREE_STATS_KEYS].sort());
-    for (const key of proOnly) expect(profile.readingStats).not.toHaveProperty(key);
+    for (const key of proOnly) {
+      expect(profile).not.toHaveProperty(key);
+      expect(profileText).not.toContain(`"${key}":`);
+    }
+    expect(profileText).not.toMatch(rawRowPattern);
   });
 
   it('answers malformed payloads with 400 and leaves storage untouched', async () => {

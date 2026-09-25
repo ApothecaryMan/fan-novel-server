@@ -187,6 +187,28 @@ profileRouter.get('/me/profile', requireAuth, async (c) => {
     const [row] = await db.select().from(users).where(eq(users.externalId, sub)).limit(1);
     if (!row) return c.json({ error: 'account not found' }, 401);
 
+    // ---- Plan-scoped branch, resolved BEFORE the legacy aggregates.
+    //
+    // The v2 body is assembled from an allowlist and therefore never reuses the
+    // legacy payload: `stats` (words/streaks) and the levelInfo spread (tier,
+    // progress, minutesToNext) are Pro dimensions, and spreading them here
+    // would hand a Free client exactly the aggregates the v2 contracts reserve
+    // for Pro. Not running the aggregate queries at all is also cheaper than
+    // building the payload and dropping keys afterwards.
+    if (version.requested) {
+      const plan = authoritativePlan(row);
+      // Pro is unimplemented, so it fails closed here rather than degrading to
+      // a Free projection labelled 'pro'.
+      if (plan !== 'free') return c.json(proPlanNotImplementedResponse(plan).body, 501);
+      return c.json({
+        success: true,
+        user: toPublic(row),
+        plan,
+        readingStatsVersion: version.version,
+        readingStats: freeProjection(await loadFreeStatsForUser(row.id)),
+      });
+    }
+
     const [libRows, histRows, sessRows, dayRows] = await Promise.all([
       db.select({ total: count() }).from(userLibrary)
         .where(and(eq(userLibrary.userId, row.id), isNull(userLibrary.deletedAt))),
@@ -214,21 +236,7 @@ profileRouter.get('/me/profile', requireAuth, async (c) => {
       stats: { library, history, sessions, totalSeconds, totalWords, streakDays },
       ...levelInfo,
     };
-    if (!version.requested) return c.json(legacyPayload);
-
-    // Plan-scoped projection. The plan comes from the users row, and the
-    // response is built key-by-key from the Free allowlist, so no Pro
-    // aggregate (words, WPM, streaks, hourly/genre distribution) can leak.
-    const plan = authoritativePlan(row);
-    if (plan !== 'free') {
-      return c.json(proPlanNotImplementedResponse(plan).body, 501);
-    }
-    return c.json({
-      ...legacyPayload,
-      readingStatsVersion: version.version,
-      plan,
-      readingStats: freeProjection(await loadFreeStatsForUser(row.id)),
-    });
+    return c.json(legacyPayload);
   } catch (error) {
     noteDbFailure();
     console.warn(JSON.stringify({ event: 'profile.storage', requestId: c.get('requestId') ?? 'no-id', outcome: 'unavailable' }));
