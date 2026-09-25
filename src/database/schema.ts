@@ -158,9 +158,10 @@ export const readingChapterState = pgTable('reading_chapter_state', {
   updatedAt: bigint('updated_at', { mode: 'number' }).notNull(),
   receivedAt: timestamp('received_at').defaultNow().notNull()
 }, (table) => ({
+  // The unique prefix index also serves (user_id, novel_id) lookups; a second
+  // standalone index would duplicate its leading columns without a new query shape.
   chapterStateUserNovelChapterIdx: uniqueIndex('reading_chapter_state_user_novel_chapter_idx')
     .on(table.userId, table.novelId, table.chapterId),
-  chapterStateUserNovelIdx: index('reading_chapter_state_user_novel_idx').on(table.userId, table.novelId),
   chapterStateOriginCheck: check(
     'reading_chapter_state_origin_check',
     sql`${table.origin} in ('manual', 'snapshot')`

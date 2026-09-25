@@ -25,5 +25,4 @@ CREATE TABLE "reading_novels" (
 ALTER TABLE "reading_chapter_state" ADD CONSTRAINT "reading_chapter_state_user_id_users_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."users"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "reading_novels" ADD CONSTRAINT "reading_novels_user_id_users_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."users"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 CREATE UNIQUE INDEX "reading_chapter_state_user_novel_chapter_idx" ON "reading_chapter_state" USING btree ("user_id","novel_id","chapter_id");--> statement-breakpoint
-CREATE INDEX "reading_chapter_state_user_novel_idx" ON "reading_chapter_state" USING btree ("user_id","novel_id");--> statement-breakpoint
 CREATE UNIQUE INDEX "reading_novels_user_novel_idx" ON "reading_novels" USING btree ("user_id","novel_id");
