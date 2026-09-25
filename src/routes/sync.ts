@@ -10,6 +10,9 @@ import {
   loadFreeStatsForUser,
   storeFreeSessions,
 } from '../features/readingSync/freeStore.js';
+import { loadProStats, pullProData, storeProPush } from '../features/readingSync/proStore.js';
+import { buildProPushResponse, parseProV2Pull, parseProV2Push } from '../features/readingSync/proProtocol.js';
+import type { ReadingPlan, ProReadingSyncPush, ProReadingSyncPull } from '../features/readingSync/contracts.js';
 import {
   accountNotFoundResponse,
   buildFreePullResponse,
@@ -21,10 +24,10 @@ import {
   ownerMismatchResponse,
   parseFreeV2Pull,
   parseFreeV2Push,
-  proPlanNotImplementedResponse,
   sessionConflictResponse,
   storageUnavailableResponse,
   syncDatabaseUnavailableResponse,
+  syncFailure,
   unauthorizedResponse,
   unsupportedSyncVersionResponse,
   type SyncFailure,
@@ -232,25 +235,19 @@ function ownerMismatch(c: Context, authedSub: string | null, body: unknown) {
  * `null` means "no stored plan yet" (unknown or unclaimed identity) and lets the
  * request continue to the normal parse → resolve → plan-gate sequence.
  */
-async function v2PlanProbe(body: unknown): Promise<SyncFailure | null> {
+async function v2PlanProbe(body: unknown): Promise<{ plan: ReadingPlan | null } | { failure: SyncFailure }> {
   const externalId = claimedExternalId(body);
-  if (externalId === null) return null;
+  if (externalId === null) return { plan: null };
   try {
     const [row] = await db
       .select({ readingStatsPlan: users.readingStatsPlan })
       .from(users)
       .where(eq(users.externalId, externalId))
       .limit(1);
-    if (!row) return null;
-    const plan = authoritativePlan(row);
-    if (plan !== 'free') return proPlanNotImplementedResponse(plan);
-    return null;
+    return { plan: row ? authoritativePlan(row) : null };
   } catch {
-    // A failed probe must not fall through to the permissive path; fail closed.
-    // The breaker stays out of it: this is a read-only SELECT, and tripping it
-    // would take every write surface offline for a single failed lookup.
     console.warn(JSON.stringify({ event: 'sync.plan_probe', outcome: 'unavailable' }));
-    return storageUnavailableResponse();
+    return { failure: storageUnavailableResponse() };
   }
 }
 
@@ -264,61 +261,68 @@ async function v2SyncUser(c: Context, externalId: string) {
   return fail(c, v2UserFailure(resolved.reason));
 }
 
-async function pushFreeV2(c: Context, body: unknown, authedSub: string | null) {
+async function pushV2(c: Context, body: unknown, authedSub: string | null) {
   const mismatch = ownerMismatch(c, authedSub, body);
   if (mismatch) return mismatch;
-  const planGate = await v2PlanProbe(body);
-  if (planGate) return fail(c, planGate);
+  const probe = await v2PlanProbe(body);
+  if ('failure' in probe) return fail(c, probe.failure);
 
+  const proPayload = probe.plan === 'pro';
   let payload;
   try {
-    payload = parseFreeV2Push(body);
+    payload = proPayload ? parseProV2Push(body) : parseFreeV2Push(body);
   } catch (error) {
     return fail(c, contractFailureResponse(error));
   }
 
   const user = await v2SyncUser(c, payload.user.externalId);
   if (user instanceof Response) return user;
-  // Re-read the plan from the resolved row: the probe cannot see a row that is
-  // created by this very request, and the probe may have raced an update.
   const plan = authoritativePlan(user);
-  if (plan !== 'free') return fail(c, proPlanNotImplementedResponse(plan));
+  if ((plan === 'pro') !== proPayload) {
+    return fail(c, syncFailure(409, 'plan_changed', 'reading plan changed; refresh and retry'));
+  }
 
-  let write;
-  let stats;
   try {
-    write = await storeFreeSessions(user.id, payload.sessions);
+    if (plan === 'pro') {
+      const now = Date.now();
+      const write = await storeProPush(user.id, payload as ProReadingSyncPush, now, CLIENT_CLOCK_SKEW_MS);
+      if (write.conflictingSessionIds.length > 0) {
+        return fail(c, sessionConflictResponse(write.conflictingSessionIds, write.acceptedSessionIds));
+      }
+      return c.json(buildProPushResponse({
+        stats: await loadProStats(user.id),
+        serverNow: now,
+        applied: { sessions: write.applied, ...write.collections },
+        acceptedSessionIds: write.acceptedSessionIds,
+      }));
+    }
+
+    const write = await storeFreeSessions(user.id, payload.sessions);
     if (write.conflictingSessionIds.length > 0) {
-      // A mid-batch race keeps the rows it already created, so they are
-      // reported as accepted alongside the conflicting ids.
       return fail(c, sessionConflictResponse(write.conflictingSessionIds, write.acceptedSessionIds));
     }
-    stats = await loadFreeStatsForUser(user.id);
+    return c.json(buildFreePushResponse({
+      stats: await loadFreeStatsForUser(user.id),
+      serverNow: Date.now(),
+      appliedSessions: write.applied,
+      acceptedSessionIds: write.acceptedSessionIds,
+    }));
   } catch {
-    // Never surface driver diagnostics, and never leave a half-applied push
-    // looking like a success. The breaker IS tripped here: the write (or its
-    // aggregate) actually failed against storage.
     noteDbFailure();
     return fail(c, storageUnavailableResponse());
   }
-
-  return c.json(buildFreePushResponse({
-    stats,
-    serverNow: Date.now(),
-    appliedSessions: write.applied,
-    acceptedSessionIds: write.acceptedSessionIds,
-  }));
 }
 
-async function pullFreeV2(c: Context, body: unknown, authedSub: string | null) {
+async function pullV2(c: Context, body: unknown, authedSub: string | null) {
   const mismatch = ownerMismatch(c, authedSub, body);
   if (mismatch) return mismatch;
-  const planGate = await v2PlanProbe(body);
-  if (planGate) return fail(c, planGate);
+  const probe = await v2PlanProbe(body);
+  if ('failure' in probe) return fail(c, probe.failure);
 
+  const proPayload = probe.plan === 'pro';
   let payload;
   try {
-    payload = parseFreeV2Pull(body);
+    payload = proPayload ? parseProV2Pull(body) : parseFreeV2Pull(body);
   } catch (error) {
     return fail(c, contractFailureResponse(error));
   }
@@ -326,17 +330,20 @@ async function pullFreeV2(c: Context, body: unknown, authedSub: string | null) {
   const user = await v2SyncUser(c, payload.user.externalId);
   if (user instanceof Response) return user;
   const plan = authoritativePlan(user);
-  if (plan !== 'free') return fail(c, proPlanNotImplementedResponse(plan));
+  if ((plan === 'pro') !== proPayload) {
+    return fail(c, syncFailure(409, 'plan_changed', 'reading plan changed; refresh and retry'));
+  }
 
-  let stats;
   try {
-    stats = await loadFreeStatsForUser(user.id);
+    if (plan === 'pro' && 'readingStats' in payload) {
+      return c.json(await pullProData(user.id, (payload as ProReadingSyncPull).readingStats));
+    }
+    if (plan === 'pro') return fail(c, syncFailure(400, 'invalid_sync_payload', 'pro pull requires readingStats cursors'));
+    return c.json(buildFreePullResponse(await loadFreeStatsForUser(user.id)));
   } catch {
-    // Read-only aggregate: fail closed without tripping the breaker.
-    console.warn(JSON.stringify({ event: 'sync.stats_read', outcome: 'unavailable' }));
+    console.warn(JSON.stringify({ event: 'sync.pro_read', outcome: 'unavailable' }));
     return fail(c, storageUnavailableResponse());
   }
-  return c.json(buildFreePullResponse(stats));
 }
 
 /**
@@ -374,7 +381,7 @@ syncRouter.post('/push', async (c) => {
   );
   if (preamble instanceof Response) return preamble;
   const { body, channel, authedSub } = preamble;
-  if (channel === 'v2') return pushFreeV2(c, body, authedSub);
+  if (channel === 'v2') return pushV2(c, body, authedSub);
   if (channel === 'unsupported') return fail(c, unsupportedSyncVersionResponse());
   const parsed = pushSchema.safeParse(body);
   if (!parsed.success) return legacyIssues(c, 'invalid push payload', parsed.error.issues);
@@ -528,7 +535,7 @@ syncRouter.post('/pull', async (c) => {
   );
   if (preamble instanceof Response) return preamble;
   const { body, channel, authedSub } = preamble;
-  if (channel === 'v2') return pullFreeV2(c, body, authedSub);
+  if (channel === 'v2') return pullV2(c, body, authedSub);
   if (channel === 'unsupported') return fail(c, unsupportedSyncVersionResponse());
   const parsed = pullSchema.safeParse(body);
   if (!parsed.success) return legacyIssues(c, 'invalid pull payload', parsed.error.issues);

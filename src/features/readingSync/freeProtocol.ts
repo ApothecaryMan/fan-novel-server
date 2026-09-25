@@ -45,6 +45,7 @@ export type SyncFailureCode =
   | 'unsupported_sync_version'
   | 'session_conflict'
   | 'pro_plan_not_implemented'
+  | 'plan_changed'
   | 'unauthorized'
   | 'forbidden'
   | 'account_not_found'

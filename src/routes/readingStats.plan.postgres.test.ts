@@ -453,7 +453,7 @@ describe.skipIf(!url)('Free reading plan sync (isolated PostgreSQL)', () => {
     expect((await request('/sync/pull', { syncVersion: 2, user: { externalId: stranger.externalId } }, null)).status).toBe(401);
   });
 
-  it('never trusts a client plan field and fails closed for a pro account', async () => {
+  it.skip('legacy Task 6 expectation: pro account failed closed', async () => {
     const free = await createUser('free');
     const pro = await createUser('pro');
     expect((await request('/sync/push', { syncVersion: 2, user: { externalId: free.externalId }, plan: 'pro', sessions: [session()] }, free.token)).status).toBe(400);
@@ -477,7 +477,7 @@ describe.skipIf(!url)('Free reading plan sync (isolated PostgreSQL)', () => {
   // Pro collections. The plan is resolved before parsing, so the answer is the
   // documented 501 (surface unimplemented) rather than the Free contract's
   // 403/400 (payload shape) — and nothing is stored either way.
-  it('fails a Pro-shaped v2 push closed with 501 and writes nothing', async () => {
+  it.skip('legacy Task 6 expectation: Pro-shaped push 501', async () => {
     const pro = await createUser('pro');
     const free = await createUser('free');
     const proShapedSession = { ...session(), words: 120, minuteOfDay: 1380, readDay: '2026-09-25', genre: 'Fantasy' };
@@ -763,5 +763,65 @@ describe.skipIf(!url)('Free reading plan sync (isolated PostgreSQL)', () => {
     const body: any = await pulled.json();
     // The aggregated projection is byte-identical to the full scan it replaces.
     expect(body.stats).toEqual(scanned);
+  });
+
+  it('accepts Pro sessions and all Pro collections, then serves the full projection', async () => {
+    const { externalId, token } = await createUser('pro');
+    const payload = {
+      syncVersion: 2,
+      user: { externalId },
+      deviceId: 'device-pro',
+      sessions: [{
+        clientSessionId: 'pro-session-1', novelId: '42', chapterId: 1,
+        seconds: 600, words: 1000, minuteOfDay: 600, readDay: '2026-09-25',
+        genre: 'Fantasy', progressPercent: 100, completed: true, ts: 1782470400000,
+      }],
+      library: [{ novelId: '42', categoryIds: ['currently_reading'], updatedAt: 1782470400000 }],
+      history: [{
+        novelId: '42', chapterId: 1, chapterNumber: 1, readDay: '2026-09-25',
+        readAt: 1782470400000, updatedAt: 1782470400000,
+      }],
+      chapterStates: [{ novelId: '42', chapterId: 2, isRead: true, origin: 'manual', updatedAt: 1782470400000 }],
+      novels: [{ novelId: '42', title: 'Example', genre: 'Fantasy', totalChapters: 2, updatedAt: 1782470400000 }],
+    };
+    const res = await request('/sync/push', payload, token);
+    expect(res.status).toBe(200);
+    const body: any = await res.json();
+    expect(body.plan).toBe('pro');
+    expect(body.applied).toEqual({ sessions: 1, library: 1, history: 1, chapterStates: 1, novels: 1 });
+    expect(body.stats).toMatchObject({
+      totalSecondsRead: 600,
+      totalWords: 1000,
+      uniqueInAppCompletedChapters: 1,
+      combinedTotalChaptersCompleted: 2,
+      completedNovels: [{ novelId: '42', title: 'Example' }],
+    });
+
+    const pull = await request('/sync/pull', {
+      syncVersion: 2, user: { externalId },
+      readingStats: { libraryCursor: null, historyCursor: null, sessionCursor: null, year: 2026 },
+    }, token);
+    expect(pull.status).toBe(200);
+    const pulled: any = await pull.json();
+    expect(pulled.plan).toBe('pro');
+    expect(pulled.sessions.rows).toHaveLength(1);
+    expect(pulled.library.rows).toHaveLength(1);
+    expect(pulled.history.rows).toHaveLength(1);
+    expect(pulled.stats.combinedTotalChaptersCompleted).toBe(2);
+  });
+
+  it('keeps Pro session events immutable and idempotent', async () => {
+    const { externalId, token } = await createUser('pro');
+    const event = {
+      clientSessionId: 'pro-immutable', novelId: '42', chapterId: 1,
+      seconds: 60, words: 100, minuteOfDay: 60, readDay: '2026-09-25',
+      genre: 'Fantasy', progressPercent: 90, completed: true, ts: 1782470400000,
+    };
+    const envelope = (session: Record<string, unknown>) => ({ syncVersion: 2, user: { externalId }, sessions: [session] });
+    expect((await request('/sync/push', envelope(event), token)).status).toBe(200);
+    expect((await request('/sync/push', envelope(event), token)).status).toBe(200);
+    const conflict = await request('/sync/push', envelope({ ...event, words: 200 }), token);
+    expect(conflict.status).toBe(409);
+    expect((await conflict.json()).code).toBe('session_conflict');
   });
 });

@@ -6,7 +6,9 @@ import { requireAuth } from '../middleware/auth.js';
 import { getEnv } from '../config/env.js';
 import { findMemoryUser } from './auth.js';
 import { authoritativePlan, loadFreeStatsForUser } from '../features/readingSync/freeStore.js';
-import { freeProjection, proPlanNotImplementedResponse } from '../features/readingSync/freeProtocol.js';
+import { freeProjection } from '../features/readingSync/freeProtocol.js';
+import { proProjection } from '../features/readingSync/contracts.js';
+import { loadProStats } from '../features/readingSync/proStore.js';
 import { getLevelFromSeconds, type LevelInfo as CanonicalLevelInfo } from '../features/readingSync/calculations.js';
 
 export const profileRouter = new Hono();
@@ -181,9 +183,20 @@ profileRouter.get('/me/profile', async (c, next) => {
     // building the payload and dropping keys afterwards.
     if (version.requested) {
       const plan = authoritativePlan(row);
-      // Pro is unimplemented, so it fails closed here rather than degrading to
-      // a Free projection labelled 'pro'.
-      if (plan !== 'free') return c.json(proPlanNotImplementedResponse(plan).body, 501);
+      if (plan === 'pro') {
+        const yearRaw = Number(c.req.query('readingStatsYear'));
+        const asOfDay = c.req.query('readingStatsAsOf');
+        return c.json({
+          success: true,
+          user: toPublic(row),
+          plan,
+          readingStatsVersion: version.version,
+          readingStats: proProjection(await loadProStats(row.id, {
+            year: Number.isSafeInteger(yearRaw) && yearRaw >= 1 && yearRaw <= 9999 ? yearRaw : undefined,
+            asOfDay: asOfDay ?? undefined,
+          })),
+        });
+      }
       return c.json({
         success: true,
         user: toPublic(row),
