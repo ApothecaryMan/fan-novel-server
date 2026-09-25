@@ -33,6 +33,15 @@ import type {
   ProReadingSyncPull,
   ProReadingSyncPush,
 } from './contracts.js';
+import {
+  MAX_LEVEL,
+  calculateFreeStats,
+  calculateProStats,
+  getLevelFromSeconds,
+} from './calculations.js';
+import type {
+  ProCalculationSession,
+} from './calculations.js';
 
 /**
  * These type aliases mirror the app repository's request declarations. The
@@ -688,5 +697,349 @@ describe('reading sync v2 contracts', () => {
       expect((error as ReadingSyncContractError).code).toBe('pro_fields_not_allowed');
       expect((error as ReadingSyncContractError).issues[0]?.message).toBe('pro_fields_not_allowed');
     }
+  });
+});
+
+describe('pure reading statistics calculations', () => {
+  const proSession = (overrides: Partial<ProCalculationSession> = {}): ProCalculationSession => ({
+    seconds: 60,
+    words: 100,
+    novelId: 'novel-1',
+    chapterId: 1,
+    progressPercent: 0,
+    completed: false,
+    completionSignalPresent: true,
+    minuteOfDay: 600,
+    readDay: '2026-09-25',
+    genre: '',
+    proFieldsPresent: true,
+    ...overrides,
+  });
+
+  it('uses the shared floor-minute level ladder and caps at level 50', () => {
+    expect(getLevelFromSeconds(3599).level).toBe(1);
+    expect(getLevelFromSeconds(3600).level).toBe(2);
+    expect(getLevelFromSeconds(55 * 3600).level).toBe(11);
+    expect(getLevelFromSeconds(1650 * 3600).level).toBe(MAX_LEVEL);
+    expect(getLevelFromSeconds(1650 * 3600).progress).toBe(1);
+    expect(getLevelFromSeconds(Number.MAX_SAFE_INTEGER).tier).toBe(5);
+  });
+
+  it('returns a deterministic empty Free projection and sums only accepted time', () => {
+    const stats = calculateFreeStats([]);
+    expect(stats).toEqual({
+      level: 1,
+      levelProgress: 0,
+      totalSecondsRead: 0,
+      uniqueInAppCompletedChapters: 0,
+    });
+    expect(Object.keys(stats)).toEqual([
+      'level',
+      'levelProgress',
+      'totalSecondsRead',
+      'uniqueInAppCompletedChapters',
+    ]);
+  });
+
+  it('deduplicates Free completions, honors the 85 boundary, and excludes legacy markers', () => {
+    const stats = calculateFreeStats([
+      { seconds: 100, novelId: 1, chapterId: 1, progressPercent: 84, completed: false, completionSignalPresent: true },
+      { seconds: 50, novelId: '1', chapterId: 1, progressPercent: 85, completed: true, completionSignalPresent: true },
+      { seconds: 0, novelId: 'novel-2', chapterId: 4, progressPercent: 100, completed: true, completionSignalPresent: true },
+      { seconds: 7, novelId: 'legacy', chapterId: 9, progressPercent: 100, completed: true, completionSignalPresent: false },
+      { seconds: 11, novelId: 'signal-only', chapterId: 2, progressPercent: 85, completed: false, completionSignalPresent: true },
+    ]);
+
+    expect(stats.totalSecondsRead).toBe(168);
+    expect(stats.uniqueInAppCompletedChapters).toBe(3);
+    expect(stats).not.toHaveProperty('tier');
+    expect(stats).not.toHaveProperty('totalWords');
+  });
+
+  it('returns every empty Pro field with seven zero days and 24 zero hours', () => {
+    const stats = calculateProStats({
+      sessions: [],
+      chapterStates: [],
+      novels: [],
+      asOfDay: '2026-09-25',
+    });
+
+    expect(stats).toEqual({
+      asOfDay: '2026-09-25',
+      level: 1,
+      tier: 1,
+      levelProgress: 0,
+      remainingTime: { seconds: 3600, minutes: 60 },
+      totalSecondsRead: 0,
+      currentStreakDays: 0,
+      longestStreakDays: 0,
+      totalWords: 0,
+      averageWPM: 0,
+      uniqueInAppCompletedChapters: 0,
+      combinedTotalChaptersCompleted: 0,
+      last7DaysActivity: [
+        { date: '2026-09-19', activeSeconds: 0 },
+        { date: '2026-09-20', activeSeconds: 0 },
+        { date: '2026-09-21', activeSeconds: 0 },
+        { date: '2026-09-22', activeSeconds: 0 },
+        { date: '2026-09-23', activeSeconds: 0 },
+        { date: '2026-09-24', activeSeconds: 0 },
+        { date: '2026-09-25', activeSeconds: 0 },
+      ],
+      yearlyActivity: {},
+      hourlyDistribution: Array.from({ length: 24 }, () => 0),
+      genreDistribution: {},
+      mostReadNovels: [],
+      mostReadNovelsTruncated: false,
+      completedNovels: [],
+    });
+    expect(proStatsSchema.parse(stats)).toEqual(stats);
+  });
+
+  it('derives Pro totals, WPM, streaks, activity, hours, genres, and novel aggregates', () => {
+    const stats = calculateProStats({
+      sessions: [
+        proSession({
+          seconds: 3600,
+          words: 600,
+          novelId: 'novel-1',
+          chapterId: 1,
+          progressPercent: 90,
+          completed: true,
+          readDay: '2026-09-23',
+          minuteOfDay: 60,
+          genre: 'Fantasy',
+        }),
+        proSession({
+          seconds: 60,
+          words: 100,
+          novelId: 'novel-1',
+          chapterId: 1,
+          progressPercent: 90,
+          completed: true,
+          readDay: '2026-09-24',
+          minuteOfDay: 120,
+          genre: 'Fantasy',
+        }),
+        proSession({
+          seconds: 120,
+          words: 200,
+          novelId: 'novel-1',
+          chapterId: 2,
+          progressPercent: 90,
+          completed: true,
+          readDay: '2026-09-25',
+          minuteOfDay: 600,
+          genre: '',
+        }),
+        proSession({
+          seconds: 120,
+          words: 100,
+          novelId: 'novel-2',
+          chapterId: 1,
+          progressPercent: 40,
+          readDay: '2026-09-25',
+          minuteOfDay: 1200,
+          genre: 'Action',
+        }),
+        proSession({
+          seconds: 0,
+          words: 0,
+          novelId: 'novel-3',
+          chapterId: 1,
+          progressPercent: 100,
+          completed: true,
+          readDay: '2026-09-25',
+          minuteOfDay: 1439,
+          genre: '',
+        }),
+        // Legacy rows still contribute Pro time/words, but never completion.
+        proSession({
+          seconds: 300,
+          words: 50,
+          novelId: 'legacy-novel',
+          chapterId: 1,
+          progressPercent: 100,
+          completed: true,
+          completionSignalPresent: false,
+          proFieldsPresent: false,
+          readDay: '2026-09-25',
+          minuteOfDay: 0,
+          genre: '',
+        }),
+      ],
+      chapterStates: [
+        { novelId: 'novel-1', chapterId: 2, isRead: true, origin: 'manual', updatedAt: 10 },
+        { novelId: 'novel-2', chapterId: 2, isRead: true, origin: 'snapshot', updatedAt: 10 },
+      ],
+      novels: [
+        { novelId: 'novel-1', title: 'First Novel', genre: 'Fantasy', totalChapters: 2, updatedAt: 10 },
+        { novelId: 'novel-2', genre: 'Action', totalChapters: 5, updatedAt: 10 },
+        { novelId: 'novel-3', title: 'Mystery Novel', genre: 'Mystery', totalChapters: 1, updatedAt: 10 },
+        { novelId: 'unknown-total', totalChapters: null, updatedAt: 10 },
+      ],
+      year: 2026,
+    }, '2026-09-25');
+
+    expect(stats.level).toBe(2);
+    expect(stats.tier).toBe(1);
+    expect(stats.levelProgress).toBeCloseTo(1 / 12, 8);
+    expect(stats.remainingTime).toEqual({ seconds: 6600, minutes: 110 });
+    expect(stats.totalSecondsRead).toBe(4200);
+    expect(stats.totalWords).toBe(1050);
+    expect(stats.averageWPM).toBe(15);
+    expect(stats.currentStreakDays).toBe(3);
+    expect(stats.longestStreakDays).toBe(3);
+    expect(stats.uniqueInAppCompletedChapters).toBe(3);
+    expect(stats.combinedTotalChaptersCompleted).toBe(4);
+    expect(stats.last7DaysActivity).toEqual([
+      { date: '2026-09-19', activeSeconds: 0 },
+      { date: '2026-09-20', activeSeconds: 0 },
+      { date: '2026-09-21', activeSeconds: 0 },
+      { date: '2026-09-22', activeSeconds: 0 },
+      { date: '2026-09-23', activeSeconds: 3600 },
+      { date: '2026-09-24', activeSeconds: 60 },
+      { date: '2026-09-25', activeSeconds: 540 },
+    ]);
+    expect(stats.yearlyActivity).toEqual({
+      '2026-09-23': 3600,
+      '2026-09-24': 60,
+      '2026-09-25': 540,
+    });
+    expect(stats.hourlyDistribution[0]).toBe(300);
+    expect(stats.hourlyDistribution[1]).toBe(3600);
+    expect(stats.hourlyDistribution[2]).toBe(60);
+    expect(stats.hourlyDistribution[10]).toBe(120);
+    expect(stats.hourlyDistribution[20]).toBe(120);
+    expect(stats.hourlyDistribution[23]).toBe(0);
+    expect(stats.genreDistribution).toEqual({ Action: 20, Fantasy: 60, Mystery: 20 });
+    expect(stats.mostReadNovels).toEqual([
+      { novelId: 'novel-1', activeSeconds: 3780, words: 900, chapters: 2, title: 'First Novel' },
+      { novelId: 'legacy-novel', activeSeconds: 300, words: 50, chapters: 0 },
+      { novelId: 'novel-2', activeSeconds: 120, words: 100, chapters: 0 },
+      { novelId: 'novel-3', activeSeconds: 0, words: 0, chapters: 1, title: 'Mystery Novel' },
+    ]);
+    expect(stats.mostReadNovelsTruncated).toBe(false);
+    expect(stats.completedNovels).toEqual([
+      { novelId: 'novel-1', title: 'First Novel' },
+      { novelId: 'novel-3', title: 'Mystery Novel' },
+    ]);
+    expect(proStatsSchema.parse(stats)).toEqual(stats);
+  });
+
+  it('uses yesterday fallback and does not bridge streak gaps', () => {
+    const stats = calculateProStats({
+      sessions: [
+        proSession({ readDay: '2026-09-25', seconds: 60, words: 60 }),
+        proSession({ readDay: '2026-09-24', seconds: 60, words: 60 }),
+        proSession({ readDay: '2026-09-22', seconds: 60, words: 60 }),
+        proSession({ readDay: '2026-09-20', seconds: 60, words: 60 }),
+      ],
+      asOfDay: '2026-09-26',
+    });
+    expect(stats.currentStreakDays).toBe(2);
+    expect(stats.longestStreakDays).toBe(2);
+  });
+
+  it('keeps zero-second completion days for streaks but never creates WPM', () => {
+    const stats = calculateProStats({
+      sessions: [proSession({
+        seconds: 0,
+        words: 0,
+        progressPercent: 100,
+        completed: true,
+        readDay: '2026-09-25',
+      })],
+      asOfDay: '2026-09-25',
+    });
+    expect(stats.uniqueInAppCompletedChapters).toBe(1);
+    expect(stats.averageWPM).toBe(0);
+    expect(stats.currentStreakDays).toBe(1);
+    expect(stats.last7DaysActivity.at(-1)).toEqual({ date: '2026-09-25', activeSeconds: 0 });
+  });
+
+  it('does not promote Free-origin default dimensions into Pro aggregates', () => {
+    const stats = calculateProStats({
+      sessions: [{
+        seconds: 60,
+        words: 999,
+        novelId: 'free-origin',
+        chapterId: 1,
+        progressPercent: 100,
+        completed: true,
+        completionSignalPresent: true,
+        proFieldsPresent: false,
+        readDay: '2026-09-25',
+        minuteOfDay: 600,
+        genre: 'Fantasy',
+      }],
+      novels: [{ novelId: 'free-origin', genre: 'Fantasy' }],
+      asOfDay: '2026-09-25',
+    });
+
+    expect(stats.totalSecondsRead).toBe(60);
+    expect(stats.totalWords).toBe(0);
+    expect(stats.averageWPM).toBe(0);
+    expect(stats.currentStreakDays).toBe(0);
+    expect(stats.yearlyActivity).toEqual({});
+    expect(stats.hourlyDistribution).toEqual(Array.from({ length: 24 }, () => 0));
+    expect(stats.genreDistribution).toEqual({});
+  });
+
+  it('keeps calendar labels stable across month boundaries and filters the requested year', () => {
+    const stats = calculateProStats({
+      sessions: [
+        proSession({ readDay: '2026-03-08', seconds: 60, words: 60 }),
+        proSession({ readDay: '2026-03-09', seconds: 60, words: 60 }),
+        proSession({ readDay: '2025-12-31', seconds: 60, words: 60 }),
+      ],
+      year: 2026,
+      asOfDay: '2026-03-09',
+    });
+    expect(stats.currentStreakDays).toBe(2);
+    expect(stats.longestStreakDays).toBe(2);
+    expect(stats.last7DaysActivity.map((day) => day.date)).toEqual([
+      '2026-03-03', '2026-03-04', '2026-03-05', '2026-03-06',
+      '2026-03-07', '2026-03-08', '2026-03-09',
+    ]);
+    expect(stats.yearlyActivity).toEqual({
+      '2026-03-08': 60,
+      '2026-03-09': 60,
+    });
+  });
+
+  it('deduplicates manual overlap, ignores false state, and truncates most-read novels deterministically', () => {
+    const sessions = Array.from({ length: 101 }, (_, index) => proSession({
+      novelId: `novel-${String(index).padStart(3, '0')}`,
+      chapterId: 1,
+      seconds: index + 1,
+      words: index,
+      progressPercent: index === 100 ? 100 : 0,
+      completed: index === 100,
+      completionSignalPresent: true,
+    }));
+    const stats = calculateProStats({
+      sessions,
+      chapterStates: [
+        { novelId: 'novel-000', chapterId: 1, isRead: true, updatedAt: 2 },
+        { novelId: 'novel-000', chapterId: 1, isRead: false, updatedAt: 1 },
+        { novelId: 'novel-001', chapterId: 2, isRead: true, updatedAt: 2 },
+        { novelId: 'novel-002', chapterId: 2, isRead: false, updatedAt: 2 },
+      ],
+      novels: [{ novelId: 'novel-100', title: 'Finished', totalChapters: 1 }],
+      asOfDay: '2026-09-25',
+    });
+
+    expect(stats.combinedTotalChaptersCompleted).toBe(3);
+    expect(stats.mostReadNovels).toHaveLength(100);
+    expect(stats.mostReadNovels[0]).toEqual({
+      novelId: 'novel-100',
+      title: 'Finished',
+      activeSeconds: 101,
+      words: 100,
+      chapters: 1,
+    });
+    expect(stats.mostReadNovelsTruncated).toBe(true);
+    expect(stats.completedNovels).toEqual([{ novelId: 'novel-100', title: 'Finished' }]);
   });
 });
