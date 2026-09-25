@@ -1,8 +1,11 @@
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 import { db } from '../../database/db.js';
 import { readingSessions } from '../../database/schema.js';
-import { calculateFreeStats, type FreeCalculationSession } from './calculations.js';
-import type { FreeSession, FreeStats, ReadingPlan } from './contracts.js';
+import {
+  calculateFreeStatsFromTotals,
+  type FreeCalculationSession,
+} from './calculations.js';
+import { COMPLETION_THRESHOLD, type FreeSession, type FreeStats, type ReadingPlan } from './contracts.js';
 
 // ==========================================
 // Free-plan persistence for reading statistics.
@@ -56,7 +59,13 @@ interface StoredFreeSession {
 export interface FreeSessionWriteResult {
   /** Rows this request created. */
   applied: number;
-  /** Ids acknowledged by this push, duplicates included, in payload order. */
+  /**
+   * Ids acknowledged by this push, duplicates included, in payload order.
+   *
+   * A 409 can carry ids here: when the batch loses an insert race, the rows it
+   * created before that point are immutable valid events that a retry would
+   * only re-acknowledge, so they are reported instead of being hidden.
+   */
   acceptedSessionIds: string[];
   /** Ids whose stored event differs from the pushed one. */
   conflictingSessionIds: string[];
@@ -151,15 +160,38 @@ function collapseByClientSessionId(sessions: readonly FreeSession[]): {
   };
 }
 
+/** Map one contract session onto the storage row a Free event is made of. */
+function toFreeSessionRow(userId: string, session: FreeSession) {
+  return {
+    userId,
+    clientSessionId: session.clientSessionId,
+    novelId: session.novelId,
+    chapterId: session.chapterId,
+    progressPercent: session.progressPercent,
+    completed: session.completed,
+    completionSignalPresent: true,
+    proFieldsPresent: false,
+    ...FREE_SESSION_SAFE_DEFAULTS,
+    seconds: session.seconds,
+    ts: session.ts,
+  };
+}
+
 /**
  * Store Free sessions idempotently.
  *
  * A conflict is reported before the first write whenever it is knowable
  * up-front (a self-contradictory batch, or an id already stored with different
  * values), so a rejected push leaves both the stored event and the rest of the
- * batch untouched. The only mid-batch conflict is an insert race against a
- * concurrent push, where the rows already written are valid immutable events
- * that a retry would merely re-acknowledge.
+ * batch untouched.
+ *
+ * The pending rows go out as ONE multi-row insert guarded by the
+ * (user_id, client_session_id) unique index, so a 500-row push costs one
+ * statement instead of 500 round trips and a concurrent push of the same id
+ * cannot interleave a half batch. Rows the database refused are exactly the ids
+ * a concurrent push won; they are classified in a single follow-up read, which
+ * is bounded by the batch (MAX_SESSIONS_PER_PUSH) and keeps the retry a
+ * duplicate acknowledgement or a 409 — never an overwrite.
  */
 export async function storeFreeSessions(
   userId: string,
@@ -194,49 +226,55 @@ export async function storeFreeSessions(
     return { applied: 0, acceptedSessionIds: [], conflictingSessionIds: conflictsIn('conflict') };
   }
 
-  let applied = 0;
-  for (const session of pending) {
-    const inserted = await db
-      .insert(readingSessions)
-      .values({
-        userId,
-        clientSessionId: session.clientSessionId,
-        novelId: session.novelId,
-        chapterId: session.chapterId,
-        progressPercent: session.progressPercent,
-        completed: session.completed,
-        completionSignalPresent: true,
-        proFieldsPresent: false,
-        ...FREE_SESSION_SAFE_DEFAULTS,
-        seconds: session.seconds,
-        ts: session.ts,
-      })
-      .onConflictDoNothing({ target: [readingSessions.userId, readingSessions.clientSessionId] })
-      .returning();
-
-    if (inserted.length > 0) {
-      applied += 1;
-      outcome.set(session.clientSessionId, 'accepted');
-      continue;
-    }
-    // A concurrent push of the same id won the insert race. Nothing was
-    // overwritten, so classify the winner instead of failing the request.
-    const [winner] = await readStoredSessions(userId, [session.clientSessionId]);
-    outcome.set(
-      session.clientSessionId,
-      winner && isSameEvent(session, winner) ? 'accepted' : 'conflict',
-    );
+  if (pending.length === 0) {
+    return { applied: 0, acceptedSessionIds: conflictsIn('accepted'), conflictingSessionIds: [] };
   }
 
-  const conflictingSessionIds = conflictsIn('conflict');
+  const inserted = await db
+    .insert(readingSessions)
+    .values(pending.map((session) => toFreeSessionRow(userId, session)))
+    .onConflictDoNothing({ target: [readingSessions.userId, readingSessions.clientSessionId] })
+    .returning();
+
+  const insertedIds = new Set(inserted.map((row) => row.clientSessionId));
+  for (const id of insertedIds) outcome.set(id, 'accepted');
+
+  // One bounded read for the ids the database refused. A committed winner is
+  // always visible to the statement that follows the insert, so a single read
+  // is enough — and an id the read cannot resolve is reported as a conflict
+  // rather than acknowledged, because nothing may be acked that was not verified.
+  const racedIds = pending
+    .map((session) => session.clientSessionId)
+    .filter((id) => !insertedIds.has(id));
+  if (racedIds.length > 0) {
+    const winners = await readStoredSessions(userId, racedIds);
+    const winnersById = new Map(winners.map((row) => [row.clientSessionId, row]));
+    const byId = new Map(pending.map((session) => [session.clientSessionId, session]));
+    for (const id of racedIds) {
+      const winner = winnersById.get(id);
+      const pushed = byId.get(id);
+      outcome.set(
+        id,
+        winner && pushed && isSameEvent(pushed, winner) ? 'accepted' : 'conflict',
+      );
+    }
+  }
+
   return {
-    applied,
+    applied: insertedIds.size,
     acceptedSessionIds: conflictsIn('accepted'),
-    conflictingSessionIds,
+    conflictingSessionIds: conflictsIn('conflict'),
   };
 }
 
-function toFreeCalculationSession(row: {
+/**
+ * Row-by-row projection input, the shape the full-scan calculation consumes.
+ *
+ * The production read path aggregates in SQL (see loadFreeStatsForUser); this
+ * mapping is exported for the equivalence test that proves the aggregated
+ * totals are exactly what a full scan of the same rows would produce.
+ */
+export function toFreeScanSession(row: {
   seconds: number;
   novelId: string;
   chapterId: number;
@@ -255,22 +293,42 @@ function toFreeCalculationSession(row: {
 }
 
 /**
- * Derive the Free projection from every stored session of one user.
+ * Derive the Free projection for one user without streaming their session rows.
  *
- * The calculation module is the single source of truth for the level ladder
- * and the 85% completion boundary, so this reads the rows rather than
- * re-deriving them in SQL.
+ * A v2 push/pull used to read every stored session of the user into memory on
+ * each request, so one reader's history set the cost of every read. The
+ * projection only needs two numbers, so the database computes them:
+ *   * totalSecondsRead — the sum of non-negative `seconds`;
+ *   * uniqueInAppCompletedChapters — distinct (novel_id, chapter_id) pairs
+ *     carrying an explicit in-app completion signal at or above the boundary.
+ *
+ * The predicates deliberately repeat the calculation boundary so the SQL and
+ * calculations.ts cannot drift:
+ *   * `GREATEST(seconds, 0)` mirrors the per-row non-negative credit. The
+ *     plan-blind legacy v1 writer can store a negative `seconds`, and clamping
+ *     here keeps the SQL total from being smaller than the scanned one.
+ *   * a novel id must be a non-blank string and a chapter id a positive
+ *     integer, exactly what normalizeNovelId/normalizeChapterId accept;
+ *   * a completion needs `completion_signal_present` AND
+ *     `progress_percent >= COMPLETION_THRESHOLD`, so a legacy v1 row contributes
+ *     time, never a completed chapter.
+ *
+ * The level ladder is NOT re-derived here: the two totals go to
+ * calculateFreeStatsFromTotals(), which keeps calculations.ts the single
+ * authority for level and progress.
  */
 export async function loadFreeStatsForUser(userId: string): Promise<FreeStats> {
-  const rows = await db
+  const [row] = await db
     .select({
-      seconds: readingSessions.seconds,
-      novelId: readingSessions.novelId,
-      chapterId: readingSessions.chapterId,
-      progressPercent: readingSessions.progressPercent,
-      completionSignalPresent: readingSessions.completionSignalPresent,
+      totalSeconds: sql<number>`COALESCE(SUM(GREATEST(${readingSessions.seconds}, 0)), 0)`,
+      completedChapters: sql<number>`COUNT(DISTINCT (${readingSessions.novelId}, ${readingSessions.chapterId})) FILTER (WHERE ${readingSessions.completionSignalPresent} AND ${readingSessions.progressPercent} >= ${COMPLETION_THRESHOLD} AND BTRIM(${readingSessions.novelId}) <> '' AND ${readingSessions.chapterId} > 0)`,
     })
     .from(readingSessions)
     .where(eq(readingSessions.userId, userId));
-  return calculateFreeStats(rows.map(toFreeCalculationSession));
+  return calculateFreeStatsFromTotals({
+    // int8 aggregates arrive as strings on node-postgres, and a non-numeric or
+    // negative value is normalized by the calculation boundary.
+    totalSeconds: Number(row?.totalSeconds ?? 0),
+    uniqueInAppCompletedChapters: Number(row?.completedChapters ?? 0),
+  });
 }

@@ -216,6 +216,15 @@ describe('Free v2 push rejects malformed core payloads with 400', () => {
     await seedUser();
     const body: any = await (await push(freeEnvelope(Array.from({ length: 500 }, () => ({ ...validSession, words: 1 }))))).json();
     expect(body.issues.length).toBeLessThanOrEqual(20);
+    // The client is told it is a sample, so it does not size its own retry from it.
+    expect(body.issuesTruncated).toBe(true);
+  });
+
+  it('leaves a small issue list uncapped and unflagged', async () => {
+    await seedUser();
+    const body: any = await (await push(freeEnvelope([{ ...validSession, seconds: -1 }]))).json();
+    expect(body.issues).toHaveLength(1);
+    expect(body).not.toHaveProperty('issuesTruncated');
   });
 
   it('never honors a client-supplied plan field', async () => {
@@ -235,13 +244,41 @@ describe('Free v2 push rejects malformed core payloads with 400', () => {
     expect((await res.json()).error).toBe('invalid push payload');
     expectNoWrites();
   });
+
+  // The legacy channel has no declared version to key on, so it keeps its own
+  // historical body — but its issue list is capped with the same budget, or a
+  // 5000-row outbox flush chooses the size of its own 400.
+  it('caps the legacy v1 issue list and flags the truncation', async () => {
+    await seedUser();
+    const small: any = await (await push({ user: { externalId: SUBJECT }, library: [{ novelId: '42', lastReadChapterId: 'seven' }] })).json();
+    expect(small.error).toBe('invalid push payload');
+    expect(small.issues.length).toBeLessThanOrEqual(20);
+    expect(small).not.toHaveProperty('issuesTruncated');
+
+    const res = await push({
+      user: { externalId: SUBJECT },
+      library: Array.from({ length: 5000 }, (_v, i) => ({ novelId: '42', lastReadChapterId: -1, progressPercent: 500, addedAt: i })),
+    });
+    expect(res.status).toBe(400);
+    const body: any = await res.json();
+    expect(body.error).toBe('invalid push payload');
+    expect(body.issues.length).toBeLessThanOrEqual(20);
+    expect(body.issuesTruncated).toBe(true);
+    expectNoWrites();
+  });
 });
 
 describe('Free v2 channel keeps the existing token and owner rules', () => {
   it('requires a valid Bearer token in production', async () => {
     await seedUser();
-    expect((await push(freeEnvelope(), null)).status).toBe(401);
-    expect((await pull({ syncVersion: 2, user: { externalId: SUBJECT } }, null)).status).toBe(401);
+    const pushRes = await push(freeEnvelope(), null);
+    expect(pushRes.status).toBe(401);
+    expect(await pushRes.json()).toEqual({
+      success: false, code: 'unauthorized', error: 'unauthorized: valid Bearer token required',
+    });
+    const pullRes = await pull({ syncVersion: 2, user: { externalId: SUBJECT } }, null);
+    expect(pullRes.status).toBe(401);
+    expect((await pullRes.json()).code).toBe('unauthorized');
     expectNoWrites();
   });
 
@@ -250,26 +287,57 @@ describe('Free v2 channel keeps the existing token and owner rules', () => {
     await seedUser('google_other_subject');
     const res = await push({ ...freeEnvelope(), user: { externalId: 'google_other_subject' } });
     expect(res.status).toBe(403);
-    expect(await res.json()).toEqual({ error: 'forbidden: token identity does not match user.externalId' });
+    expect(await res.json()).toEqual({
+      success: false, code: 'forbidden', error: 'forbidden: token identity does not match user.externalId',
+    });
     expectNoWrites();
   });
 
   it('checks ownership before payload shape so a foreign caller learns nothing', async () => {
     await seedUser();
+    // `library` is a Pro collection: the owner of this identity would get a 403
+    // carrying contract issues. The foreign caller must not learn any of that.
     const res = await push({ syncVersion: 2, user: { externalId: 'google_other_subject' }, library: [] });
     expect(res.status).toBe(403);
-    expect((await res.json()).code).toBeUndefined();
+    const body: any = await res.json();
+    expect(body.code).toBe('forbidden');
+    expect(body).not.toHaveProperty('issues');
+    expect(JSON.stringify(body)).not.toContain('library');
   });
 
   it('fails closed when storage is unavailable or broken', async () => {
     await seedUser();
     fake().unavailable(true);
-    expect((await push(freeEnvelope())).status).toBe(503);
+    const noDb = await push(freeEnvelope());
+    expect(noDb.status).toBe(503);
+    expect(await noDb.json()).toEqual({ success: false, code: 'sync_database_unavailable', error: 'sync database not configured' });
     fake().unavailable(false);
     fake().fail(new Error('private-db-password'));
     const res = await push(freeEnvelope());
     expect(res.status).toBe(503);
-    expect(await res.text()).not.toContain('private-db-password');
+    const text = await res.text();
+    expect(JSON.parse(text)).toEqual({ success: false, code: 'storage_unavailable', error: 'sync database unavailable' });
+    expect(text).not.toContain('private-db-password');
+  });
+
+  // The breaker exists for storage that is failing, not for a read that did
+  // not work. The v2 plan gate is a single SELECT, so tripping the breaker there
+  // would take every write surface offline for a failed lookup.
+  it('reserves the storage breaker for actual writes, not for the read-only probes', async () => {
+    await seedUser();
+    fake().fail(new Error('probe-failure'));
+    const probe = await push(freeEnvelope());
+    expect(probe.status).toBe(503);
+    expect((await probe.json()).code).toBe('storage_unavailable');
+    expect(fake().noteDbFailure).not.toHaveBeenCalled();
+    fake().fail(null);
+
+    // A contract-valid push gets past the probe and fails on the write itself:
+    // the identity fake models no reading_sessions table, so the insert errors.
+    // That IS a storage failure, and the breaker is tripped.
+    const write = await push(freeEnvelope());
+    expect(write.status).toBe(503);
+    expect(fake().noteDbFailure).toHaveBeenCalled();
   });
 });
 
@@ -361,28 +429,32 @@ describe('plan matrix', () => {
 
   // The pre-parse plan lookup is read-only, so a rejected payload can never
   // mint an account — not even on the dev provisioning path that a valid Free
-  // payload still takes.
+  // payload still takes. Every case has an EXACT status: a "≥ 400" assertion
+  // would still pass if a rejected payload started provisioning, and 403/400 is
+  // the difference between an entitlement answer and a shape answer.
   it('never provisions a user for a v2 payload the contract rejects', async () => {
     setWorkerEnv({ ...productionBindings, NODE_ENV: 'test', SYNC_OPEN: 'true' });
     const stranger = 'google_unknown_subject';
     const strangerToken = await signToken({ id: stranger, email: 'unknown@test.com', role: 'reader' });
     const envelope = (sessions: unknown) => ({ syncVersion: 2, user: { externalId: stranger }, sessions });
-    for (const body of [
-      envelope([{ ...validSession, words: 120, readDay: '2026-09-25' }]),
-      envelope([{ ...validSession, seconds: -1 }]),
-      envelope('not-an-array'),
-      { syncVersion: 2, user: { externalId: stranger } },
-      { syncVersion: 2, user: {}, sessions: [] },
-    ]) {
+    const cases: [unknown, number, string][] = [
+      [envelope([{ ...validSession, words: 120, readDay: '2026-09-25' }]), 403, 'pro_fields_not_allowed'],
+      [envelope([{ ...validSession, seconds: -1 }]), 400, 'invalid_sync_payload'],
+      [envelope('not-an-array'), 400, 'invalid_sync_payload'],
+      [{ syncVersion: 2, user: { externalId: stranger } }, 400, 'invalid_sync_payload'],
+      [{ syncVersion: 2, user: {}, sessions: [] }, 400, 'invalid_sync_payload'],
+    ];
+    for (const [body, status, code] of cases) {
       const res = await push(body as never, strangerToken);
-      expect(res.status).toBeGreaterThanOrEqual(400);
+      expect(res.status).toBe(status);
+      expect((await res.json()).code).toBe(code);
       expectNoWrites();
       expect(fake().rows.some((row) => row.externalId === stranger)).toBe(false);
     }
     // The contrast: the dev provisioning path is reached only after a payload
-    // has passed the contract. (The identity fake models `users` alone, so the
-    // following reading_sessions write then fails closed with 503 — irrelevant
-    // to what is asserted here: the users row exists.)
+    // has passed the contract. (The identity fake models no reading_sessions
+    // table, so the following write then fails closed with 503 — irrelevant to
+    // what is asserted here: the users row exists.)
     await push(envelope([validSession]), strangerToken);
     expect(fake().rows.some((row) => row.externalId === stranger)).toBe(true);
   });
@@ -414,6 +486,54 @@ describe('v2 pull exposes the derived projection only', () => {
     const res = await pull({ syncVersion: 2, user: { externalId: SUBJECT }, [key]: [] });
     expect(res.status).toBe(400);
     expect((await res.json()).code).toBe('unknown_key');
+  });
+});
+
+describe('v2 failures all share one bounded envelope', () => {
+  // One shape for every status a v2 surface can answer, so a client branches on
+  // `code` and never on which route produced the failure. `details` are the only
+  // permitted extras and each one is bounded by the contract.
+  it.each([
+    ['401', () => push(freeEnvelope(), null), 401, 'unauthorized', []],
+    ['403', () => push({ ...freeEnvelope(), user: { externalId: 'google_other' } }), 403, 'forbidden', []],
+    ['400', () => push(freeEnvelope([{ ...validSession, seconds: -1 }])), 400, 'invalid_sync_payload', ['issues']],
+    ['409', () => push(freeEnvelope([
+      { ...validSession, clientSessionId: 'm-dup-1', seconds: 10 },
+      { ...validSession, clientSessionId: 'm-dup-1', seconds: 20 },
+    ])), 409, 'session_conflict', ['conflictingSessionIds']],
+    ['501', () => pull({ syncVersion: 2, user: { externalId: SUBJECT } }), 501, 'pro_plan_not_implemented', ['plan']],
+    ['503', async () => {
+      fake().unavailable(true);
+      try { return await push(freeEnvelope()); } finally { fake().unavailable(false); }
+    }, 503, 'sync_database_unavailable', []],
+  ])('answers %s with {success,code,error} and nothing unbounded', async (_label, request, status, code, details) => {
+    await seedUser(SUBJECT, { readingStatsPlan: status === 501 ? 'pro' : 'free' });
+    const res = await (request as () => Promise<Response>)();
+    expect(res.status).toBe(status);
+    const body: any = await res.json();
+    expect(body.success).toBe(false);
+    expect(typeof body.error).toBe('string');
+    expect(body.code).toBe(code);
+    expect(Object.keys(body).sort()).toEqual(
+      ['code', 'error', 'success', ...(details as string[])].sort(),
+    );
+    expectNoWrites();
+  });
+
+  // A conflict that is knowable before the first write applied nothing, so a
+  // 409 must not claim any accepted id: the client keeps every id queued.
+  it('reports no accepted ids when the batch is refused before any write', async () => {
+    await seedUser();
+    const body: any = await (await push(freeEnvelope([
+      { ...validSession, clientSessionId: 'm-dup-1', seconds: 10 },
+      { ...validSession, clientSessionId: 'm-dup-1', seconds: 20 },
+    ]))).json();
+    expect(body).toEqual({
+      success: false,
+      code: 'session_conflict',
+      error: 'clientSessionId already stored with different values',
+      conflictingSessionIds: ['m-dup-1'],
+    });
   });
 });
 
@@ -478,5 +598,14 @@ describe('GET /users/me/profile?readingStatsVersion=2', () => {
   it('still requires a token', async () => {
     await seedUser();
     expect((await app.request('/users/me/profile?readingStatsVersion=2')).status).toBe(401);
+  });
+
+  // The body carries the caller's own email, so it must never be stored by a
+  // shared cache — the public sibling route on the same path prefix is public.
+  it.each(['', '?readingStatsVersion=2'])('marks the authenticated body %o private, no-store', async (query) => {
+    await seedUser();
+    const res = await app.request(`/users/me/profile${query}`, { headers: { Authorization: `Bearer ${token}` } });
+    expect(res.status).toBe(200);
+    expect(res.headers.get('Cache-Control')).toBe('private, no-store');
   });
 });

@@ -1,3 +1,4 @@
+import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import {
   READING_SYNC_VERSION,
   ReadingSyncContractError,
@@ -21,6 +22,12 @@ import {
 // the two Free response envelopes. The plan itself is never read here — it is
 // supplied by the caller from the authoritative `users.reading_stats_plan`
 // column, so no client field can ever widen the projection.
+//
+// Every v2 rejection is built by `syncFailure()`, so the wire shape is exactly
+// one thing: { success: false, code, error } plus the bounded detail a client
+// needs to act (a capped issue list, the conflicting/accepted session ids, or
+// the plan). The legacy v1 channel keeps its own historical bodies; these
+// helpers are not used for it.
 // ==========================================
 
 /** How a push/pull body declared its protocol. */
@@ -30,11 +37,73 @@ const LEGACY_SYNC_VERSION = 1;
 
 /** Issue detail is a client aid, not a dump: cap it so a 500-row bad push
  *  cannot turn a 400 into an unbounded response. */
-const MAX_REPORTED_ISSUES = 20;
+export const MAX_REPORTED_ISSUES = 20;
+
+/** A stable, machine-readable reason. Clients branch on this, not on prose. */
+export type SyncFailureCode =
+  | ReadingSyncErrorCode
+  | 'unsupported_sync_version'
+  | 'session_conflict'
+  | 'pro_plan_not_implemented'
+  | 'unauthorized'
+  | 'forbidden'
+  | 'account_not_found'
+  | 'storage_unavailable'
+  | 'sync_database_unavailable'
+  | 'rate_limited';
+
+export interface SyncIssueDetail {
+  readonly path: string[];
+  readonly message: string;
+}
+
+/**
+ * Declared as a type alias on purpose: Hono's JSON responder only accepts
+ * object *literal* types, which excludes interfaces (no implicit index
+ * signature), so an `interface` here would force a cast at every call site.
+ */
+export type SyncFailureBody = {
+  success: false;
+  code: SyncFailureCode;
+  error: string;
+  issues?: readonly SyncIssueDetail[];
+  conflictingSessionIds?: readonly string[];
+  acceptedSessionIds?: readonly string[];
+  plan?: ReadingPlan;
+};
 
 export interface SyncFailure {
-  status: number;
-  body: Record<string, unknown>;
+  /** Narrowed to Hono's contentful statuses so a route never casts. */
+  status: ContentfulStatusCode;
+  body: SyncFailureBody;
+}
+
+/**
+ * The single constructor for a v2 failure body. Optional detail is only
+ * attached when it carries information, so the common rejections stay exactly
+ * `{ success: false, code, error }`.
+ */
+export function syncFailure(
+  status: ContentfulStatusCode,
+  code: SyncFailureCode,
+  error: string,
+  detail: Omit<SyncFailureBody, 'success' | 'code' | 'error'> = {},
+): SyncFailure {
+  return { status, body: { success: false, code, error, ...detail } };
+}
+
+/**
+ * Cap a reported issue list. The count of issues is what a client needs to size
+ * its own retry, so it is reported next to the capped sample.
+ */
+export function capReportedIssues<T>(issues: readonly T[]): {
+  issues: T[];
+  issuesTruncated: boolean;
+} {
+  return {
+    issues: issues.slice(0, MAX_REPORTED_ISSUES),
+    issuesTruncated: issues.length > MAX_REPORTED_ISSUES,
+  };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -58,14 +127,36 @@ export function classifySyncRequest(body: unknown): SyncRequestChannel {
 }
 
 export function unsupportedSyncVersionResponse(): SyncFailure {
-  return {
-    status: 400,
-    body: {
-      success: false,
-      code: 'unsupported_sync_version',
-      error: `unsupported sync version; expected ${LEGACY_SYNC_VERSION} or ${READING_SYNC_VERSION}`,
-    },
-  };
+  return syncFailure(
+    400,
+    'unsupported_sync_version',
+    `unsupported sync version; expected ${LEGACY_SYNC_VERSION} or ${READING_SYNC_VERSION}`,
+  );
+}
+
+/** 401: no usable credential for a plan-aware surface. */
+export function unauthorizedResponse(error: string): SyncFailure {
+  return syncFailure(401, 'unauthorized', error);
+}
+
+/** 403: the token is valid but does not own the declared identity. */
+export function ownerMismatchResponse(): SyncFailure {
+  return syncFailure(403, 'forbidden', 'forbidden: token identity does not match user.externalId');
+}
+
+/** 401: the claimed identity has no stored account. */
+export function accountNotFoundResponse(): SyncFailure {
+  return syncFailure(401, 'account_not_found', 'account not found');
+}
+
+/** 503: storage could not answer. Never carries driver diagnostics. */
+export function storageUnavailableResponse(): SyncFailure {
+  return syncFailure(503, 'storage_unavailable', 'sync database unavailable');
+}
+
+/** 503: the deployment has no sync database configured at all. */
+export function syncDatabaseUnavailableResponse(): SyncFailure {
+  return syncFailure(503, 'sync_database_unavailable', 'sync database not configured');
 }
 
 export function parseFreeV2Push(body: unknown): FreeReadingSyncPush {
@@ -94,38 +185,46 @@ export function contractFailureResponse(error: unknown): SyncFailure {
     : new ReadingSyncContractError(error);
   const code: ReadingSyncErrorCode = contractError.code;
   const status = code === 'pro_fields_not_allowed' ? 403 : 400;
-  const issues = contractError.issues.slice(0, MAX_REPORTED_ISSUES).map((issue) => ({
+  const { issues, issuesTruncated } = capReportedIssues(contractError.issues.map((issue) => ({
     path: issue.path.map((segment) => String(segment)),
     message: issue.message,
-  }));
-  return {
+  })));
+  return syncFailure(
     status,
-    body: {
-      success: false,
-      code,
-      error: status === 403
-        ? 'free plan does not accept pro reading fields'
-        : 'invalid sync payload',
+    code,
+    status === 403 ? 'free plan does not accept pro reading fields' : 'invalid sync payload',
+    {
       ...(issues.length > 0 ? { issues } : {}),
+      ...(issuesTruncated ? { issuesTruncated: true } : {}),
     },
-  };
+  );
 }
 
 /**
  * The first stored event for a clientSessionId is immutable. A push that
  * replays an id with different values is rejected whole: half-applying a
  * batch would let a client keep a conflicted id queued forever.
+ *
+ * `conflictingSessionIds` is bounded by the contract limit
+ * (MAX_SESSIONS_PER_PUSH), and `acceptedSessionIds` is reported only when the
+ * batch actually created rows before losing an insert race: a conflict that is
+ * knowable before the first write applies nothing and therefore reports no
+ * accepted id. Reporting the raced rows keeps the semantics consistent — every
+ * id either accepted or conflicting, and nothing stored is left unmentioned.
  */
-export function sessionConflictResponse(conflictingSessionIds: readonly string[]): SyncFailure {
-  return {
-    status: 409,
-    body: {
-      success: false,
-      code: 'session_conflict',
-      error: 'clientSessionId already stored with different values',
+export function sessionConflictResponse(
+  conflictingSessionIds: readonly string[],
+  acceptedSessionIds: readonly string[] = [],
+): SyncFailure {
+  return syncFailure(
+    409,
+    'session_conflict',
+    'clientSessionId already stored with different values',
+    {
       conflictingSessionIds: [...conflictingSessionIds],
+      ...(acceptedSessionIds.length > 0 ? { acceptedSessionIds: [...acceptedSessionIds] } : {}),
     },
-  };
+  );
 }
 
 /**
@@ -134,15 +233,7 @@ export function sessionConflictResponse(conflictingSessionIds: readonly string[]
  * Pro account to the Free projection.
  */
 export function proPlanNotImplementedResponse(plan: ReadingPlan = 'pro'): SyncFailure {
-  return {
-    status: 501,
-    body: {
-      success: false,
-      code: 'pro_plan_not_implemented',
-      plan,
-      error: 'pro reading sync is not implemented yet',
-    },
-  };
+  return syncFailure(501, 'pro_plan_not_implemented', 'pro reading sync is not implemented yet', { plan });
 }
 
 export function buildFreePushResponse(input: {

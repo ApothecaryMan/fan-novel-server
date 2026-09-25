@@ -713,6 +713,30 @@ function completedNovels(
   return rows;
 }
 
+/**
+ * Free projection from pre-aggregated totals.
+ *
+ * The level ladder lives in this module and nowhere else, so a caller that
+ * aggregates in SQL hands over the two numbers it computed and gets the exact
+ * level/progress a full row scan would have produced. Both totals are pushed
+ * through `nonNegativeInteger`, which is what per-row `addNonNegative` does
+ * anyway: a database sum that overflows, or a legacy v1 row with a negative
+ * `seconds`, can never move the level in either direction.
+ */
+export function calculateFreeStatsFromTotals(input: {
+  totalSeconds: number;
+  uniqueInAppCompletedChapters: number;
+}): FreeStats {
+  const totalSecondsRead = nonNegativeInteger(input.totalSeconds);
+  const level = getLevelFromSeconds(totalSecondsRead);
+  return {
+    level: level.level,
+    levelProgress: level.progress,
+    totalSecondsRead,
+    uniqueInAppCompletedChapters: nonNegativeInteger(input.uniqueInAppCompletedChapters),
+  };
+}
+
 /** Calculate the four Free fields from normalized accepted session rows. */
 export function calculateFreeStats(
   sessions: readonly FreeCalculationSession[],
@@ -729,13 +753,10 @@ export function calculateFreeStats(
     }
   }
 
-  const level = getLevelFromSeconds(totalSecondsRead);
-  return {
-    level: level.level,
-    levelProgress: level.progress,
-    totalSecondsRead,
+  return calculateFreeStatsFromTotals({
+    totalSeconds: totalSecondsRead,
     uniqueInAppCompletedChapters: completedPairs.size,
-  };
+  });
 }
 
 export function calculateFreeReadingStats(

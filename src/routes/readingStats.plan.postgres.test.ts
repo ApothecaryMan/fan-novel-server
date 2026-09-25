@@ -7,6 +7,8 @@ import { migrate } from 'drizzle-orm/node-postgres/migrator';
 import * as schema from '../database/schema.js';
 import { readingSessions, users } from '../database/schema.js';
 import { FREE_STATS_KEYS, MAX_SESSIONS_PER_PUSH, PRO_ONLY_STATS_KEYS, freeReadingSyncPushResponseSchema } from '../features/readingSync/contracts.js';
+import { calculateFreeStats } from '../features/readingSync/calculations.js';
+import { toFreeScanSession } from '../features/readingSync/freeStore.js';
 import { signToken } from '../middleware/auth.js';
 import { closeDb, initDb } from '../database/db.js';
 
@@ -89,6 +91,25 @@ describe.skipIf(!url)('Free reading plan sync (isolated PostgreSQL)', () => {
     .from(readingSessions)
     .where(eq(readingSessions.userId, userId));
 
+  /**
+   * Block until some backend is parked on a lock while touching
+   * reading_sessions — i.e. until the push under test has finished its pre-flight
+   * read and is waiting inside its INSERT for the uncommitted winner. Polling
+   * pg_stat_activity keeps the race deterministic; a fixed sleep would make the
+   * mid-batch 409 assertion a coin flip.
+   */
+  async function waitForBlockedSessionInsert(observer: pg.Pool, attempts = 200): Promise<void> {
+    for (let index = 0; index < attempts; index += 1) {
+      const { rows } = await observer.query<{ blocked: number }>(
+        `SELECT count(*)::int AS blocked FROM pg_stat_activity
+          WHERE wait_event_type = 'Lock' AND query ILIKE '%reading_sessions%'`,
+      );
+      if (rows[0]?.blocked && rows[0].blocked > 0) return;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    throw new Error('no session insert blocked on the uncommitted winner');
+  }
+
   beforeAll(async () => {
     // Provision the suite's own database on the throwaway cluster.
     const admin = new pg.Client({ connectionString: baseUrl });
@@ -139,6 +160,7 @@ describe.skipIf(!url)('Free reading plan sync (isolated PostgreSQL)', () => {
 
   it('stores a Free event with completion markers and inert Pro defaults', async () => {
     const { row, externalId, token } = await createUser();
+    const before = Date.now();
     const res = await freePush(externalId, [session(), session({ clientSessionId: 'm-def456-8', chapterId: 8 })], token);
     expect(res.status).toBe(200);
     const body = await res.json();
@@ -154,6 +176,10 @@ describe.skipIf(!url)('Free reading plan sync (isolated PostgreSQL)', () => {
     // the declared contract keeps that hand-assembly from drifting.
     const parsed = freeReadingSyncPushResponseSchema.safeParse(body);
     expect(parsed.success ? null : parsed.error.issues).toBeNull();
+    // serverNow is the client's clock anchor, not a build-time constant: it must
+    // be this request's now, never a fixture value or a stale cached body.
+    expect(body.serverNow).toBeGreaterThanOrEqual(before);
+    expect(body.serverNow).toBeLessThanOrEqual(Date.now());
 
     const rows = await storedRows(row.id);
     expect(rows).toHaveLength(2);
@@ -228,6 +254,79 @@ describe.skipIf(!url)('Free reading plan sync (isolated PostgreSQL)', () => {
     const applied = (await Promise.all(results.map((res) => res.json()))).map((body: any) => body.applied.sessions);
     expect(applied.reduce((sum: number, count: number) => sum + count, 0)).toBe(1);
     expect(await storedRows(row.id)).toHaveLength(1);
+  });
+
+  // Five different events under ONE id, pushed concurrently: exactly one can be
+  // the first accepted payload, so exactly one 200 and four 409s. This is the
+  // real-database shape of losing the single multi-row insert, and it proves the
+  // loser neither overwrites the winner nor reports a success.
+  it('resolves a real concurrent insert race to one winner and named 409s', async () => {
+    const { row, externalId, token } = await createUser();
+    const events = [0, 1, 2, 3, 4].map((i) => session({ clientSessionId: 'm-race', seconds: 100 + i }));
+    const results = await Promise.all(events.map((event) => freePush(externalId, [event], token)));
+    const statuses = results.map((res) => res.status);
+    expect(statuses.filter((status) => status === 200)).toHaveLength(1);
+    expect(statuses.filter((status) => status === 409)).toHaveLength(4);
+    for (const res of results.filter((candidate) => candidate.status === 409)) {
+      const body: any = await res.json();
+      expect(body).toMatchObject({ success: false, code: 'session_conflict', conflictingSessionIds: ['m-race'] });
+      // A single-id batch lost the race, so it applied nothing of its own.
+      expect(body).not.toHaveProperty('acceptedSessionIds');
+    }
+    const [stored] = await storedRows(row.id);
+    expect(events.map((event) => event.seconds)).toContain(stored.seconds);
+  });
+
+  // The mid-batch case: a batch whose own id inserts fine and whose raced id
+  // does not. Those rows are immutable valid events, so the 409 has to name them
+  // as accepted or the client keeps re-pushing events the server already stored.
+  //
+  // The interleaving is forced rather than raced: a second transaction inserts
+  // the contested id and stays uncommitted, so the push's pre-flight read sees
+  // nothing (a READ COMMITTED reader never blocks and never sees it) and its
+  // statement then blocks on the unique index. Committing the winner at that
+  // point is the only way to reach the mid-batch answer, and the test waits for
+  // the blocked statement instead of sleeping and hoping.
+  it('reports the ids it did create on a mid-batch 409', async () => {
+    const { row, externalId, token } = await createUser();
+    const winner = new pg.Client({ connectionString: url });
+    await winner.connect();
+    try {
+      await winner.query('BEGIN');
+      await winner.query(
+        `INSERT INTO reading_sessions
+           (user_id, client_session_id, novel_id, chapter_id, progress_percent, completed,
+            completion_signal_present, pro_fields_present, seconds, words, minute_of_day, read_day, genre, ts)
+         VALUES ($1, 'm-race', '42', 7, 100, true, true, false, 10, 0, 0, '', '', 1782470400000)`,
+        [row.id],
+      );
+
+      const pending = freePush(externalId, [
+        session({ clientSessionId: 'm-a1' }),
+        session({ clientSessionId: 'm-race', seconds: 20 }),
+      ], token);
+      await waitForBlockedSessionInsert(pool);
+      await winner.query('COMMIT');
+
+      const res = await pending;
+      expect(res.status).toBe(409);
+      const body: any = await res.json();
+      expect(body).toMatchObject({ success: false, code: 'session_conflict' });
+      expect(body.conflictingSessionIds).toEqual(['m-race']);
+      // The row this request DID create is reported, so the client can drop it.
+      expect(body.acceptedSessionIds).toEqual(['m-a1']);
+    } finally {
+      await winner.query('ROLLBACK').catch(() => {});
+      await winner.end();
+    }
+
+    // Nothing was overwritten: the winner's row stands, and a retry of our own
+    // id is a duplicate acknowledgement rather than a conflict.
+    const rows = await storedRows(row.id);
+    expect(rows.map((r) => r.clientSessionId).sort()).toEqual(['m-a1', 'm-race']);
+    expect(rows.find((r) => r.clientSessionId === 'm-race')).toMatchObject({ seconds: 10 });
+    const retry: any = await (await freePush(externalId, [session({ clientSessionId: 'm-a1' })], token)).json();
+    expect(retry).toMatchObject({ applied: { sessions: 0 }, acceptedSessionIds: ['m-a1'] });
   });
 
   it('rejects a changed retry with 409 and never overwrites the first event', async () => {
@@ -436,6 +535,7 @@ describe.skipIf(!url)('Free reading plan sync (isolated PostgreSQL)', () => {
       library: [{ novelId: '42', progressPercent: 55, updatedAt: 1782000000001 }],
       history: [{ novelId: '42', chapterId: 7, progressPercent: 55, readAt: 1782000000001, updatedAt: 1782000000001 }],
     }, token);
+    expect(newer.status).toBe(200);
     expect(await newer.json()).toMatchObject({ applied: { library: 1, history: 1 } });
     const [updatedLibrary] = await database.select().from(schema.userLibrary).where(eq(schema.userLibrary.userId, row.id));
     expect(updatedLibrary.progressPercent).toBe(55);
@@ -615,5 +715,53 @@ describe.skipIf(!url)('Free reading plan sync (isolated PostgreSQL)', () => {
     expect((await freePush(externalId, [session({ clientSessionId: 'seed-1', seconds: 60 })], token)).status).toBe(409);
     const pulled: any = await (await request('/sync/pull', { syncVersion: 2, user: { externalId } }, token)).json();
     expect(pulled.stats).toMatchObject({ level: 2, totalSecondsRead: 3600, uniqueInAppCompletedChapters: 1 });
+  });
+
+  // The read path aggregates in SQL instead of streaming every stored session
+  // into memory. These rows are the ones that make a naive SQL total differ from
+  // a row-by-row calculation: a duplicated chapter pair, a legacy row with no
+  // completion marker, a blank novel id, a non-positive chapter id, a value just
+  // below the 85% boundary, and a negative `seconds` that only the plan-blind
+  // legacy v1 writer can produce.
+  it('agrees with a full row scan on rows designed to break a naive aggregate', async () => {
+    const { row, externalId, token } = await createUser();
+    const base = {
+      userId: row.id,
+      progressPercent: 0,
+      completed: false,
+      proFieldsPresent: false,
+      words: 0,
+      minuteOfDay: 0,
+      readDay: '',
+      genre: '',
+      ts: 1782000000000,
+    } as const;
+    await database.insert(readingSessions).values([
+      { ...base, clientSessionId: 'agg-1', novelId: '42', chapterId: 1, seconds: 3600, progressPercent: 100, completed: true, completionSignalPresent: true },
+      // Same (novel, chapter) again: one chapter, two events.
+      { ...base, clientSessionId: 'agg-2', novelId: '42', chapterId: 1, seconds: 60, progressPercent: 100, completed: true, completionSignalPresent: true },
+      // Legacy v1 row: time counts, never a completed chapter.
+      { ...base, clientSessionId: 'agg-legacy', novelId: '42', chapterId: 1, seconds: 600, progressPercent: 100, completed: true, completionSignalPresent: false },
+      // Blank novel id: normalizeNovelId rejects it, so no chapter is counted.
+      { ...base, clientSessionId: 'agg-blank', novelId: '   ', chapterId: 2, seconds: 300, progressPercent: 100, completed: true, completionSignalPresent: true },
+      // Chapter 0: normalizeChapterId rejects it.
+      { ...base, clientSessionId: 'agg-zero', novelId: '42', chapterId: 0, seconds: 300, progressPercent: 100, completed: true, completionSignalPresent: true },
+      // Just below the boundary, signalled but not completed.
+      { ...base, clientSessionId: 'agg-below', novelId: '42', chapterId: 3, seconds: 300, progressPercent: 84.9, completionSignalPresent: true },
+      // Negative seconds: credited as zero by the calculation boundary.
+      { ...base, clientSessionId: 'agg-negative', novelId: '42', chapterId: 4, seconds: -100, progressPercent: 50, completionSignalPresent: true },
+    ]);
+
+    const scanned = calculateFreeStats((await storedRows(row.id)).map(toFreeScanSession));
+    // Not trivially zero: 3600 + 60 + 600 + 300 + 300 + 300 + 0.
+    expect(scanned.totalSecondsRead).toBe(5160);
+    expect(scanned.uniqueInAppCompletedChapters).toBe(1);
+    expect(scanned.level).toBe(2);
+
+    const pulled = await request('/sync/pull', { syncVersion: 2, user: { externalId } }, token);
+    expect(pulled.status).toBe(200);
+    const body: any = await pulled.json();
+    // The aggregated projection is byte-identical to the full scan it replaces.
+    expect(body.stats).toEqual(scanned);
   });
 });

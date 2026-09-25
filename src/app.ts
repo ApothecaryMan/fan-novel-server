@@ -40,6 +40,11 @@ export function createApp() {
   app.use('/api/v1/author/keys*', rateLimit(10));
   app.use('/api/v1/upload/*', rateLimit(20));
   app.use('/api/v1/admin/*', rateLimit(60));
+  // Sync is the one authenticated write surface a client hits in a tight loop
+  // (outbox flush + pull on foreground), so it gets the same budget as the read
+  // paths rather than the auth budget — but it IS limited: an unauthenticated
+  // or replaying client must not be able to drive a 500-row push per request.
+  app.use('/api/v1/sync/*', rateLimit(60));
   app.use('/api/v1/novels/*/comments*', rateLimit(60));
   app.use('/api/v1/comments/*', rateLimit(60));
 

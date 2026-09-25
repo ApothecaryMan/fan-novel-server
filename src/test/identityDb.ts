@@ -44,6 +44,8 @@ export function identityDb() {
   function query(table: unknown, condition?: SQL, fields?: unknown): any {
     const execute = async () => {
       check();
+      // Unmodeled reads answer `[]` (see the insert NOTE): a count/sum over a
+      // table with no fixtures is legitimately zero.
       if (table === users) return rows.filter((r) => matches(r, condition));
       if (table === comments) {
         const filter = commentFilter(condition);
@@ -69,11 +71,18 @@ export function identityDb() {
     };
     return builder;
   }
-  const insert = vi.fn((table: unknown) => ({ values: (value: Partial<Row>) => {
+  const insert = vi.fn((table: unknown) => ({ values: (value: Partial<Row> | Partial<Row>[]) => {
     const execute = async () => {
       check();
       if (nextInsertError) { const error = nextInsertError; nextInsertError = null; throw error; }
-      if (table !== users) return [];
+      // NOTE: this fake models `users` only. A write to any other table is a
+      // TEST BUG, not an empty result: a silent `[]` makes "the row was
+      // written" indistinguishable from "the table is not modeled here", which
+      // quietly weakens every storage assertion downstream. Reads of unmodeled
+      // tables DO return `[]` (see query()), because "no rows" is a legitimate
+      // answer for a count/sum aggregate on a table with no fixtures.
+      if (table !== users) throw new Error('identityDb fake: unexpected insert into an unmodeled table');
+      if (Array.isArray(value)) throw new Error('identityDb fake: multi-row users insert is not modeled');
       const row = { id: crypto.randomUUID(), email: null, googleSubject: null, externalId: null,
         username: null, displayName: null, passwordHash: null, avatarUrl: null, bannerUrl: null, bio: null,
         role: 'reader', isAuthor: false, isTranslator: false, createdAt: new Date(), updatedAt: new Date(), ...value } as Row;
@@ -82,12 +91,21 @@ export function identityDb() {
       }
       rows.push(row); return [row];
     };
-    return { returning: execute, onConflictDoNothing: async () => {
+    // A conflicting insert is "no rows", not a throw: ON CONFLICT DO NOTHING is
+    // exactly that. Both chain forms are supported, because drizzle supports
+    // both — `.onConflictDoNothing(...)` awaited directly and
+    // `.onConflictDoNothing(...).returning()`.
+    const conflictTolerant = async () => {
       try { return await execute(); } catch (error) {
         if ((error as { code?: string }).code !== '23505') throw error;
         return [];
       }
-    } };
+    };
+    return { returning: execute, onConflictDoNothing: () => ({
+      returning: execute,
+      then: (resolve: (value: Row[]) => unknown, reject?: (reason: unknown) => unknown) =>
+        conflictTolerant().then(resolve, reject),
+    }) };
   } }));
   const update = vi.fn((_table: unknown) => ({ set: (patch: Partial<Row>) => ({ where: (condition: SQL) => {
     const execute = async () => {

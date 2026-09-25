@@ -37,6 +37,7 @@ import type {
 import {
   MAX_LEVEL,
   calculateFreeStats,
+  calculateFreeStatsFromTotals,
   calculateProStats,
   getLevelFromSeconds,
 } from './calculations.js';
@@ -765,6 +766,41 @@ describe('pure reading statistics calculations', () => {
     expect(stats.uniqueInAppCompletedChapters).toBe(3);
     expect(stats).not.toHaveProperty('tier');
     expect(stats).not.toHaveProperty('totalWords');
+  });
+
+  // The SQL-side aggregation hands this function two totals instead of rows.
+  // The ladder must be applied identically, and a hostile total (a legacy v1 row
+  // can store negative seconds; an int8 sum can arrive as a string) must never
+  // move the level.
+  it('builds the same Free projection from aggregated totals', () => {
+    const rows = [
+      { seconds: 3600, novelId: '1', chapterId: 1, progressPercent: 100, completed: true, completionSignalPresent: true },
+      { seconds: 1800, novelId: '1', chapterId: 1, progressPercent: 100, completed: true, completionSignalPresent: true },
+      { seconds: 60, novelId: '2', chapterId: 2, progressPercent: 20, completed: false, completionSignalPresent: true },
+      { seconds: 30, novelId: '2', chapterId: 3, progressPercent: 90, completed: true, completionSignalPresent: true },
+    ];
+    const scanned = calculateFreeStats(rows);
+    expect(calculateFreeStatsFromTotals({
+      totalSeconds: 5490,
+      uniqueInAppCompletedChapters: 2,
+    })).toEqual(scanned);
+    expect(scanned.level).toBe(2);
+  });
+
+  it('normalizes a hostile aggregated total instead of trusting it', () => {
+    const empty = { level: 1, levelProgress: 0, totalSecondsRead: 0, uniqueInAppCompletedChapters: 0 };
+    // A negative sum and a negative count degrade to the empty projection. The
+    // legacy v1 writer is plan-blind and can store a negative `seconds`, so a
+    // SQL sum can be smaller than the sum of its non-negative parts.
+    expect(calculateFreeStatsFromTotals({ totalSeconds: -500, uniqueInAppCompletedChapters: -1 })).toEqual(empty);
+    expect(calculateFreeStatsFromTotals({ totalSeconds: Number.NaN, uniqueInAppCompletedChapters: Number.NaN })).toEqual(empty);
+    // A non-finite total is not a level: the storage layer is the only place
+    // allowed to coerce an int8 aggregate, and it does so before calling here.
+    expect(calculateFreeStatsFromTotals({ totalSeconds: '3600' as unknown as number, uniqueInAppCompletedChapters: 0 })).toEqual(empty);
+    expect(calculateFreeStatsFromTotals({ totalSeconds: Number.POSITIVE_INFINITY, uniqueInAppCompletedChapters: 0 })).toEqual(empty);
+    // A saturated sum pins the top of the ladder instead of wrapping.
+    expect(calculateFreeStatsFromTotals({ totalSeconds: Number.MAX_SAFE_INTEGER, uniqueInAppCompletedChapters: 0 }))
+      .toMatchObject({ level: 50, levelProgress: 1, totalSecondsRead: Number.MAX_SAFE_INTEGER });
   });
 
   it('returns every empty Pro field with seven zero days and 24 zero hours', () => {

@@ -2,6 +2,18 @@ import type { MiddlewareHandler } from 'hono';
 
 const hits = new Map<string, { count: number; reset: number }>();
 
+/** Paths whose 429 body carries the v2 sync failure shape ({success, code, error})
+ *  so a plan-aware client can branch on `code` like it does for every other
+ *  sync rejection. Everything else keeps the original `{ error }` body. */
+const codedPaths = ['/comments', '/api/v1/sync/'];
+
+function limitedBody(c: { req: { path: string } }) {
+  const coded = codedPaths.some((fragment) => c.req.path.includes(fragment));
+  return coded
+    ? { success: false as const, code: 'rate_limited' as const, error: 'too many requests' }
+    : { error: 'too many requests' };
+}
+
 export function rateLimit(max = 60, windowMs = 60_000): MiddlewareHandler {
   return async (c, next) => {
     const ip = c.req.header('x-forwarded-for')?.split(',')[0]?.trim() || 'local';
@@ -15,10 +27,7 @@ export function rateLimit(max = 60, windowMs = 60_000): MiddlewareHandler {
     }
     cur.count += 1;
     if (cur.count > max) {
-      if (c.req.path.includes('/comments')) {
-        return c.json({ success: false, code: 'rate_limited', error: 'too many requests' }, 429);
-      }
-      return c.json({ error: 'too many requests' }, 429);
+      return c.json(limitedBody(c), 429);
     }
     await next();
   };

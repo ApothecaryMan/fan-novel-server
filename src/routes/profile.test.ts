@@ -4,7 +4,17 @@ import { requestId } from 'hono/request-id';
 import { identityDb, productionBindings } from '../test/identityDb.js';
 import { getEnv, setWorkerEnv } from '../config/env.js';
 import { users } from '../database/schema.js';
-import { TIER_META, getLevelFromMinutes, getLevelFromSeconds, isTierEntryLevel, minutesToReach, streakFromReadDays, tierOfLevel } from './profile.js';
+import { TIER_META, streakFromReadDays } from './profile.js';
+// The level ladder is asserted where it is defined: the canonical calculation
+// module. profile.ts only projects it, so a copy of the table there would be a
+// second thing to keep in sync — and a mirror test here would test that copy.
+import {
+  getLevelFromMinutes,
+  getLevelFromSeconds,
+  isTierEntryLevel,
+  minutesToReach,
+  tierOfLevel,
+} from '../features/readingSync/calculations.js';
 
 const holder = vi.hoisted(() => ({ fake: null as ReturnType<typeof identityDb> | null }));
 vi.mock('../database/db.js', () => ({
@@ -82,6 +92,46 @@ describe('GET /users/me/profile', () => {
     const res = await app.request('/users/me/profile', { headers: { Authorization: `Bearer ${token}` } });
     expect(res.status).toBe(503);
     expect(await res.text()).not.toMatch(/private-db-password|lvl2@test/);
+    // Read-only route: see the note on the public sibling — no breaker trip.
+    expect(fake().noteDbFailure).not.toHaveBeenCalled();
+  });
+
+  // The body is the caller's own account, email included, so no shared cache may
+  // keep it. The public route below deliberately keeps its `public` header.
+  it('marks the authenticated profile private, no-store on every outcome', async () => {
+    const { token }: any = await (await loginAs('cache-1', 'cache@test.com')).json();
+    const ok = await app.request('/users/me/profile', { headers: { Authorization: `Bearer ${token}` } });
+    expect(ok.status).toBe(200);
+    expect(ok.headers.get('Cache-Control')).toBe('private, no-store');
+
+    const unauthenticated = await app.request('/users/me/profile');
+    expect(unauthenticated.headers.get('Cache-Control')).toBe('private, no-store');
+    const versioned = await app.request('/users/me/profile?readingStatsVersion=2', {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    expect(versioned.headers.get('Cache-Control')).toBe('private, no-store');
+  });
+
+  // The legacy levelInfo keys are a projection of the canonical engine, so the
+  // payload is checked against that engine rather than against a second ladder.
+  it('projects the canonical level ladder onto the legacy keys', async () => {
+    const { token }: any = await (await loginAs('lvl-3', 'lvl3@test.com')).json();
+    const body: any = await (await app.request('/users/me/profile', {
+      headers: { Authorization: `Bearer ${token}` },
+    })).json();
+    // No stored sessions in this fake, so the engine is evaluated at zero.
+    const canonical = getLevelFromSeconds(0);
+    expect(body).toMatchObject({
+      level: canonical.level,
+      tier: canonical.tier,
+      isTierEntry: canonical.isTierEntry,
+      isMax: canonical.isMax,
+      progress: canonical.progress,
+      totalMinutes: canonical.totalMinutes,
+      currentRequiredHours: canonical.currentRequiredMinutes / 60,
+      nextRequiredHours: canonical.nextRequiredMinutes === null ? null : canonical.nextRequiredMinutes / 60,
+      tierMeta: { nameKey: `levels.tier${canonical.tier}` },
+    });
   });
 });
 describe('GET /users/:id/profile (public)', () => {
@@ -196,7 +246,10 @@ describe('GET /users/:id/profile (public)', () => {
     expect(text).not.toContain('secret-driver-detail');
     expect(text).not.toContain(A1_EMAIL);
     expect(await JSON.parse(text)).toEqual({ success: false, code: 'account_unavailable', error: 'account storage unavailable' });
-    expect(fake().noteDbFailure).toHaveBeenCalled();
+    // The breaker is for storage that is failing, not for a read that did not
+    // work: this route never writes, so a failed lookup must not take the write
+    // surfaces offline with it.
+    expect(fake().noteDbFailure).not.toHaveBeenCalled();
   });
 
   it('memory fallback in non-prod returns zeros for known fixtures and 404 for unknown', async () => {

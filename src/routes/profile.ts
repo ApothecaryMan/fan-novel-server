@@ -1,22 +1,20 @@
 import { Hono } from 'hono';
 import { and, count, eq, isNull, sql } from 'drizzle-orm';
-import { db, isDbAvailable, noteDbFailure } from '../database/db.js';
+import { db, isDbAvailable } from '../database/db.js';
 import { comments, readingHistory, readingSessions, userLibrary, users } from '../database/schema.js';
 import { requireAuth } from '../middleware/auth.js';
 import { getEnv } from '../config/env.js';
 import { findMemoryUser } from './auth.js';
 import { authoritativePlan, loadFreeStatsForUser } from '../features/readingSync/freeStore.js';
 import { freeProjection, proPlanNotImplementedResponse } from '../features/readingSync/freeProtocol.js';
+import { getLevelFromSeconds, type LevelInfo as CanonicalLevelInfo } from '../features/readingSync/calculations.js';
 
 export const profileRouter = new Hono();
 
-// Mirror of Fan Novel app src/features/stats/readingLevels.ts (same table,
-// same tier names after T3/T4 swap). Server never invents its own formula:
-// input is active minutes = floor(totalSeconds / 60).
-export const MAX_LEVEL = 50;
-export const LEVELS_PER_TIER = 10;
-export const TIER_STEPS_HOURS = [1, 2, 4, 8, 15] as const;
-
+// The level ladder is NOT defined here. features/readingSync/calculations.ts
+// owns the canonical five-tier/50-level table (same table, same tier names after
+// the T3/T4 swap) and this route only projects its result into the legacy
+// response shape, so a second copy of the table here could only ever drift.
 export interface TierMeta {
   tier: number;
   nameKey: `levels.tier${1 | 2 | 3 | 4 | 5}`;
@@ -34,49 +32,7 @@ export const TIER_META: TierMeta[] = [
   { tier: 5, nameKey: 'levels.tier5', nameAr: 'أسطورة', nameEn: 'Legend', color: '#FFB300', soft: '#C7A24B' },
 ];
 
-export interface LevelRow {
-  level: number;
-  tier: number;
-  positionInTier: number;
-  stepHours: number;
-  deltaHours: number;
-  deltaMinutes: number;
-  cumulativeHours: number;
-  cumulativeMinutes: number;
-}
-
-function buildLevelTable(): LevelRow[] {
-  const rows: LevelRow[] = [];
-  let cumulative = 0;
-  for (let level = 1; level <= MAX_LEVEL; level++) {
-    const tier = Math.ceil(level / LEVELS_PER_TIER);
-    const positionInTier = ((level - 1) % LEVELS_PER_TIER) + 1;
-    const stepHours = TIER_STEPS_HOURS[tier - 1];
-    const deltaHours = stepHours * positionInTier;
-    cumulative += deltaHours;
-    rows.push({ level, tier, positionInTier, stepHours, deltaHours,
-      deltaMinutes: deltaHours * 60, cumulativeHours: cumulative, cumulativeMinutes: cumulative * 60 });
-  }
-  return rows;
-}
-
-export const LEVEL_TABLE: LevelRow[] = buildLevelTable();
-
-export function minutesToReach(level: number): number {
-  if (level <= 1) return 0;
-  if (level > MAX_LEVEL) return LEVEL_TABLE[MAX_LEVEL - 1].cumulativeMinutes;
-  return LEVEL_TABLE[level - 2].cumulativeMinutes;
-}
-
-export function tierOfLevel(level: number): number {
-  const clamped = Math.min(MAX_LEVEL, Math.max(1, Math.floor(level)));
-  return Math.ceil(clamped / LEVELS_PER_TIER);
-}
-
-export function isTierEntryLevel(level: number): boolean {
-  return level > 1 && level <= MAX_LEVEL && (level - 1) % LEVELS_PER_TIER === 0;
-}
-
+/** The legacy /me/profile level payload, derived from the canonical engine. */
 export interface LevelInfo {
   level: number;
   tier: number;
@@ -91,30 +47,29 @@ export interface LevelInfo {
   minutesToNext: number;
 }
 
-export function getLevelFromMinutes(totalActiveMinutes: number): LevelInfo {
-  const total = Number.isFinite(totalActiveMinutes) ? Math.max(0, Math.floor(totalActiveMinutes)) : 0;
-  let level = 1;
-  for (let t = 1; t < MAX_LEVEL; t++) {
-    if (total >= LEVEL_TABLE[t - 1].cumulativeMinutes) level = t + 1;
-    else break;
-  }
-  const tier = tierOfLevel(level);
-  const currentRequired = minutesToReach(level);
-  const isMax = level >= MAX_LEVEL;
-  const nextRequired = isMax ? null : minutesToReach(level + 1);
-  const span = (nextRequired ?? LEVEL_TABLE[MAX_LEVEL - 1].cumulativeMinutes) - currentRequired;
-  const progress = isMax && total >= LEVEL_TABLE[MAX_LEVEL - 1].cumulativeMinutes ? 1
-    : span > 0 ? Math.min(1, Math.max(0, (total - currentRequired) / span)) : 1;
-  return { level, tier, tierMeta: TIER_META[tier - 1], isTierEntry: isTierEntryLevel(level), isMax,
-    progress, totalMinutes: total, currentRequiredHours: currentRequired / 60,
-    nextRequiredHours: nextRequired === null ? null : nextRequired / 60,
-    minutesIntoLevel: total - currentRequired,
-    minutesToNext: nextRequired === null ? 0 : Math.max(0, nextRequired - total) };
-}
-
-export function getLevelFromSeconds(totalSeconds: number): LevelInfo {
-  const s = Number.isFinite(totalSeconds) && totalSeconds > 0 ? Math.floor(totalSeconds) : 0;
-  return getLevelFromMinutes(Math.floor(s / 60));
+/**
+ * Adapt the canonical level state onto the legacy response keys. Input is
+ * active minutes in the calculation module (floor(totalSeconds / 60)) and the
+ * legacy payload reports the thresholds in hours, so every value here is a
+ * rename — never a second formula.
+ */
+export function legacyLevelInfo(level: CanonicalLevelInfo): LevelInfo {
+  const currentRequiredMinutes = level.currentRequiredMinutes;
+  return {
+    level: level.level,
+    tier: level.tier,
+    tierMeta: TIER_META[level.tier - 1],
+    isTierEntry: level.isTierEntry,
+    isMax: level.isMax,
+    progress: level.progress,
+    totalMinutes: level.totalMinutes,
+    currentRequiredHours: currentRequiredMinutes / 60,
+    nextRequiredHours: level.nextRequiredMinutes === null ? null : level.nextRequiredMinutes / 60,
+    minutesIntoLevel: level.totalMinutes - currentRequiredMinutes,
+    minutesToNext: level.nextRequiredMinutes === null
+      ? 0
+      : Math.max(0, level.nextRequiredMinutes - level.totalMinutes),
+  };
 }
 
 export function streakFromReadDays(readDays: string[], today = new Date()): number {
@@ -152,6 +107,29 @@ function toPublic(u: any) {
   };
 }
 
+/**
+ * Every column a profile payload can name, and nothing else. Both profile
+ * routes read through this list so a `users` row can never drag an auth anchor
+ * (password hash, google subject) or a write-side field into a request that
+ * does not project it.
+ */
+const PROFILE_USER_COLUMNS = {
+  id: users.id,
+  externalId: users.externalId,
+  email: users.email,
+  displayName: users.displayName,
+  username: users.username,
+  avatarUrl: users.avatarUrl,
+  bannerUrl: users.bannerUrl,
+  bio: users.bio,
+  role: users.role,
+  isAuthor: users.isAuthor,
+  isTranslator: users.isTranslator,
+  createdAt: users.createdAt,
+  // Plan gate for the versioned body; never projected to a client.
+  readingStatsPlan: users.readingStatsPlan,
+} as const;
+
 // Opt-in query for the plan-scoped reading statistics projection. Absent keeps
 // the legacy payload byte-for-byte identical; an unrecognised value is an
 // explicit 400 so a Pro client is never quietly downgraded to Free stats.
@@ -175,7 +153,13 @@ function requestedReadingStatsVersion(c: {
 
 // GET /api/v1/users/me/profile — single-request account screen payload.
 // Level uses the exact app table (active minutes); full lists stay in sync/pull.
-profileRouter.get('/me/profile', requireAuth, async (c) => {
+// The cache header is set BEFORE requireAuth so even the unauthenticated 401 is
+// marked uncacheable: the body carries the caller's own email, and the public
+// sibling route below keeps its own `public` header on the same path prefix.
+profileRouter.get('/me/profile', async (c, next) => {
+  c.header('Cache-Control', 'private, no-store');
+  await next();
+}, requireAuth, async (c) => {
   const sub = String(c.get('authUser')?.sub ?? '');
   if (!sub) return c.json({ error: 'account not found' }, 401);
   if (!isDbAvailable()) return c.json({ error: 'account storage unavailable' }, 503);
@@ -184,7 +168,7 @@ profileRouter.get('/me/profile', requireAuth, async (c) => {
     return c.json({ error: 'unsupported readingStatsVersion', supported: [2] }, 400);
   }
   try {
-    const [row] = await db.select().from(users).where(eq(users.externalId, sub)).limit(1);
+    const [row] = await db.select(PROFILE_USER_COLUMNS).from(users).where(eq(users.externalId, sub)).limit(1);
     if (!row) return c.json({ error: 'account not found' }, 401);
 
     // ---- Plan-scoped branch, resolved BEFORE the legacy aggregates.
@@ -227,9 +211,18 @@ profileRouter.get('/me/profile', requireAuth, async (c) => {
     const sessions = Number(sessRows[0]?.total ?? 0);
     const totalSeconds = Number(sessRows[0]?.seconds ?? 0);
     const totalWords = Number(sessRows[0]?.words ?? 0);
-    const levelInfo = getLevelFromSeconds(totalSeconds);
+    const levelInfo = legacyLevelInfo(getLevelFromSeconds(totalSeconds));
     const streakDays = streakFromReadDays(dayRows.map((r) => r.readDay).filter(Boolean));
 
+    // ---- PLAN GATE (legacy aggregates — not implemented yet) ---------------
+    // `totalWords` and `streakDays` (with `streakDays` needing the per-row
+    // `readDay` read above) are Pro reading dimensions, and this legacy payload
+    // is plan-blind: it serves them to a Free account exactly as it always has.
+    // When Pro push lands, these aggregates must be plan-gated on the
+    // authoritative `users.reading_stats_plan` — a Free account has no words,
+    // streaks or WPM to report, and the two day/session aggregate reads should
+    // not run for it at all. The versioned body above is the plan-scoped
+    // reference implementation; do not let this branch drift from it silently.
     const legacyPayload = {
       success: true,
       user: toPublic(row),
@@ -238,7 +231,8 @@ profileRouter.get('/me/profile', requireAuth, async (c) => {
     };
     return c.json(legacyPayload);
   } catch (error) {
-    noteDbFailure();
+    // Read-only route: it never writes, so a failed lookup must NOT trip the
+    // global storage breaker and take every write surface offline with it.
     console.warn(JSON.stringify({ event: 'profile.storage', requestId: c.get('requestId') ?? 'no-id', outcome: 'unavailable' }));
     return c.json({ error: 'account storage unavailable' }, 503);
   }
@@ -275,10 +269,10 @@ profileRouter.get('/:id/profile', async (c) => {
     // UUID-first: comment author chips carry the users.id UUID (dominant tap path).
     // A UUID-shaped externalId still resolves via the externalId fallthrough below.
     if (UUID_RE.test(raw)) {
-      [row] = await db.select().from(users).where(eq(users.id, raw)).limit(1);
+      [row] = await db.select(PROFILE_USER_COLUMNS).from(users).where(eq(users.id, raw)).limit(1);
     }
     if (!row) {
-      [row] = await db.select().from(users).where(eq(users.externalId, raw)).limit(1);
+      [row] = await db.select(PROFILE_USER_COLUMNS).from(users).where(eq(users.externalId, raw)).limit(1);
     }
     if (!row) return c.json({ success: false, code: 'user_not_found', error: 'user not found' }, 404);
     // Single aggregate over the RESOLVED uuid; visible rows only (replies included,
@@ -292,7 +286,8 @@ profileRouter.get('/:id/profile', async (c) => {
     c.header('Cache-Control', 'public, max-age=60, stale-while-revalidate=60');
     return c.json({ success: true, user: toPublicSafe(row), stats: { commentsCount, likesReceived } });
   } catch (error) {
-    noteDbFailure();
+    // Read-only route: see the note on /me/profile — a failed read must not
+    // trip the write-side breaker.
     console.warn(JSON.stringify({ event: 'profile.storage', requestId: c.get('requestId') ?? 'no-id', outcome: 'unavailable' }));
     return c.json({ success: false, code: 'account_unavailable', error: 'account storage unavailable' }, 503);
   }

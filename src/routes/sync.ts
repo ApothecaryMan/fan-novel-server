@@ -11,15 +11,21 @@ import {
   storeFreeSessions,
 } from '../features/readingSync/freeStore.js';
 import {
+  accountNotFoundResponse,
   buildFreePullResponse,
   buildFreePushResponse,
+  capReportedIssues,
   claimedExternalId,
   classifySyncRequest,
   contractFailureResponse,
+  ownerMismatchResponse,
   parseFreeV2Pull,
   parseFreeV2Push,
   proPlanNotImplementedResponse,
   sessionConflictResponse,
+  storageUnavailableResponse,
+  syncDatabaseUnavailableResponse,
+  unauthorizedResponse,
   unsupportedSyncVersionResponse,
   type SyncFailure,
 } from '../features/readingSync/freeProtocol.js';
@@ -104,26 +110,65 @@ const unionStrings = (a: string[], b: string[]): string[] => {
   return [...a, ...b].map(String).filter((x) => (seen.has(x) ? false : (seen.add(x), true)));
 };
 
-async function provisionUser(externalId: string) {
-  const [existing] = await db.select().from(users).where(eq(users.externalId, externalId)).limit(1);
+/** The only user columns any sync path needs. Sync never reads the auth
+ *  anchors (password hash, google subject) or the write-side profile fields. */
+const SYNC_USER_COLUMNS = {
+  id: users.id,
+  externalId: users.externalId,
+  readingStatsPlan: users.readingStatsPlan,
+} as const;
+
+type SyncUser = { id: string; externalId: string | null; readingStatsPlan: string | null };
+
+async function provisionUser(externalId: string): Promise<SyncUser | undefined> {
+  const [existing] = await db.select(SYNC_USER_COLUMNS).from(users).where(eq(users.externalId, externalId)).limit(1);
   if (existing || getEnv().isProd) return existing;
   await db.insert(users).values({
     externalId, email: null, googleSubject: null,
     username: null,
     avatarUrl: null,
   }).onConflictDoNothing({ target: users.externalId });
-  return (await db.select().from(users).where(eq(users.externalId, externalId)).limit(1))[0];
+  return (await db.select(SYNC_USER_COLUMNS).from(users).where(eq(users.externalId, externalId)).limit(1))[0];
 }
 
-// Catch account-resolution failures locally; never expose driver diagnostics.
-async function resolveSyncUser(c: Context, externalId: string) {
+type SyncUserResolution =
+  | { ok: true; user: SyncUser }
+  | { ok: false; reason: 'not_found' | 'unavailable' };
+
+/**
+ * Resolve (and, in explicit dev mode, provision) the account behind a sync
+ * request.
+ *
+ * The breaker is reserved for this path because it is the only sync storage
+ * touch that can WRITE: a provisioning insert failing is a real storage
+ * failure, so `noteDbFailure()` is correct here. Read-only probes (the v2 plan
+ * probe, the aggregate reads) deliberately do not trip it.
+ */
+async function resolveSyncUser(externalId: string): Promise<SyncUserResolution> {
   try {
     const user = await provisionUser(externalId);
-    return user ?? c.json({ error: 'account not found' }, 401);
+    return user ? { ok: true, user } : { ok: false, reason: 'not_found' };
   } catch {
     noteDbFailure();
-    return c.json({ error: 'account storage unavailable' }, 503);
+    return { ok: false, reason: 'unavailable' };
   }
+}
+
+/**
+ * Legacy v1 keeps its original bodies for account-resolution failures, so the
+ * resolution result is rendered per channel rather than normalized here.
+ */
+async function resolveLegacySyncUser(c: Context, externalId: string) {
+  const resolved = await resolveSyncUser(externalId);
+  if (resolved.ok) return resolved.user;
+  return resolved.reason === 'not_found'
+    ? c.json({ error: 'account not found' }, 401)
+    : c.json({ error: 'account storage unavailable' }, 503);
+}
+
+/** v2 renders the same two outcomes through the typed failure helper. */
+function v2UserFailure(reason: 'not_found' | 'unavailable'): SyncFailure {
+  return reason === 'not_found' ? accountNotFoundResponse() : storageUnavailableResponse();
 }
 
 const num = (v: unknown, fallback = 0): number =>
@@ -139,24 +184,33 @@ const dateOrNull = (v: unknown): Date | null => {
   return null;
 };
 
+/**
+ * Legacy v1 400 body: `{ error, issues }` as before, with the issue list
+ * capped. A 5000-row outbox flush produces one zod issue per field, so an
+ * uncapped list let a client choose the size of its own error response. The cap
+ * reuses the v2 budget (MAX_REPORTED_ISSUES) and only adds `issuesTruncated`
+ * when something was actually dropped, so a small failure stays byte-identical.
+ */
+function legacyIssues(c: Context, error: string, issues: readonly unknown[]) {
+  const { issues: capped, issuesTruncated } = capReportedIssues(issues);
+  return c.json({ error, issues: capped, ...(issuesTruncated ? { issuesTruncated: true } : {}) }, 400);
+}
+
 // ---- Reading statistics v2 (plan-aware). The plan is read from
 // users.reading_stats_plan and never from the request; the Free channel is
 // validated against the strict v2 contract before a single row is written.
 // Pro push/collections are a later task: they fail closed with 501
 // (proPlanNotImplementedResponse) instead of silently serving Free data.
 
-const OWNER_MISMATCH = { error: 'forbidden: token identity does not match user.externalId' } as const;
-const STORAGE_UNAVAILABLE = { error: 'sync database unavailable' } as const;
-
 function fail(c: Context, failure: SyncFailure) {
-  return c.json(failure.body as never, failure.status as never);
+  return c.json(failure.body, failure.status);
 }
 
 /** Owner policy for the v2 channel: identical to the legacy rule, checked
  *  before parsing so a mismatched caller learns nothing about payload shape. */
 function ownerMismatch(c: Context, authedSub: string | null, body: unknown) {
   const claimed = claimedExternalId(body);
-  if (authedSub && claimed !== null && authedSub !== claimed) return c.json(OWNER_MISMATCH, 403);
+  if (authedSub && claimed !== null && authedSub !== claimed) return fail(c, ownerMismatchResponse());
   return null;
 }
 
@@ -178,7 +232,7 @@ function ownerMismatch(c: Context, authedSub: string | null, body: unknown) {
  * `null` means "no stored plan yet" (unknown or unclaimed identity) and lets the
  * request continue to the normal parse → resolve → plan-gate sequence.
  */
-async function v2PlanProbe(c: Context, body: unknown): Promise<Response | null> {
+async function v2PlanProbe(body: unknown): Promise<SyncFailure | null> {
   const externalId = claimedExternalId(body);
   if (externalId === null) return null;
   try {
@@ -189,20 +243,32 @@ async function v2PlanProbe(c: Context, body: unknown): Promise<Response | null> 
       .limit(1);
     if (!row) return null;
     const plan = authoritativePlan(row);
-    if (plan !== 'free') return fail(c, proPlanNotImplementedResponse(plan));
+    if (plan !== 'free') return proPlanNotImplementedResponse(plan);
     return null;
   } catch {
     // A failed probe must not fall through to the permissive path; fail closed.
-    noteDbFailure();
-    return c.json(STORAGE_UNAVAILABLE, 503);
+    // The breaker stays out of it: this is a read-only SELECT, and tripping it
+    // would take every write surface offline for a single failed lookup.
+    console.warn(JSON.stringify({ event: 'sync.plan_probe', outcome: 'unavailable' }));
+    return storageUnavailableResponse();
   }
+}
+
+/**
+ * Resolve the v2 account and fail closed on its two failure modes. Shared by
+ * push and pull so both surfaces answer the same normalized 401/503.
+ */
+async function v2SyncUser(c: Context, externalId: string) {
+  const resolved = await resolveSyncUser(externalId);
+  if (resolved.ok) return resolved.user;
+  return fail(c, v2UserFailure(resolved.reason));
 }
 
 async function pushFreeV2(c: Context, body: unknown, authedSub: string | null) {
   const mismatch = ownerMismatch(c, authedSub, body);
   if (mismatch) return mismatch;
-  const planGate = await v2PlanProbe(c, body);
-  if (planGate) return planGate;
+  const planGate = await v2PlanProbe(body);
+  if (planGate) return fail(c, planGate);
 
   let payload;
   try {
@@ -211,7 +277,7 @@ async function pushFreeV2(c: Context, body: unknown, authedSub: string | null) {
     return fail(c, contractFailureResponse(error));
   }
 
-  const user = await resolveSyncUser(c, payload.user.externalId);
+  const user = await v2SyncUser(c, payload.user.externalId);
   if (user instanceof Response) return user;
   // Re-read the plan from the resolved row: the probe cannot see a row that is
   // created by this very request, and the probe may have raced an update.
@@ -223,14 +289,17 @@ async function pushFreeV2(c: Context, body: unknown, authedSub: string | null) {
   try {
     write = await storeFreeSessions(user.id, payload.sessions);
     if (write.conflictingSessionIds.length > 0) {
-      return fail(c, sessionConflictResponse(write.conflictingSessionIds));
+      // A mid-batch race keeps the rows it already created, so they are
+      // reported as accepted alongside the conflicting ids.
+      return fail(c, sessionConflictResponse(write.conflictingSessionIds, write.acceptedSessionIds));
     }
     stats = await loadFreeStatsForUser(user.id);
   } catch {
     // Never surface driver diagnostics, and never leave a half-applied push
-    // looking like a success.
+    // looking like a success. The breaker IS tripped here: the write (or its
+    // aggregate) actually failed against storage.
     noteDbFailure();
-    return c.json(STORAGE_UNAVAILABLE, 503);
+    return fail(c, storageUnavailableResponse());
   }
 
   return c.json(buildFreePushResponse({
@@ -244,8 +313,8 @@ async function pushFreeV2(c: Context, body: unknown, authedSub: string | null) {
 async function pullFreeV2(c: Context, body: unknown, authedSub: string | null) {
   const mismatch = ownerMismatch(c, authedSub, body);
   if (mismatch) return mismatch;
-  const planGate = await v2PlanProbe(c, body);
-  if (planGate) return planGate;
+  const planGate = await v2PlanProbe(body);
+  if (planGate) return fail(c, planGate);
 
   let payload;
   try {
@@ -254,7 +323,7 @@ async function pullFreeV2(c: Context, body: unknown, authedSub: string | null) {
     return fail(c, contractFailureResponse(error));
   }
 
-  const user = await resolveSyncUser(c, payload.user.externalId);
+  const user = await v2SyncUser(c, payload.user.externalId);
   if (user instanceof Response) return user;
   const plan = authoritativePlan(user);
   if (plan !== 'free') return fail(c, proPlanNotImplementedResponse(plan));
@@ -263,25 +332,52 @@ async function pullFreeV2(c: Context, body: unknown, authedSub: string | null) {
   try {
     stats = await loadFreeStatsForUser(user.id);
   } catch {
-    noteDbFailure();
-    return c.json(STORAGE_UNAVAILABLE, 503);
+    // Read-only aggregate: fail closed without tripping the breaker.
+    console.warn(JSON.stringify({ event: 'sync.stats_read', outcome: 'unavailable' }));
+    return fail(c, storageUnavailableResponse());
   }
   return c.json(buildFreePullResponse(stats));
 }
 
-// POST /api/v1/sync/push
-syncRouter.post('/push', async (c) => {
-  if (!isDbAvailable()) return c.json({ error: 'sync database not configured' }, 503);
-  const authedSub = await authedSubject(c);
-  if (!getEnv().syncOpen && !authedSub) {
-    return c.json({ error: 'unauthorized: valid Bearer token required' }, 401);
-  }
+/**
+ * Shared prelude for both legacy channels: read the body once, classify the
+ * declared protocol, then apply the storage/auth gates.
+ *
+ * The body is buffered BEFORE the gates purely so the declared channel is known
+ * when a gate rejects: a v2 caller must receive the typed v2 failure body while
+ * a v1 caller keeps the legacy one. Precedence is unchanged — neither gate runs
+ * before the other, and both still precede every storage access and every
+ * schema parse. A body too broken to read declares no version, so it is treated
+ * as legacy and gets the legacy body, exactly as before.
+ */
+async function syncRequestPreamble(c: Context, legacyUnavailable: () => Response, legacyUnauthenticated: () => Response) {
   const body = await c.req.json().catch(() => null);
   const channel = classifySyncRequest(body);
+  if (!isDbAvailable()) {
+    if (channel === 'v2') return fail(c, syncDatabaseUnavailableResponse());
+    return legacyUnavailable();
+  }
+  const authedSub = await authedSubject(c);
+  if (!getEnv().syncOpen && !authedSub) {
+    if (channel === 'v2') return fail(c, unauthorizedResponse('unauthorized: valid Bearer token required'));
+    return legacyUnauthenticated();
+  }
+  return { body, channel, authedSub };
+}
+
+// POST /api/v1/sync/push
+syncRouter.post('/push', async (c) => {
+  const preamble = await syncRequestPreamble(
+    c,
+    () => c.json({ error: 'sync database not configured' }, 503),
+    () => c.json({ error: 'unauthorized: valid Bearer token required' }, 401),
+  );
+  if (preamble instanceof Response) return preamble;
+  const { body, channel, authedSub } = preamble;
   if (channel === 'v2') return pushFreeV2(c, body, authedSub);
   if (channel === 'unsupported') return fail(c, unsupportedSyncVersionResponse());
   const parsed = pushSchema.safeParse(body);
-  if (!parsed.success) return c.json({ error: 'invalid push payload', issues: parsed.error.issues }, 400);
+  if (!parsed.success) return legacyIssues(c, 'invalid push payload', parsed.error.issues);
   // The legacy channel keeps working from the parsed body exactly as before the
   // v2 branch existed: classification only needs the raw body, the writer only
   // ever sees validated fields.
@@ -292,7 +388,7 @@ syncRouter.post('/push', async (c) => {
     return c.json({ error: 'forbidden: token identity does not match user.externalId' }, 403);
   }
   const now = Date.now();
-  const user = await resolveSyncUser(c, externalId);
+  const user = await resolveLegacySyncUser(c, externalId);
   if (user instanceof Response) return user;
 
   let appliedLibrary = 0;
@@ -425,17 +521,17 @@ syncRouter.post('/push', async (c) => {
 
 // POST /api/v1/sync/pull
 syncRouter.post('/pull', async (c) => {
-  if (!isDbAvailable()) return c.json({ error: 'sync database not configured' }, 503);
-  const authedSub = await authedSubject(c);
-  if (!getEnv().syncOpen && !authedSub) {
-    return c.json({ error: 'unauthorized: valid Bearer token required' }, 401);
-  }
-  const body = await c.req.json().catch(() => null);
-  const channel = classifySyncRequest(body);
+  const preamble = await syncRequestPreamble(
+    c,
+    () => c.json({ error: 'sync database not configured' }, 503),
+    () => c.json({ error: 'unauthorized: valid Bearer token required' }, 401),
+  );
+  if (preamble instanceof Response) return preamble;
+  const { body, channel, authedSub } = preamble;
   if (channel === 'v2') return pullFreeV2(c, body, authedSub);
   if (channel === 'unsupported') return fail(c, unsupportedSyncVersionResponse());
   const parsed = pullSchema.safeParse(body);
-  if (!parsed.success) return c.json({ error: 'invalid pull payload', issues: parsed.error.issues }, 400);
+  if (!parsed.success) return legacyIssues(c, 'invalid pull payload', parsed.error.issues);
   const legacyBody = parsed.data;
   const externalId = legacyBody.user.externalId;
   // Owner policy: an authenticated caller may only sync its own identity.
@@ -443,9 +539,19 @@ syncRouter.post('/pull', async (c) => {
     return c.json({ error: 'forbidden: token identity does not match user.externalId' }, 403);
   }
   const since = num(legacyBody.since, 0);
-  const user = await resolveSyncUser(c, externalId);
+  const user = await resolveLegacySyncUser(c, externalId);
   if (user instanceof Response) return user;
 
+  // ---- PLAN GATE (Pro pull — not implemented yet) --------------------------
+  // The read side is plan-blind for the same reason the write side is (see the
+  // push comment above): this projection hands back every stored `words`,
+  // `minuteOfDay`, `readDay` and `genre` regardless of
+  // `users.reading_stats_plan`. Pro pull must therefore plan-gate THIS read the
+  // same way it gates the v1 write, or a Free account keeps a round-trip channel
+  // that returns the Pro aggregates the v2 contract refuses to store and the
+  // v2 pull refuses to serve. Filter/summarize per plan; never strip keys after
+  // the fact. The `sessions` rows themselves stay plan-blind (that is the v1
+  // contract) — only the Pro-dimension projection inside them is the gate.
   const library = await db
     .select()
     .from(userLibrary)
@@ -519,7 +625,7 @@ syncRouter.post('/stats', async (c) => {
   const authedSub = await authedSubject(c);
   if (!getEnv().syncOpen && !authedSub) return c.json({ error: 'unauthorized' }, 401);
   if (authedSub && authedSub !== externalId) return c.json({ error: 'forbidden' }, 403);
-  const user = await resolveSyncUser(c, externalId);
+  const user = await resolveLegacySyncUser(c, externalId);
   if (user instanceof Response) return user;
   const lib = await db.select({ id: userLibrary.id }).from(userLibrary).where(eq(userLibrary.userId, user.id));
   const hist = await db.select({ id: readingHistory.id }).from(readingHistory).where(eq(readingHistory.userId, user.id));
