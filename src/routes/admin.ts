@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
-import { and, count, desc, eq, ilike, inArray, or } from 'drizzle-orm';
+import { and, count, desc, eq, ilike, inArray, or, sql } from 'drizzle-orm';
 import { db, isDbAvailable, noteDbFailure } from '../database/db.js';
 import { novels, roleRequests, subscriptionEvents, users } from '../database/schema.js';
 import { requireAuth } from '../middleware/auth.js';
@@ -20,7 +20,42 @@ adminRouter.use('*', async (c, next) => {
   await next();
 });
 
-function publicUser(u: typeof users.$inferSelect) {
+/**
+ * `count(*) over()` returns int8, which node-postgres parses as a STRING when
+ * the pool has no custom type parsers (see db.ts: a bare `new pg.Pool(...)`),
+ * while neon-http returns int8 as a JSON number. Without `.mapWith(Number)`
+ * the same endpoint would answer `total` as a string on Node and a number on
+ * Workers. Drizzle's `count()` maps to Number for us; a raw window count does
+ * not, so we map it explicitly.
+ */
+const totalOver = sql<number>`count(*) over()`.mapWith(Number);
+
+/**
+ * Explicit projection for admin user reads. A bare `select()` hydrates
+ * `passwordHash` and 14 `readingStats*` billing columns per row that
+ * `publicUser` immediately discards. Keep this list and `publicUser` in sync:
+ * `publicUser` is the response contract, this is the read path.
+ */
+const adminUserColumns = {
+  id: users.id,
+  externalId: users.externalId,
+  email: users.email,
+  username: users.username,
+  displayName: users.displayName,
+  avatarUrl: users.avatarUrl,
+  bannerUrl: users.bannerUrl,
+  bio: users.bio,
+  role: users.role,
+  isAuthor: users.isAuthor,
+  isTranslator: users.isTranslator,
+  createdAt: users.createdAt,
+} as const;
+
+/** Exactly the columns `adminUserColumns` projects, with their real types. */
+type AdminUserRow = { [K in keyof typeof adminUserColumns]: typeof users.$inferSelect[K] };
+
+/** Accepts the narrow projection or a full row, so both read paths share it. */
+function publicUser(u: AdminUserRow) {
   return {
     id: u.id, externalId: u.externalId, email: u.email, username: u.username,
     displayName: u.displayName, avatarUrl: u.avatarUrl, bannerUrl: u.bannerUrl,
@@ -52,14 +87,22 @@ adminRouter.get('/users', async (c) => {
     : undefined;
   const where = roleWhere && searchWhere ? and(roleWhere, searchWhere) : roleWhere ?? searchWhere;
   try {
-    const rows = where
-      ? await db.select().from(users).where(where).orderBy(desc(users.createdAt)).limit(limit).offset((page - 1) * limit)
-      : await db.select().from(users).orderBy(desc(users.createdAt)).limit(limit).offset((page - 1) * limit);
-    const countRows = where
-      ? await db.select({ total: count() }).from(users).where(where)
-      : await db.select({ total: count() }).from(users);
-    const total = Number(countRows[0]?.total ?? rows.length);
-    return c.json({ success: true, total, data: rows.map(publicUser) });
+    // One round trip: the window count rides along with the page instead of
+    // costing a second sequential query. `.where(undefined)` is valid here.
+    const rows = await db
+      .select({ ...adminUserColumns, total: totalOver })
+      .from(users)
+      .where(where)
+      // desc(users.id) is a tie-break so ORDER BY is total: without it, rows
+      // sharing a created_at can be skipped or duplicated across OFFSET pages.
+      .orderBy(desc(users.createdAt), desc(users.id))
+      .limit(limit)
+      .offset((page - 1) * limit);
+    // A window function is not evaluated when OFFSET runs past the end, so an
+    // out-of-range page returns no rows and therefore no total. Contract: an
+    // empty page reports total 0, and the client treats that as end-of-list.
+    const total = rows[0]?.total ?? 0;
+    return c.json({ success: true, total, data: rows.map(({ total: _total, ...row }) => publicUser(row)) });
   } catch (err) {
     console.error('[admin] users failed', err); noteDbFailure();
     return c.json({ error: 'فشل الجلب' }, 500);
