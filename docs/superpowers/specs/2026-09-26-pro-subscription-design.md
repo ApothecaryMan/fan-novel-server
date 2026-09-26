@@ -83,6 +83,8 @@ entitlement decisions.
 | `reading_stats_grace_until` | `readingStatsGraceUntil` | `bigint` | `null` | Grace extension end (exclusive). Null by default = no grace. |
 | `reading_stats_plan_duration_days` | `readingStatsPlanDurationDays` | `integer` | `30` | Duration granted by the last renewal. Informational. |
 | `reading_stats_plan_status` | `readingStatsPlanStatus` | `varchar(20)` | `'free'` | Lifecycle label: `'free'` \| `'active'` \| `'expired'` \| `'cancelled'`. Informational; effective plan is always derived, never read from this column. |
+| `reading_stats_renewal_count` | `readingStatsRenewalCount` | `integer` | `0` | Number of successful Pro grants/renewals. Display/audit only; never an entitlement input. |
+| `reading_stats_total_subscribed_ms` | `readingStatsTotalSubscribedMs` | `bigint` (epoch-ms duration) | `0` | Cumulative active Pro time granted across all windows. Display/audit only; never an entitlement input. |
 
 Drizzle sketch (field names only; plan author owns exact definition):
 
@@ -95,6 +97,8 @@ readingStatsLastRenewedAt: bigint('reading_stats_last_renewed_at', { mode: 'numb
 readingStatsGraceUntil: bigint('reading_stats_grace_until', { mode: 'number' }),
 readingStatsPlanDurationDays: integer('reading_stats_plan_duration_days').default(30).notNull(),
 readingStatsPlanStatus: varchar('reading_stats_plan_status', { length: 20 }).default('free').notNull(),
+readingStatsRenewalCount: integer('reading_stats_renewal_count').default(0).notNull(),
+readingStatsTotalSubscribedMs: bigint('reading_stats_total_subscribed_ms', { mode: 'number' }).default(0).notNull(),
 ```
 
 Plus a check constraint on `reading_stats_plan_status in
@@ -111,7 +115,8 @@ or orders by expiry. No FK changes. No changes to session/history/library tables
   stay `null`, `planDurationDays` stays at its default, `planStatus = 'free'`.
 - Pro is time-limited: a Pro grant must set `planStartedAt`, `planExpiresAt`
   (`startedAt + durationDays`), `lastRenewedAt`, `planDurationDays`,
-  `planStatus = 'active'`. Default duration is 30 days.
+  `planStatus = 'active'`, increment `renewalCount` by one, and add the granted
+  duration to `totalSubscribedMs`. Default duration is 30 days.
 - `graceUntil` defaults to `null` (no grace). It exists so a future policy can
   grant a short post-expiry window without a schema change; while null or in the
   past it has zero effect.
@@ -121,7 +126,7 @@ or orders by expiry. No FK changes. No changes to session/history/library tables
 
 ## Migration Strategy
 
-1. Additive migration only: `ALTER TABLE users ADD COLUMN ...` for the eight new
+1. Additive migration only: `ALTER TABLE users ADD COLUMN ...` for the ten new
    columns with the defaults above. No `NOT NULL` without default, no backfill
    inside the DDL transaction beyond defaults, no constraint on existing rows.
 2. Backfill (one idempotent statement or small script, reviewed separately):
@@ -130,7 +135,8 @@ or orders by expiry. No FK changes. No changes to session/history/library tables
    - Rows with `reading_stats_plan = 'pro'` and no expiry concept today: to avoid
      an instant mass downgrade on deploy, grant one 30-day window from migration
      time (`plan_started_at = now`, `plan_expires_at = now + 30d`,
-     `last_renewed_at = now`, `plan_duration_days = 30`, `plan_status = 'active'`).
+     `last_renewed_at = now`, `plan_duration_days = 30`, `plan_status = 'active'`,
+     `renewal_count = 1`, `total_subscribed_ms = 30d`).
      The exact `now` source (migration-run time) is recorded in the migration log.
      Alternative (expire immediately) is rejected: it would convert a deploy into
      a silent mass entitlement revocation.
@@ -167,8 +173,9 @@ Rules:
 - `graceUntil`: while the default policy holds (no grace), it is not consulted.
   If a future policy enables grace, that policy ships its own spec; this design
   pins the default to immediate downgrade.
-- `planStatus`, `planStartedAt`, `lastRenewedAt`, `planDurationDays` are never
-  inputs to the derivation. They are display/audit fields.
+- `planStatus`, `planStartedAt`, `lastRenewedAt`, `planDurationDays`,
+  `renewalCount`, and `totalSubscribedMs` are never inputs to the derivation.
+  They are display/audit fields.
 - `null`/non-integer/negative expiry on a `pro` row derives Free (fail closed),
   so corrupt or half-written grants cannot widen access.
 - Callers must use the row from `v2SyncUser`/profile resolution (post-probe
@@ -249,11 +256,13 @@ is a trusted manual admin/internal operation:
   from the caller — the server computes `startedAt = Date.now()`,
   `expiresAt = startedAt + durationDays * 86400_000`.
 - **Effects:** `pro` sets `plan='pro'`, all window columns, `lastRenewedAt=now`,
-  `status='active'`; `free` (revoke) sets `plan='free'`, clears `expiresAt`/
+  `status='active'`, increments `renewalCount` by exactly one, and adds the
+  granted duration to `totalSubscribedMs`; `free` (revoke) sets `plan='free'`, clears `expiresAt`/
   `graceUntil` to `null`, sets `status='cancelled'` (or `'free'` for a plain
   downgrade — plan author picks one and pins it in tests), and leaves all reading
   tables untouched. Renewal from any state overwrites (no stacking/extension
-  arithmetic in v1).
+  arithmetic in v1). Revocation preserves `renewalCount` and
+  `totalSubscribedMs` so cancelled accounts retain subscription history.
 - **Response:** `{ success: true, effectivePlan, planExpiresAt, planStatus }`
   (never auth anchors). **Audit:** structured log
   `{ event: 'reading_plan.grant', userId, plan, durationDays, expiresAt, actor }`;
@@ -322,9 +331,11 @@ Contract (existing harness + seedable fake): expired-Pro push of a Pro-shaped
 Persistence: downgrade changes no reading-table row counts; renewal restores Pro
   aggregates over pre-expiry rows; queued-Pro retry after renewal is accepted
   (idempotency preserved, no duplicates).
-Admin: non-admin grant → forbidden; grant sets window columns and audit log;
-  revoke clears expiry and derives Free on the next request; `durationDays`
-  default 30, cap enforced, invalid values 400.
+Admin: non-admin grant → forbidden; grant sets window columns, increments
+  `renewalCount`, adds the granted duration to `totalSubscribedMs`, and emits
+  the audit log; revoke clears expiry, preserves history counters, and derives
+  Free on the next request; `durationDays` default 30, cap enforced, invalid
+  values 400.
 Regression: `npm run typecheck`, `npm test`, `npm run build` all exit 0. This
   specification runs none of these.
 
@@ -362,7 +373,7 @@ Schema reserves `trialStartedAt` / `trialEndsAt`; policy disables them:
 
 | File | Proposed change |
 |---|---|
-| `src/database/schema.ts` | Add the eight columns + `plan_status` check; keep existing `readingStatsPlan` default/check. |
+| `src/database/schema.ts` | Add the ten columns + `plan_status` check; keep existing `readingStatsPlan` default/check. |
 | `drizzle/*` | Generated migration for the above + documented backfill for existing Pro rows. |
 | `src/features/readingSync/freeStore.ts` | Extend `authoritativePlan` (or add `effectiveReadingPlan(row, nowMs)`) per § Effective-plan algorithm; fail closed. |
 | `src/routes/sync.ts` | Extend `SYNC_USER_COLUMNS` + `v2PlanProbe` select; derive in `pushV2`/`pullV2`; keep parse→resolve→409 order; `plan` in responses = derived. |
@@ -389,7 +400,8 @@ paths, and `wrangler.toml`/`worker.ts` need no functional edits for this design.
 ## Decision Summary
 
 - Free is permanent; Pro is a 30-day-default server-granted window tracked by
-  eight new `users` columns (trial pair stored but inert, grace default null).
+  ten new `users` columns (trial pair stored but inert, grace default null,
+  plus `renewalCount` and cumulative `totalSubscribedMs`).
 - Effective plan is derived per request from UTC epoch-ms expiry; no background
   job; expiry boundary belongs to Free; corrupt/missing expiry fails closed.
 - Push/pull/profile keep their probe→parse→resolve→409 flow, branched on the
