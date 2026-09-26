@@ -1,10 +1,12 @@
 import { Hono } from 'hono';
-import { and, count, eq, isNull, sql } from 'drizzle-orm';
+import { z } from 'zod';
+import { and, count, desc, eq, isNull, lt, or, sql } from 'drizzle-orm';
 import { db, isDbAvailable } from '../database/db.js';
-import { comments, readingHistory, readingSessions, subscriptionEvents, userLibrary, users } from '../database/schema.js';
+import { comments, novels, readingHistory, readingSessions, subscriptionEvents, userLibrary, users } from '../database/schema.js';
 import { requireAuth } from '../middleware/auth.js';
 import { getEnv } from '../config/env.js';
 import { findMemoryUser } from './auth.js';
+import { encodeCursor, decodeCursor, toApi, type RootsCursor, type ApiAuthor } from './comments.js';
 import { effectiveReadingPlan, loadFreeStatsForUser } from '../features/readingSync/freeStore.js';
 import { freeProjection } from '../features/readingSync/freeProtocol.js';
 import { proProjection } from '../features/readingSync/contracts.js';
@@ -285,6 +287,25 @@ function toPublicSafe(u: any) {
   return rest;
 }
 
+/**
+ * Resolve a public `:id` (users.id UUID or users.externalId) to the users row.
+ * UUID first, then externalId — the same precedence and the same reason the
+ * profile route uses it: comment author chips carry the UUID.
+ *
+ * Shared by /:id/profile and /:id/comments so the two public routes can never
+ * disagree about who an id refers to.
+ */
+async function resolvePublicUser(raw: string) {
+  let row: any = null;
+  if (UUID_RE.test(raw)) {
+    [row] = await db.select(PROFILE_USER_COLUMNS).from(users).where(eq(users.id, raw)).limit(1);
+  }
+  if (!row) {
+    [row] = await db.select(PROFILE_USER_COLUMNS).from(users).where(eq(users.externalId, raw)).limit(1);
+  }
+  return row ?? null;
+}
+
 // GET /api/v1/users/:id/profile — public author card for comment avatar taps.
 // No auth. :id accepts users.id (UUID) or users.externalId (google_<sub>, dev_<email>).
 // Registered AFTER /me/profile so Hono never routes the literal `me` here.
@@ -303,15 +324,9 @@ profileRouter.get('/:id/profile', async (c) => {
     return c.json({ success: true, user: toPublicSafe(mem), stats: { commentsCount: 0, likesReceived: 0 } });
   }
   try {
-    let row: any = null;
     // UUID-first: comment author chips carry the users.id UUID (dominant tap path).
-    // A UUID-shaped externalId still resolves via the externalId fallthrough below.
-    if (UUID_RE.test(raw)) {
-      [row] = await db.select(PROFILE_USER_COLUMNS).from(users).where(eq(users.id, raw)).limit(1);
-    }
-    if (!row) {
-      [row] = await db.select(PROFILE_USER_COLUMNS).from(users).where(eq(users.externalId, raw)).limit(1);
-    }
+    // A UUID-shaped externalId still resolves via the externalId fallthrough.
+    const row = await resolvePublicUser(raw);
     if (!row) return c.json({ success: false, code: 'user_not_found', error: 'user not found' }, 404);
     // Single aggregate over the RESOLVED uuid; visible rows only (replies included,
     // pending/hidden/deleted excluded; orphaned user_id IS NULL rows never match).
@@ -327,6 +342,119 @@ profileRouter.get('/:id/profile', async (c) => {
     // Read-only route: see the note on /me/profile — a failed read must not
     // trip the write-side breaker.
     console.warn(JSON.stringify({ event: 'profile.storage', requestId: c.get('requestId') ?? 'no-id', outcome: 'unavailable' }));
+    return c.json({ success: false, code: 'account_unavailable', error: 'account storage unavailable' }, 503);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/users/:id/comments — a user's own comments inside ONE novel.
+//
+// Backs the commenter-profile list on server novels. Served from the same
+// public router as /:id/profile and deliberately scoped by `novelId` so the
+// list can never contradict the reader's current context.
+//
+// Visibility rules are pinned to match /:id/profile exactly — visible only,
+// replies included — because the hero shows that aggregate. If the two ever
+// disagreed, the screen would claim a count its own list does not support.
+// ---------------------------------------------------------------------------
+
+const authorCommentsQuerySchema = z.object({
+  novelId: z.string().trim().min(1).max(100),
+  cursor: z.string().max(500).optional(),
+  limit: z.coerce.number().int().min(1).max(50).default(20),
+});
+
+// Registered AFTER /:id/profile. Both are `/:id/...`; Hono matches on the full
+// path shape, and this one carries a second segment.
+profileRouter.get('/:id/comments', async (c) => {
+  const raw = String(c.req.param('id') ?? '').trim();
+  if (!raw) return c.json({ success: false, code: 'invalid_id', error: 'invalid user id' }, 400);
+
+  const parsed = authorCommentsQuerySchema.safeParse({
+    novelId: c.req.query('novelId'),
+    cursor: c.req.query('cursor'),
+    limit: c.req.query('limit'),
+  });
+  if (!parsed.success) {
+    return c.json({ success: false, code: 'invalid_query', error: 'استعلام غير صالح', issues: parsed.error.issues }, 400);
+  }
+  const { novelId, cursor: cursorRaw, limit } = parsed.data;
+
+  let cursor: RootsCursor | undefined;
+  if (cursorRaw) {
+    const d = decodeCursor(cursorRaw);
+    if (!d) return c.json({ success: false, code: 'invalid_cursor', error: 'مؤشر ترقيم غير صالح' }, 400);
+    cursor = d;
+  }
+
+  if (!isDbAvailable()) {
+    if (getEnv().isProd) {
+      return c.json({ success: false, code: 'account_unavailable', error: 'account storage unavailable' }, 503);
+    }
+    return c.json({ success: true, total: 0, data: [], pagination: { limit, nextCursor: null, hasMore: false } });
+  }
+
+  try {
+    const row = await resolvePublicUser(raw);
+    if (!row) return c.json({ success: false, code: 'user_not_found', error: 'user not found' }, 404);
+
+    // Keyset pagination on (created_at DESC, id DESC) — the same ordering the
+    // `comments_user (user_id, created_at DESC, id DESC)` index provides, so
+    // this stays an index scan rather than a sort as the table grows.
+    const cursorCond = cursor
+      ? or(
+          lt(comments.createdAt, new Date(cursor.t)),
+          and(eq(comments.createdAt, new Date(cursor.t)), lt(comments.id, cursor.i)),
+        )
+      : undefined;
+
+    const where = and(
+      eq(comments.userId, row.id),
+      eq(comments.novelId, novelId),
+      eq(comments.status, 'visible'),
+      cursorCond,
+    );
+
+    // One extra row is the hasMore probe; no second COUNT query on page 2+.
+    const rows = await db
+      .select({ row: comments, novelTitle: novels.title })
+      .from(comments)
+      .innerJoin(novels, eq(novels.id, comments.novelId))
+      .where(where)
+      .orderBy(desc(comments.createdAt), desc(comments.id))
+      .limit(limit + 1);
+
+    const hasMore = rows.length > limit;
+    const page = hasMore ? rows.slice(0, limit) : rows;
+    const last = page[page.length - 1]?.row;
+
+    // One author for the whole page, so it is projected once.
+    const author: ApiAuthor = { id: String(row.id), name: row.displayName ?? null, avatarUrl: row.avatarUrl ?? undefined };
+
+    const data = page.map(({ row: r, novelTitle }) => ({
+      ...toApi(r, author, 0),
+      // The host already holds the author's identity and avatar; the novel
+      // title is included because the list is novel-scoped and the client
+      // renders a chapter label, not a novel one.
+      novelTitle,
+    }));
+
+    const nextCursor =
+      hasMore && last
+        ? encodeCursor({ t: new Date(last.createdAt as unknown as string).getTime(), i: last.id })
+        : null;
+
+    c.header('Cache-Control', 'public, max-age=60, stale-while-revalidate=60');
+    return c.json({
+      success: true,
+      // Null on cursor pages, matching /novels/:id/comments: the badge/count
+      // comes from /:id/profile, so a COUNT per page would be wasted work.
+      total: cursor ? null : rows.length,
+      data,
+      pagination: { limit, nextCursor, hasMore },
+    });
+  } catch (error) {
+    console.warn(JSON.stringify({ event: 'profile.comments', requestId: c.get('requestId') ?? 'no-id', outcome: 'unavailable' }));
     return c.json({ success: false, code: 'account_unavailable', error: 'account storage unavailable' }, 503);
   }
 });

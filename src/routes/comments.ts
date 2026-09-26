@@ -132,11 +132,11 @@ const listQuerySchema = z.object({
 
 // ---------- shared shapes ----------
 
-type CommentRow = typeof comments.$inferSelect;
+export type CommentRow = typeof comments.$inferSelect;
 
-interface ApiAuthor { id: string; name: string; avatarUrl?: string }
+export interface ApiAuthor { id: string; name: string; avatarUrl?: string }
 
-function toApi(row: CommentRow, author: ApiAuthor, myVote: 1 | -1 | 0) {
+export function toApi(row: CommentRow, author: ApiAuthor, myVote: 1 | -1 | 0) {
   return {
     id: `app_${row.id}`,
     novelId: row.novelId,
