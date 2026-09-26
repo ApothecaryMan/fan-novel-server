@@ -5,7 +5,7 @@ import { eq, ne } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import { migrate } from 'drizzle-orm/node-postgres/migrator';
 import * as schema from '../database/schema.js';
-import { users } from '../database/schema.js';
+import { roleRequests, users } from '../database/schema.js';
 import { signToken } from '../middleware/auth.js';
 import { closeDb, initDb } from '../database/db.js';
 import { adminRouter } from './admin.js';
@@ -47,6 +47,7 @@ let database: ReturnType<typeof drizzle<typeof schema>>;
 let app: Hono;
 let adminToken: string;
 let adminExternalId: string | undefined;
+let adminRowId: string | undefined;
 
 async function createUser(overrides: Partial<typeof users.$inferInsert> = {}) {
   const externalId = nextSubject();
@@ -91,6 +92,7 @@ beforeAll(async () => {
     // the database and the token must carry that row's externalId as `sub`.
     const adminRow = await createUser({ role: 'admin' });
     adminExternalId = adminRow.externalId ?? undefined;
+    adminRowId = adminRow.id;
     adminToken = await signToken({
       id: adminRow.externalId!,
       email: adminRow.email!,
@@ -121,7 +123,15 @@ beforeEach(async () => {
   // resolves the bearer subject to a row, so deleting it would 401 every
   // request that follows.
   if (!url) return;
+  await database.delete(roleRequests);
   await database.delete(users).where(ne(users.externalId, adminExternalId!));
+  // Reset the fixture's role, not just its existence. Several tests demote it;
+  // if one fails before its restore step, a demoted fixture 403s every
+  // remaining request in the file and the failure cascades. Resetting here
+  // makes the file self-healing after an interrupted run.
+  if (adminRowId) {
+    await database.update(users).set({ role: 'admin' }).where(eq(users.id, adminRowId));
+  }
 });
 
 afterAll(async () => {
@@ -337,6 +347,52 @@ describe.skipIf(!url)('PUT /api/v1/admin/users/:id (isolated PostgreSQL)', () =>
   });
 });
 
+describe.skipIf(!url)('GET /api/v1/admin/requests (isolated PostgreSQL)', () => {
+  const auth = () => ({ Authorization: `Bearer ${adminToken}` });
+
+  it('returns the full request shape, including note and the decision fields', async () => {
+    const requester = await createUser({});
+    const [row] = await database.insert(roleRequests).values({
+      userId: requester.id,
+      kind: 'author',
+      status: 'pending',
+      note: 'please approve',
+    }).returning();
+
+    const res = await app.request('/api/v1/admin/requests?status=pending', { headers: auth() });
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.success).toBe(true);
+
+    const found = (json.data as any[]).find((r) => r.id === row.id);
+    expect(found).toBeDefined();
+    // The response spreads the request row, so every column must be present.
+    // `note` is read by the client; decidedBy/decidedAt are part of the wire
+    // shape even though the client ignores them. A dropped column would be a
+    // silent contract break, so pin the exact key set.
+    expect(Object.keys(found).sort()).toEqual(
+      ['id', 'userId', 'kind', 'status', 'note', 'decidedBy', 'decidedAt', 'createdAt', 'user'].sort(),
+    );
+    expect(found.note).toBe('please approve');
+    expect(found.user.id).toBe(requester.id);
+  });
+
+  it('never leaks password or billing columns into the embedded user', async () => {
+    const requester = await createUser({});
+    await database.insert(roleRequests).values({
+      userId: requester.id, kind: 'translator', status: 'pending',
+    });
+
+    const res = await app.request('/api/v1/admin/requests?status=pending', { headers: auth() });
+    const json = await res.json();
+    for (const request of json.data as any[]) {
+      if (!request.user) continue;
+      expect(Object.keys(request.user)).not.toContain('passwordHash');
+      expect(Object.keys(request.user).some((k) => k.startsWith('readingStats'))).toBe(false);
+    }
+  });
+});
+
 describe.skipIf(!url)('last-admin guard (isolated PostgreSQL)', () => {
   const auth = () => ({ Authorization: `Bearer ${adminToken}` });
   const demoteViaApi = (id: string) =>
@@ -425,14 +481,23 @@ describe.skipIf(!url)('last-admin guard (isolated PostgreSQL)', () => {
     const admins = await database.select().from(users).where(eq(users.role, 'admin'));
     expect(admins).toHaveLength(2);
 
-    // allSettled, not all: the loser is SUPPOSED to come back 409, and
+    // allSettled, not all: the loser is SUPPOSED to be refused, and
     // Promise.all would throw before the assertions run.
     const results = await Promise.allSettled([demoteViaApi(admins[0].id), demoteViaApi(admins[1].id)]);
     const statuses = results
       .map((r) => (r.status === 'fulfilled' ? r.value.status : 'rejected'))
-      .sort();
+      .sort((a, b) => Number(a) - Number(b));
 
-    expect(statuses).toEqual([200, 409]);
+    // The refusal can surface two ways, both correct, depending on how the two
+    // requests interleave: 409 when the guard is reached and sees one admin
+    // left, or 403 when the loser's admin middleware runs after the winner has
+    // already committed the demotion, so getCaller sees a non-admin and rejects
+    // before the guard runs. Asserting a single exact status is flaky and
+    // asserts more than the invariant. What must hold: exactly one succeeds,
+    // the other is refused with a 4xx, and one admin remains.
+    expect(statuses[0]).toBe(200);
+    expect([403, 409]).toContain(statuses[1]);
+
     const remaining = await database.select().from(users).where(eq(users.role, 'admin'));
     expect(remaining).toHaveLength(1);
 

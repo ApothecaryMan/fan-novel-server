@@ -216,7 +216,29 @@ adminRouter.get('/requests', async (c) => {
   if (!isDbAvailable()) return c.json({ error: 'database not configured' }, 503);
   const status = c.req.query('status') ?? 'pending';
   try {
-    const rows = await db.select({ req: roleRequests, user: users })
+    // Explicit projections on both sides of the join. A bare table select
+    // hydrated a full users row — passwordHash and all 14 readingStats*
+    // billing columns — per pending request, for up to 200 rows, and
+    // publicUser then discarded them. The user side reuses adminUserColumns so
+    // it cannot drift from publicUser.
+    //
+    // The req side must list every role_requests column, because the response
+    // spreads it. `note` in particular is read by the client, and `decidedBy` /
+    // `decidedAt` are part of the current wire shape even though the client
+    // ignores them.
+    const rows = await db.select({
+      req: {
+        id: roleRequests.id,
+        userId: roleRequests.userId,
+        kind: roleRequests.kind,
+        status: roleRequests.status,
+        note: roleRequests.note,
+        decidedBy: roleRequests.decidedBy,
+        decidedAt: roleRequests.decidedAt,
+        createdAt: roleRequests.createdAt,
+      },
+      user: adminUserColumns,
+    })
       .from(roleRequests)
       .leftJoin(users, eq(roleRequests.userId, users.id))
       .where(eq(roleRequests.status, status))
