@@ -94,7 +94,7 @@ Run: `npm run db:check`
 Run: `npm test -- src/database/readingStatsSchema.test.ts`
 Expected: PASS, migration file created, integrity OK.
 
-Backfill (one idempotent statement, reviewed separately, never inside the DDL transaction beyond defaults): rows with `reading_stats_plan = 'pro'` and no expiry concept receive one 30-day window from migration time (`plan_started_at = now`, `plan_expires_at = now + 30d`, `last_renewed_at = now`, `plan_duration_days = 30`, `plan_status = 'active'`, `renewal_count = 1`, `total_subscribed_ms = 30d`); Free rows keep all new timestamps null and `plan_status = 'free`. Record the exact `now` source in the migration log.
+Backfill (one idempotent statement or `scripts/backfill-pro-subscription.*`, reviewed separately, never inside the DDL transaction beyond defaults): rows with `reading_stats_plan = 'pro'` and no expiry concept receive one 30-day window from migration time (`plan_started_at = now`, `plan_expires_at = now + 30d`, `last_renewed_at = now`, `plan_duration_days = 30`, `plan_status = 'active'`, `renewal_count = 1`, `total_subscribed_ms = 30d`) **plus one `grant` event row each** (`actor_id` null, `reason = 'system: migration backfill'`, `previous_expires_at` null, `new_expires_at` = granted expiry, `duration_days = 30`); Free rows keep all new timestamps null and `plan_status = 'free`. Record the exact `now` source in the migration log.
 
 - [ ] **Step 5: Commit**
 
@@ -207,6 +207,8 @@ const plan = effectiveReadingPlan(user, Date.now());
 
 Apply the same extension to `PROFILE_USER_COLUMNS` and use `effectiveReadingPlan(row, Date.now())` in the `readingStatsVersion=2` branch. Keep `toPublic()` unchanged.
 
+Gate the legacy surfaces in the same task (no plan-blind Pro channel): v1 session/history writes store `FREE_SESSION_SAFE_DEFAULTS` when derived Free; v1 pulls project Pro-dimension columns to the same defaults for Free; the unversioned legacy profile keeps its keys but returns `totalWords = 0` and `streakDays = 0` for Free (document the intentional value change in the test names).
+
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `npm test -- src/routes/readingStats.plan.test.ts`
@@ -259,9 +261,10 @@ export const EXPIRED_EVENT_REASON = 'system: natural expiry';
 
 export async function recordExpiredObservation(
   userId: string,
-  previousExpiresAt: number,
+  previousExpiresAt: unknown,
   nowMs: number,
 ): Promise<void> {
+  if (typeof previousExpiresAt !== 'number' || !Number.isSafeInteger(previousExpiresAt)) return;
   try {
     await db.insert(subscriptionEvents).values({
       userId,
@@ -279,7 +282,7 @@ export async function recordExpiredObservation(
 }
 ```
 
-Call it after computing a Free-derived response for a stored-pro row, without awaiting it before the response and without calling `noteDbFailure()`.
+Call it after computing a Free-derived response for a stored-pro row, without awaiting it before the response and without calling `noteDbFailure()`. Cost accepted: one indexed `ON CONFLICT DO NOTHING` per post-expiry request (no-op after the first).
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -334,13 +337,16 @@ adminRouter.post('/users/:id/reading-plan', async (c) => {
   if (!isDbAvailable()) return c.json({ error: 'database not configured' }, 503);
   const parsed = readingPlanGrantSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return c.json({ error: 'invalid plan grant' }, 400);
+  // Retries are additive by contract in v1: confirm the result before retrying.
   const now = Date.now();
   const durationDays = parsed.data.durationDays ?? 30;
   const durationMs = durationDays * 86400_000;
-  const [row] = await db.select().from(users).where(eq(users.id, c.req.param('id'))).limit(1);
-  if (!row) return c.json({ error: 'user not found' }, 404);
+  const subjectId = c.req.param('id');
+  const actorId = c.get('caller').row.id;
   if (parsed.data.plan === 'free') {
-    await db.transaction(async (tx) => {
+    const revoked = await db.transaction(async (tx) => {
+      const [row] = await tx.select().from(users).where(eq(users.id, subjectId)).for('update').limit(1);
+      if (!row) return null;
       await tx.update(users).set({
         readingStatsPlan: 'free',
         readingStatsPlanExpiresAt: null,
@@ -348,22 +354,28 @@ adminRouter.post('/users/:id/reading-plan', async (c) => {
         readingStatsPlanStatus: 'cancelled',
       }).where(eq(users.id, row.id));
       await tx.insert(subscriptionEvents).values({
-        userId: row.id, type: 'revoke', actorId: c.get('caller').row.id,
+        userId: row.id, type: 'revoke', actorId,
         previousExpiresAt: row.readingStatsPlanExpiresAt,
         newExpiresAt: null, durationDays: null,
         reason: parsed.data.reason ?? null, occurredAt: now,
       });
+      return true;
     });
+    if (!revoked) return c.json({ error: 'user not found' }, 404);
     return c.json({ success: true, effectivePlan: 'free', planStatus: 'cancelled' });
   }
-  const base = row.readingStatsPlanExpiresAt !== null
-    && row.readingStatsPlanExpiresAt > now
-    ? row.readingStatsPlanExpiresAt : now;
-  const expiresAt = base + durationMs;
-  await db.transaction(async (tx) => {
+  const granted = await db.transaction(async (tx) => {
+    const [row] = await tx.select().from(users).where(eq(users.id, subjectId)).for('update').limit(1);
+    if (!row) return null;
+    const previous = row.readingStatsPlanExpiresAt;
+    const livePrevious = typeof previous === 'number' && Number.isSafeInteger(previous) && previous > now
+      ? previous : null;
+    const base = livePrevious ?? now;
+    const expiresAt = base + durationMs;
+    const isRepeat = (row.readingStatsRenewalCount ?? 0) > 0;
     await tx.update(users).set({
       readingStatsPlan: 'pro',
-      readingStatsPlanStartedAt: now,
+      readingStatsPlanStartedAt: livePrevious !== null ? row.readingStatsPlanStartedAt ?? now : now,
       readingStatsPlanExpiresAt: expiresAt,
       readingStatsLastRenewedAt: now,
       readingStatsPlanDurationDays: durationDays,
@@ -372,16 +384,15 @@ adminRouter.post('/users/:id/reading-plan', async (c) => {
       readingStatsTotalSubscribedMs: sql`${users.readingStatsTotalSubscribedMs} + ${durationMs}`,
     }).where(eq(users.id, row.id));
     await tx.insert(subscriptionEvents).values({
-      userId: row.id,
-      type: row.readingStatsPlanExpiresAt !== null && row.readingStatsPlanExpiresAt > now ? 'renew' : 'grant',
-      actorId: c.get('caller').row.id,
-      previousExpiresAt: row.readingStatsPlanExpiresAt,
-      newExpiresAt: expiresAt, durationDays,
+      userId: row.id, type: isRepeat ? 'renew' : 'grant', actorId,
+      previousExpiresAt: previous, newExpiresAt: expiresAt, durationDays,
       reason: parsed.data.reason ?? null, occurredAt: now,
     });
+    return { expiresAt };
   });
-  console.log(JSON.stringify({ event: 'reading_plan.grant', userId: row.id, plan: 'pro', durationDays, expiresAt, actor: c.get('caller').row.id }));
-  return c.json({ success: true, effectivePlan: 'pro', planExpiresAt: expiresAt, planStatus: 'active' });
+  if (!granted) return c.json({ error: 'user not found' }, 404);
+  console.log(JSON.stringify({ event: 'reading_plan.grant', userId: subjectId, plan: 'pro', durationDays, expiresAt: granted.expiresAt, actor: actorId }));
+  return c.json({ success: true, effectivePlan: 'pro', planExpiresAt: granted.expiresAt, planStatus: 'active' });
 });
 ```
 

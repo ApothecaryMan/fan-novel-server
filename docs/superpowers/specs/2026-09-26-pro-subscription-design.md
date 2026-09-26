@@ -63,8 +63,10 @@ entitlement decisions.
   `FREE_SESSION_SAFE_DEFAULTS` (`words 0`, `minuteOfDay 0`, `readDay ''`,
   `genre ''`) plus `proFieldsPresent = false`, `completionSignalPresent = true`.
   Pro rows carry `proFieldsPresent = true`. `loadFreeStatsForUser` aggregates in
-  SQL (no row streaming). Legacy v1 push/pull (`sync.ts:490-524,552-561`) are
-  intentionally plan-blind and stay that way; they are not entitlement surfaces.
+  SQL (no row streaming). Legacy v1 push/pull and the legacy unversioned profile
+  are **also derived-plan gated** (§ Legacy v1 gating): same derivation, same
+  safe defaults/zeroes for Free; wire shapes unchanged, values gated. There is
+  no plan-blind Pro-evidence channel after this design.
 - Constants: `CLIENT_CLOCK_SKEW_MS = 5min` (`sync.ts:48`) applies only to session
   `ts` clamping, never to entitlement.
 
@@ -107,6 +109,16 @@ read is a point lookup on the already-indexed `users.external_id` / PK path
 (`v2PlanProbe`, `v2SyncUser`, profile `WHERE external_id = sub`); no query filters
 or orders by expiry. No FK changes. No changes to session/history/library tables.
 
+Why denormalized counters instead of deriving from `subscription_events`
+(`COUNT`/`SUM`)? The probe runs on every push/pull/profile request: a point
+lookup on the `users` row keeps the hot path at one indexed read, while
+aggregating events per request would add a second query to the most frequent
+endpoint. `renewalCount` / `totalSubscribedMs` / `planStatus` /
+`planDurationDays` are therefore write-time materializations of the event log
+for the hot path and admin display; the event table remains the source of
+truth for investigations. Trial/grace columns are reserved so enabling either
+later needs no migration.
+
 ### Semantics
 
 - `plan` is the granted tier; `planExpiresAt` is the entitlement clock.
@@ -136,16 +148,24 @@ or orders by expiry. No FK changes. No changes to session/history/library tables
      an instant mass downgrade on deploy, grant one 30-day window from migration
      time (`plan_started_at = now`, `plan_expires_at = now + 30d`,
      `last_renewed_at = now`, `plan_duration_days = 30`, `plan_status = 'active'`,
-     `renewal_count = 1`, `total_subscribed_ms = 30d`).
+     `renewal_count = 1`, `total_subscribed_ms = 30d`) **plus one `grant`
+     event row per backfilled user** (`actor_id` null,
+     `reason = 'system: migration backfill'`, `previous_expires_at` null,
+     `new_expires_at` = the granted expiry, `duration_days = 30`,
+     `occurred_at` = migration `now`). Without the event row, backfilled
+     windows would be unaccountable grants and `totalSubscribedMs` would no
+     longer equal the sum of event durations — violating the "logged event
+     always matches the stored window" invariant.
      The exact `now` source (migration-run time) is recorded in the migration log.
      Alternative (expire immediately) is rejected: it would convert a deploy into
      a silent mass entitlement revocation.
 3. Drizzle schema updated in the same change; `drizzle/` migration files generated
-   per repo convention. No data migration for session/history/library tables.
-4. Rollback is drop-columns (or simply stop reading them; derived algorithm falls
-   back to the legacy stored-plan check only if the new columns are absent — the
-   plan author must keep that fallback out of production code and rely on forward
-   migration instead).
+   per repo convention (backfill lives in `scripts/backfill-pro-subscription.*`,
+   reviewed separately). No data migration for session/history/library tables.
+4. Rollback is forward-only: drop-columns on revert. No production code may fall
+   back to trusting the raw stored `plan` flag when expiry columns are absent —
+   ship no fallback reader; a database without the migration is a failed
+   deployment, not a degraded mode.
 
 ## Effective-Plan Algorithm
 
@@ -186,6 +206,35 @@ Rules:
 `effectiveReadingPlan()`) to this signature; all three surfaces call the same
 function. Unit tests pin the boundary (`expiresAt - 1` → pro, `expiresAt` →
 free), the null/corrupt-expiry fail-closed cases, and the grace-ignored default.
+
+## Legacy v1 Gating (normative)
+
+The v1 bypass is closed, not documented away. Code comments at the legacy
+session writer and legacy profile aggregates already flag those paths as the
+Pro-evidence channel (`words`, `minuteOfDay`, `readDay`, `genre`,
+`totalWords`, `streakDays`), so leaving them plan-blind would keep a working
+Pro channel open for expired accounts while v2 correctly derives Free.
+
+- **v1 push:** resolve the account, derive `effectiveReadingPlan(row, nowMs)`
+  from the freshly resolved row, then write. When derived Free, v1 session rows
+  store `FREE_SESSION_SAFE_DEFAULTS` for the four Pro-dimension columns plus
+  `proFieldsPresent = false` (completion marker semantics unchanged); v1
+  history `readDay`/dimension columns store the same safe defaults. Shipped
+  Pro dimensions from a Free-derived caller are ignored, never stored.
+- **v1 pull:** same derivation first. When derived Free, session/history rows
+  are projected with the Pro-dimension columns replaced by the safe defaults
+  (shape unchanged, values gated). A Free account therefore cannot read back
+  Pro dimensions it wrote through v1 while Pro, nor accumulate new ones.
+- **Legacy unversioned profile (no `readingStatsVersion`):** wire keys stay
+  byte-identical, but values are gated: `totalWords = 0`, `streakDays = 0` for
+  Free-derived callers; `totalSeconds` and the level ladder stay live (computed
+  from Free totals, same ladder authority). This is an intentional value change
+  for Free on a deprecated surface; shape compatibility is preserved, Pro-value
+  compatibility is not.
+- Precedence with the race guard is unchanged: if expiry lapses between the
+  probe and the resolve, the caller sees the existing `409 plan_changed`
+  (`reading plan changed; refresh and retry`) rather than a contract error. The
+  409 wins over `pro_fields_not_allowed` in that interleaving only.
 
 ## Push / Pull / Profile Interactions
 
@@ -230,10 +279,13 @@ contract parsing, owner policy, idempotency, and response shapes are unchanged.
   `reading_history`, `user_library`, `reading_chapter_state`, and `reading_novels`
   rows remain intact, so a later renewal restores full Pro aggregates computed
   over the preserved history.
-- Queued Pro data remains locally deferred: a client holding unsynced Pro sessions
-  across expiry keeps them queued; its next Pro-shaped push is rejected by the
-  Free contract, and it must retain (not drop) the queue until Pro is renewed,
-  then flush normally. The server never instructs deletion.
+- Queued Pro data remains locally deferred (client guidance, not a server
+  guarantee — no app-repo changes are in scope, so no test here can pin client
+  behavior): a client holding unsynced Pro sessions across expiry should keep
+  them queued; its next Pro-shaped push is rejected by the Free contract, and
+  it should retain (not drop) the queue until Pro is renewed, then flush
+  normally. The server never instructs deletion and never deletes reading rows
+  on any entitlement transition (server-guaranteed, tested).
 - Upgrade/renewal restores Pro immediately (next request derives Pro once
   `planExpiresAt` is in the future). No backfill or recomputation step is needed
   because nothing was deleted; aggregates are computed live from stored rows.
@@ -253,13 +305,30 @@ is a trusted manual admin/internal operation:
   existing admin/users budgets; no new middleware.
 - **Request (sketch):** `{ plan: 'pro' | 'free', durationDays?: number (default
   30, positive int, capped e.g. ≤ 365), reason?: string }`. No timestamps accepted
-  from the caller — the server computes all window timestamps.
+  from the caller — the server computes all window timestamps. Retries are
+  **additive by contract in v1**: a retried grant intent creates a second
+  extension. Operators confirm the result before retrying; clients disable
+  double-submit. (A server-issued idempotency key is a future enhancement, not
+  v1.)
+- **Concurrency (normative):** the grant handler runs
+  `SELECT ... FOR UPDATE` on the subject `users` row inside the same transaction
+  as the `users` update + event insert. Two concurrent grants serialize: the
+  second reads the first grant's `new_expires_at` as its base, so no extension
+  is lost. The existing admin budget applies (`app.ts` already mounts
+  `app.use('/api/v1/admin/*', rateLimit(60))`); no new middleware.
 - **Renewal window math (normative):** let `now = Date.now()`,
-  `previousExpiresAt` be the stored `reading_stats_plan_expires_at` (may be
-  null), and `durationMs = durationDays * 86400_000`. Then:
+  `previousExpiresAt` be the locked row's `reading_stats_plan_expires_at`, and
+  `durationMs = durationDays * 86400_000`. Coerce corrupt values first: if
+  `previousExpiresAt` is not a safe integer (string, NaN, float, negative),
+  treat it as null (fail-closed extension, never widen). Then:
   `base = previousExpiresAt !== null && previousExpiresAt > now ? previousExpiresAt : now`;
-  `startedAt = now` (audit: when this grant was executed);
+  `startedAt = <previous live window's startedAt preserved when base is the old expiry, else now>`;
   `expiresAt = base + durationMs`.
+  Concretely: renewing a live window preserves the continuous-coverage
+  `startedAt` and moves only the expiry; a fresh grant (no live window) sets
+  `startedAt = now`. After stacking, `expiresAt - startedAt != duration` by
+  design — `startedAt` marks coverage start, `lastRenewedAt` marks the last
+  grant execution.
   Rationale: an early renewal while Pro is still active extends from the current
   expiry (`expiresAt + duration`), so remaining paid days are never lost; a
   renewal after expiry (or on a Free row) starts from `now`. This is the same
@@ -268,12 +337,14 @@ is a trusted manual admin/internal operation:
 - **Effects:** `pro` sets `plan='pro'`, all window columns, `lastRenewedAt=now`,
   `status='active'`, increments `renewalCount` by exactly one, and adds exactly
   `durationMs` to `totalSubscribedMs` (see § Total-subscribed-time definition);
-  `free` (revoke) sets `plan='free'`, clears `expiresAt`/
-  `graceUntil` to `null`, sets `status='cancelled'` (or `'free'` for a plain
-  downgrade — plan author picks one and pins it in tests), and leaves all reading
-  tables untouched. Renewal extends per the window math above (never overwrites
-  a live expiry with `now + duration`). Revocation preserves `renewalCount` and
-  `totalSubscribedMs` so cancelled accounts retain subscription history.
+  `free` (revoke) sets `plan='free'`, clears `expiresAt` and `graceUntil` to
+  `null`, sets `status='cancelled'`, preserves `startedAt`, `lastRenewedAt`,
+  `durationDays`, `renewalCount`, and `totalSubscribedMs`, and leaves all
+  reading tables untouched. (`'cancelled'` is pinned: a revoke is always an
+  explicit admin act, never the silent Free default.) Renewal extends per the
+  window math above (never overwrites a live expiry with `now + duration`).
+  Revocation preserves history counters so cancelled accounts retain
+  subscription history.
 - **Response:** `{ success: true, effectivePlan, planExpiresAt, planStatus }`
   (never auth anchors). **Audit:** structured log
   `{ event: 'reading_plan.grant', userId, plan, durationDays, expiresAt, actor }`
@@ -320,13 +391,12 @@ subscription_events
 
 Rules:
 
-- `grant` = first Pro grant on a row with no live window; `renew` = Pro grant
-  while a live window exists or after a previous window (any repeat grant);
-  `revoke` = manual downgrade to Free; `expired` = first observation of a
-  natural expiry (see below). The very first grant and every later grant both
-  increment `renewalCount`; the type column preserves the
-  first-vs-repeat distinction for investigations. `expired` and `revoke` never
-  touch `renewalCount` or `totalSubscribedMs`.
+- `grant` = first Pro grant on a row with no prior grant history; `renew` = any
+  later Pro grant. The distinction is decided inside the locked transaction
+  from history (`renewalCount > 0` or any prior `grant`/`renew` event), never
+  from the request. Both increment `renewalCount` (it is a grant counter in
+  practice); `revoke` and `expired` never touch `renewalCount` or
+  `totalSubscribedMs`.
 - `actor_id` is the admin/trusted operator that executed the grant (never the
   subject user unless self-grant is an explicit future policy). Null only when
   the actor row is unavailable; the structured log still carries the actor.
@@ -346,6 +416,11 @@ Rules:
   grant/renew/revoke: a grant that fails to log fails entirely, and a logged
   event always matches the stored window.
 - No event row is ever updated or deleted except by account deletion cascade.
+- `occurred_at` (bigint epoch ms) is the server event time, set by the writer
+  from `Date.now()`; `received_at` (timestamp default now()) is the database
+  ingest time, set by Postgres. The two clocks exist so a skewed or replayed
+  writer cannot rewrite history: ordering and windowing always use
+  `occurred_at`, while `received_at` answers "when did this row land".
 - Admin/read surfaces for events are out of scope for v1; the table exists so a
   later investigation ("who renewed account X on date Y and why?") has a
   complete answer without reconstructing it from counters.
@@ -365,10 +440,23 @@ the most common downgrade path stays silent:
   enforced by a partial unique index on
   `(user_id, previous_expires_at) WHERE type = 'expired'`, written with
   `ON CONFLICT DO NOTHING`. Ten concurrent first-observers produce exactly one
-  row; every later request for the same lapsed window is a no-op.
+  row; every later request for the same lapsed window is a logical no-op.
+- **Null-key guard (normative):** `previous_expires_at` is nullable, and
+  `NULL != NULL`, so a corrupt pro-with-null-expiry row must **never** attempt
+  the insert — it would mint one unbounded `expired` row per request. Attempt
+  the `expired` insert only when `previous_expires_at` is a safe integer;
+  otherwise skip silently (derivation already fails closed to Free).
+- **Per-request cost (accepted):** stored `plan`/`planStatus` are never flipped
+  on expiry, so every post-expiry push/pull/profile pays one indexed
+  `INSERT ... ON CONFLICT DO NOTHING` attempt (one round-trip, conflict-no-op
+  after the first). This is the price of keeping derivation write-free for the
+  data path: quantified as a single cheap upsert on an already-authenticated
+  request, not a scan. A one-time status flip was rejected because it would put
+  a `users` write on the read path.
 - Failure semantics (deliberately different from grant/renew): the `expired`
   insert **never fails the request, never trips the storage breaker, and never
-  blocks the response**. Storage failure is a structured warn
+  blocks the response**. It never calls `noteDbFailure()` (the push write path
+  does; the expired logger must not). Storage failure is a structured warn
   (`sync.plan_expired_log`, `profile.plan_expired_log`) and the next request
   retries the insert. Derivation stays pure: the response is identical whether
   the log write succeeded or not.
@@ -490,13 +578,15 @@ Schema reserves `trialStartedAt` / `trialEndsAt`; policy disables them:
 | `src/database/schema.ts` | Add the ten columns + `plan_status` check + new `subscription_events` table with type check and `(user_id, occurred_at, id)` index; keep existing `readingStatsPlan` default/check. |
 | `drizzle/*` | Generated migration for the above + documented backfill for existing Pro rows. |
 | `src/features/readingSync/freeStore.ts` | Extend `authoritativePlan` (or add `effectiveReadingPlan(row, nowMs)`) per § Effective-plan algorithm; fail closed. |
-| `src/routes/sync.ts` | Extend `SYNC_USER_COLUMNS` + `v2PlanProbe` select; derive in `pushV2`/`pullV2`; keep parse→resolve→409 order; `plan` in responses = derived. |
-| `src/routes/profile.ts` | Extend `PROFILE_USER_COLUMNS` (read-only, never projected); derive in the `readingStatsVersion=2` branch; legacy branch untouched. |
-| Admin surface (new or existing admin route) | Manual grant/revoke behind admin authz + audit log + atomic `subscription_events` row per § Renewal and § Subscription event log. |
-| Tests | Effective-plan matrix, probe/parse/409 cases, profile Free-after-expiry, downgrade-preserves-data, admin authz/defaults, renewal-extension math (`max(now, expiry)`), total-subscribed-ms accumulation, event-row atomicity and field values. |
+| `src/routes/sync.ts` | Extend `SYNC_USER_COLUMNS` + `v2PlanProbe` select; derive in `pushV2`/`pullV2`; gate the legacy v1 session/history writes and pulls per § Legacy v1 gating; keep parse→resolve→409 order (`409 plan_changed` wins when expiry lapses mid-race); `plan` in responses = derived. Clean up the stale `sync.ts` comment claiming Pro push is unimplemented. |
+| `src/routes/profile.ts` | Extend `PROFILE_USER_COLUMNS` (read-only, never projected); derive in the `readingStatsVersion=2` branch; gate legacy unversioned aggregates per § Legacy v1 gating (keys unchanged, Free values zeroed). |
+| `src/routes/admin.ts` | Add `POST /api/v1/admin/users/:id/reading-plan` behind the existing `requireAuth` + admin-role gate (already rate-limited by `app.use('/api/v1/admin/*', rateLimit(60))`): row-locked grant/revoke with atomic event row, `max(now, expiry)` math, additive-retry contract, audit log. |
+| `scripts/backfill-pro-subscription.*` (new) | One idempotent backfill for existing Pro rows incl. one `grant` event each (`reason = 'system: migration backfill'`). |
+| Tests | Effective-plan matrix (incl. trial/grace inertness), probe/parse/409 precedence cases, profile Free-after-expiry, v1 write/read gating, downgrade-preserves-data, renewal-extension math (`max(now, expiry)`), corrupt-expiry coercion, total-subscribed-ms accumulation, event-row atomicity and field values, expired null-guard + idempotency + no-breaker, admin authz/defaults/caps, backfill event invariant. |
 
-`contracts.ts`, `calculations.ts`, `proStore.ts`/`proProtocol.ts` shapes, legacy v1
-paths, and `wrangler.toml`/`worker.ts` need no functional edits for this design.
+`contracts.ts`, `calculations.ts`, `proStore.ts`/`proProtocol.ts` shapes and
+`wrangler.toml`/`worker.ts` need no functional edits for this design. Legacy v1
+sync/profile code paths do need the value-gating edits above.
 
 ## Risks And Mitigations
 
@@ -523,14 +613,17 @@ paths, and `wrangler.toml`/`worker.ts` need no functional edits for this design.
   server.
 - Downgrade hides (never deletes) Pro data; queued Pro sessions defer locally;
   renewal restores full aggregates from preserved rows.
-- Only a trusted manual admin operation writes entitlement; no billing, webhooks,
-  trials activation, leaderboards, or UI changes.
+- Only a trusted manual admin operation writes entitlement (row-locked,
+  additive retries, atomic event row); no billing, webhooks, trials activation,
+  leaderboards, or UI changes.
+- Legacy v1 sync and the unversioned profile are gated like v2 (shapes kept,
+  Free values zeroed/defaulted); natural expiry logs one idempotent `expired`
+  row per window without failing reads or tripping the breaker.
 
 ## Assumptions And Open Questions
 
 - Assumed: granting existing Pro rows a fresh 30-day window at migration is
   acceptable product behavior (vs immediate expiry); flagged for product sign-off.
-- Assumed: `durationDays` cap (e.g. 365) and revoke `planStatus` label
-  (`'cancelled'` vs `'free'`) are implementer choices pinned in tests.
+- Pinned: `durationDays` cap is 365; revoke `planStatus` is always `'cancelled'`.
 - No open questions blocking the plan; trial activation and any future grace
   policy each require their own spec.
