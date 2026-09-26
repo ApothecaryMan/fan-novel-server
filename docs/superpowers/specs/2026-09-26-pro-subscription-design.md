@@ -307,7 +307,7 @@ row to a new append-only table in the same transaction as the `users` update:
 subscription_events
   id                    serial primary key
   user_id               uuid not null references users(id) on delete cascade
-  type                  varchar(16) not null check (type in ('grant','renew','revoke'))
+  type                  varchar(16) not null check (type in ('grant','renew','revoke','expired'))
   actor_id              uuid references users(id) on delete set null
   previous_expires_at   bigint
   new_expires_at        bigint
@@ -322,22 +322,62 @@ Rules:
 
 - `grant` = first Pro grant on a row with no live window; `renew` = Pro grant
   while a live window exists or after a previous window (any repeat grant);
-  `revoke` = manual downgrade to Free. The very first grant and every later
-  grant both increment `renewalCount`; the type column preserves the
-  first-vs-repeat distinction for investigations.
+  `revoke` = manual downgrade to Free; `expired` = first observation of a
+  natural expiry (see below). The very first grant and every later grant both
+  increment `renewalCount`; the type column preserves the
+  first-vs-repeat distinction for investigations. `expired` and `revoke` never
+  touch `renewalCount` or `totalSubscribedMs`.
 - `actor_id` is the admin/trusted operator that executed the grant (never the
   subject user unless self-grant is an explicit future policy). Null only when
   the actor row is unavailable; the structured log still carries the actor.
+  For `type = 'expired'`, `actor_id` is always null: null here means "system",
+  not "missing admin". `reason` for `expired` is the fixed string
+  `system: natural expiry`, never caller input.
 - `previous_expires_at` / `new_expires_at` are the exact values before and after
   the `users` update (null where absent). `duration_days` is the granted
-  duration for grant/renew, null for revoke. `reason` is the caller-supplied
-  reason verbatim (bounded, never auth material).
-- The event write and the `users` update commit atomically: a grant that fails
-  to log fails entirely, and a logged event always matches the stored window.
+  duration for grant/renew, null for revoke and expired. `reason` is the
+  caller-supplied reason verbatim for grant/renew/revoke (bounded, never auth
+  material). For `expired`: `previous_expires_at` = the window expiry that just
+  lapsed, `new_expires_at` = null, `duration_days` = null,
+  `occurred_at` = detection time (`Date.now()` of the observing request), not
+  the expiry boundary itself — the boundary is already stored in
+  `previous_expires_at`.
+- The event write and the `users` update commit atomically for
+  grant/renew/revoke: a grant that fails to log fails entirely, and a logged
+  event always matches the stored window.
 - No event row is ever updated or deleted except by account deletion cascade.
 - Admin/read surfaces for events are out of scope for v1; the table exists so a
   later investigation ("who renewed account X on date Y and why?") has a
   complete answer without reconstructing it from counters.
+
+### Natural-expiry observation (normative)
+
+Expiry is still derived, never executed by a background job. But the first
+request that observes an already-lapsed window must leave one audit trace, or
+the most common downgrade path stays silent:
+
+- When `pushV2` / `pullV2` / `GET /me/profile?readingStatsVersion=2` derives
+  Free because `nowMs >= planExpiresAt` on a row whose stored `plan = 'pro'`,
+  the same handler attempts one best-effort `expired` insert **after** the
+  response inputs are computed, in a **separate step, not in the request's data
+  transaction** (not in the Free session insert, not in the profile aggregate).
+- Idempotency key is `(user_id, previous_expires_at)` for `type = 'expired'`:
+  enforced by a partial unique index on
+  `(user_id, previous_expires_at) WHERE type = 'expired'`, written with
+  `ON CONFLICT DO NOTHING`. Ten concurrent first-observers produce exactly one
+  row; every later request for the same lapsed window is a no-op.
+- Failure semantics (deliberately different from grant/renew): the `expired`
+  insert **never fails the request, never trips the storage breaker, and never
+  blocks the response**. Storage failure is a structured warn
+  (`sync.plan_expired_log`, `profile.plan_expired_log`) and the next request
+  retries the insert. Derivation stays pure: the response is identical whether
+  the log write succeeded or not.
+- No `users` write accompanies the `expired` row in v1 (stored `plan` may still
+  read `'pro'`/`'active'` after expiry; the derived plan is what gates). An
+  admin reconcile that later labels stale rows `'expired'` is optional hygiene,
+  never a correctness dependency.
+- `renewalCount` / `totalSubscribedMs` are untouched by `expired` rows: they
+  count grants, and the expired window was already counted when it was granted.
 
 ## Timezone / Clock Rules
 
@@ -404,7 +444,12 @@ Admin: non-admin grant → forbidden; grant sets window columns per the
   to `totalSubscribedMs`, emits the audit log, and writes the atomic event row;
   revoke clears expiry, preserves history counters, writes a `revoke` event row,
   and derives Free on the next request; `durationDays` default 30, cap enforced,
-  invalid values 400.
+  invalid values 400. Expiry: first push/pull/profile that observes a lapsed
+  window writes exactly one `expired` row (`actor_id` null, fixed reason,
+  `previous_expires_at` = lapsed expiry) via `ON CONFLICT DO NOTHING` on the
+  partial unique key; concurrent observers converge; a failed log write never
+  fails the request and never trips the breaker; second and later observations
+  write nothing.
 Regression: `npm run typecheck`, `npm test`, `npm run build` all exit 0. This
   specification runs none of these.
 
