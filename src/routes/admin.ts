@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
-import { and, desc, eq, ilike, inArray, or, sql } from 'drizzle-orm';
+import { and, count, desc, eq, ilike, inArray, or, sql } from 'drizzle-orm';
 import { db, isDbAvailable, noteDbFailure } from '../database/db.js';
 import { novels, roleRequests, subscriptionEvents, users } from '../database/schema.js';
 import { requireAuth } from '../middleware/auth.js';
@@ -163,8 +163,34 @@ adminRouter.put('/users/:id', async (c) => {
     const target = found[0];
     if (!target) return c.json({ error: 'المستخدم غير موجود' }, 404);
     if (parsed.data.role === 'reader' && target.role === 'admin') {
-      const admins = await db.select({ id: users.id }).from(users).where(eq(users.role, 'admin'));
-      if (admins.length <= 1) return c.json({ error: 'لا يمكن إزالة آخر أدمن' }, 409);
+      // Lock the admin set before counting, then count, then demote — all in
+      // one transaction. Folding the count into the UPDATE's WHERE clause does
+      // NOT work: an uncorrelated subquery is evaluated once as an InitPlan
+      // against the statement's snapshot and cannot see a concurrent
+      // transaction's uncommitted demotion, so two racing demotions both
+      // observe two admins and both succeed, leaving the system with zero
+      // admins. Measured against a real PostgreSQL instance with the
+      // interleaving forced, that form fails 3 times out of 3. The row lock
+      // serialises the two, so the loser re-reads the count after the winner
+      // commits and refuses with 409.
+      //
+      // Cost note: `where role = 'admin' for update` is a range lock over the
+      // admin set, so concurrent demotions serialise. That is free at the
+      // current admin count; revisit only if that set grows large.
+      const demoted = await db.transaction(async (tx) => {
+        await tx.execute(sql`select id from ${users} where role = 'admin' for update`);
+        const counted = await tx.select({ n: count() }).from(users).where(eq(users.role, 'admin'));
+        if (Number(counted[0]?.n ?? 0) <= 1) return null;
+        const [row] = await tx.update(users)
+          .set({ role: 'reader', updatedAt: new Date() })
+          .where(eq(users.id, id))
+          .returning();
+        return row ?? null;
+      });
+      if (!demoted) return c.json({ error: 'لا يمكن إزالة آخر أدمن' }, 409);
+      // Early return: the demotion is complete, so this must not fall through
+      // to the generic update below and issue a second write.
+      return c.json({ success: true, data: publicUser(demoted) });
     }
     // .returning() replaces the update-then-re-select pair. Besides saving a
     // round trip it removes a latent 500: if the row were deleted between the

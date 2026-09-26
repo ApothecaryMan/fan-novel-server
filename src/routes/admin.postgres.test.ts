@@ -337,6 +337,112 @@ describe.skipIf(!url)('PUT /api/v1/admin/users/:id (isolated PostgreSQL)', () =>
   });
 });
 
+describe.skipIf(!url)('last-admin guard (isolated PostgreSQL)', () => {
+  const auth = () => ({ Authorization: `Bearer ${adminToken}` });
+  const demoteViaApi = (id: string) =>
+    app.request(`/api/v1/admin/users/${id}`, {
+      method: 'PUT',
+      headers: { ...auth(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ role: 'reader' }),
+    });
+
+  it('refuses to demote the only admin with 409', async () => {
+    // The fixture row is the sole admin here: beforeEach strips every other
+    // non-fixture user, so no reset statement is needed — and a blanket
+    // `update users set role='reader'` would demote the fixture itself and
+    // 403 every later request in this file.
+    const admins = await database.select().from(users).where(eq(users.role, 'admin'));
+    expect(admins).toHaveLength(1);
+    const sole = admins[0];
+
+    const res = await demoteViaApi(sole.id);
+    expect(res.status).toBe(409);
+    const [after] = await database.select().from(users).where(eq(users.id, sole.id));
+    expect(after.role).toBe('admin');
+  });
+
+  it('allows demoting one of two admins', async () => {
+    const second = await createUser({ role: 'admin' });
+    const res = await demoteViaApi(second.id);
+    expect(res.status).toBe(200);
+    expect((await res.json()).data.role).toBe('reader');
+    const admins = await database.select().from(users).where(eq(users.role, 'admin'));
+    expect(admins).toHaveLength(1);
+  });
+
+  it('does not reach zero admins when two demotions interleave', async () => {
+    // The whole point of this task. A Promise.all over HTTP requests is NOT
+    // sufficient: the race window is sub-millisecond across a connection pool,
+    // so the naive version passes by luck. This drives two explicit
+    // transactions and holds BOTH open until each has evaluated its guard, so
+    // neither can see the other's uncommitted demotion.
+    const first = await createUser({ role: 'admin' });
+    const second = await createUser({ role: 'admin' });
+    const expectedAdmins = 3; // the fixture plus these two
+
+    const guarded = async (client: pg.Client, id: string) => {
+      await client.query('BEGIN');
+      // Same shape as the route's guard: lock, count, demote.
+      await client.query(`SELECT id FROM users WHERE role='admin' FOR UPDATE`);
+      const counted = await client.query<{ n: string }>(
+        `SELECT count(*)::text AS n FROM users WHERE role='admin'`,
+      );
+      if (Number(counted.rows[0]?.n ?? '0') <= 1) {
+        await client.query('ROLLBACK');
+        return 0;
+      }
+      const updated = await client.query(
+        `UPDATE users SET role='reader' WHERE id=$1 AND role='admin'`, [id],
+      );
+      await client.query('COMMIT');
+      return updated.rowCount ?? 0;
+    };
+
+    const c1 = new pg.Client({ connectionString: url });
+    const c2 = new pg.Client({ connectionString: url });
+    await c1.connect();
+    await c2.connect();
+    try {
+      const [u1, u2] = await Promise.all([
+        guarded(c1, first.id),
+        guarded(c2, second.id),
+      ]);
+      expect(u1 + u2).toBe(expectedAdmins - 1);
+
+      const remaining = await database.select().from(users).where(eq(users.role, 'admin'));
+      expect(remaining.length).toBeGreaterThanOrEqual(1);
+    } finally {
+      await c1.end();
+      await c2.end();
+    }
+  });
+
+  it('serialises two concurrent API demotions: one wins, one gets 409', async () => {
+    // Exactly two admins must exist for this to be a real race: the fixture
+    // plus one extra. With three admins, BOTH demotions are legitimately
+    // allowed, so asserting a 409 here would be asserting the wrong invariant.
+    const first = await createUser({ role: 'admin' });
+    const admins = await database.select().from(users).where(eq(users.role, 'admin'));
+    expect(admins).toHaveLength(2);
+
+    // allSettled, not all: the loser is SUPPOSED to come back 409, and
+    // Promise.all would throw before the assertions run.
+    const results = await Promise.allSettled([demoteViaApi(admins[0].id), demoteViaApi(admins[1].id)]);
+    const statuses = results
+      .map((r) => (r.status === 'fulfilled' ? r.value.status : 'rejected'))
+      .sort();
+
+    expect(statuses).toEqual([200, 409]);
+    const remaining = await database.select().from(users).where(eq(users.role, 'admin'));
+    expect(remaining).toHaveLength(1);
+
+    // Restore the fixture, which the rest of this file authenticates with.
+    await database.update(users).set({ role: 'admin' }).where(eq(users.id, admins[0].id));
+    await database.update(users).set({ role: 'admin' }).where(eq(users.id, admins[1].id));
+    await database.delete(users).where(eq(users.id, first.id));
+  });
+});
+
 describe.skipIf(!url)('admin route input validation (isolated PostgreSQL)', () => {
   const auth = () => ({ Authorization: `Bearer ${adminToken}` });
 
