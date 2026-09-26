@@ -253,23 +253,91 @@ is a trusted manual admin/internal operation:
   existing admin/users budgets; no new middleware.
 - **Request (sketch):** `{ plan: 'pro' | 'free', durationDays?: number (default
   30, positive int, capped e.g. ≤ 365), reason?: string }`. No timestamps accepted
-  from the caller — the server computes `startedAt = Date.now()`,
-  `expiresAt = startedAt + durationDays * 86400_000`.
+  from the caller — the server computes all window timestamps.
+- **Renewal window math (normative):** let `now = Date.now()`,
+  `previousExpiresAt` be the stored `reading_stats_plan_expires_at` (may be
+  null), and `durationMs = durationDays * 86400_000`. Then:
+  `base = previousExpiresAt !== null && previousExpiresAt > now ? previousExpiresAt : now`;
+  `startedAt = now` (audit: when this grant was executed);
+  `expiresAt = base + durationMs`.
+  Rationale: an early renewal while Pro is still active extends from the current
+  expiry (`expiresAt + duration`), so remaining paid days are never lost; a
+  renewal after expiry (or on a Free row) starts from `now`. This is the same
+  `max(now, currentExpiry) + duration` rule: no silent forfeiture, no overlap
+  double-grant of wall-clock access.
 - **Effects:** `pro` sets `plan='pro'`, all window columns, `lastRenewedAt=now`,
-  `status='active'`, increments `renewalCount` by exactly one, and adds the
-  granted duration to `totalSubscribedMs`; `free` (revoke) sets `plan='free'`, clears `expiresAt`/
+  `status='active'`, increments `renewalCount` by exactly one, and adds exactly
+  `durationMs` to `totalSubscribedMs` (see § Total-subscribed-time definition);
+  `free` (revoke) sets `plan='free'`, clears `expiresAt`/
   `graceUntil` to `null`, sets `status='cancelled'` (or `'free'` for a plain
   downgrade — plan author picks one and pins it in tests), and leaves all reading
-  tables untouched. Renewal from any state overwrites (no stacking/extension
-  arithmetic in v1). Revocation preserves `renewalCount` and
+  tables untouched. Renewal extends per the window math above (never overwrites
+  a live expiry with `now + duration`). Revocation preserves `renewalCount` and
   `totalSubscribedMs` so cancelled accounts retain subscription history.
 - **Response:** `{ success: true, effectivePlan, planExpiresAt, planStatus }`
   (never auth anchors). **Audit:** structured log
-  `{ event: 'reading_plan.grant', userId, plan, durationDays, expiresAt, actor }`;
-  a dedicated audit table is optional and out of scope for v1.
+  `{ event: 'reading_plan.grant', userId, plan, durationDays, expiresAt, actor }`
+  **plus** a durable row in `subscription_events` (§ Subscription event log).
+  The log line alone is not the audit trail; the table is.
 - No billing/provider integration point, no webhook receiver, no invoice storage.
   If billing ever lands, it calls this same boundary; nothing in sync/profile
   needs to change.
+
+## Total-Subscribed-Time Definition (normative)
+
+`reading_stats_total_subscribed_ms` is the **cumulative granted duration**: the
+sum of `durationDays * 86400_000` over every successful Pro grant/renewal. It
+is **not** a deduplicated measure of wall-clock days the account spent Pro.
+
+Because renewal extends from `max(now, previousExpiresAt)`, successive grants
+do not overlap in wall-clock access, so in practice the sum equals the total
+granted Pro time. But dashboards and admin surfaces must label it exactly as
+"cumulative granted Pro time", never as "actual days spent Pro" — e.g. two
+manual 30-day grants in a row display as 60 days granted even if the second was
+issued one day after the first (the second window simply starts at the first
+window's expiry). It is display/audit only and never an entitlement input.
+
+## Subscription Event Log (normative)
+
+Counters alone cannot answer "who renewed this account, when, from what expiry
+to what expiry, and why". Every Pro grant/renew and every Pro revoke writes one
+row to a new append-only table in the same transaction as the `users` update:
+
+```text
+subscription_events
+  id                    serial primary key
+  user_id               uuid not null references users(id) on delete cascade
+  type                  varchar(16) not null check (type in ('grant','renew','revoke'))
+  actor_id              uuid references users(id) on delete set null
+  previous_expires_at   bigint
+  new_expires_at        bigint
+  duration_days         integer
+  reason                varchar(500)
+  occurred_at           bigint not null
+  received_at           timestamp not null default now()
+  index(user_id, occurred_at, id)
+```
+
+Rules:
+
+- `grant` = first Pro grant on a row with no live window; `renew` = Pro grant
+  while a live window exists or after a previous window (any repeat grant);
+  `revoke` = manual downgrade to Free. The very first grant and every later
+  grant both increment `renewalCount`; the type column preserves the
+  first-vs-repeat distinction for investigations.
+- `actor_id` is the admin/trusted operator that executed the grant (never the
+  subject user unless self-grant is an explicit future policy). Null only when
+  the actor row is unavailable; the structured log still carries the actor.
+- `previous_expires_at` / `new_expires_at` are the exact values before and after
+  the `users` update (null where absent). `duration_days` is the granted
+  duration for grant/renew, null for revoke. `reason` is the caller-supplied
+  reason verbatim (bounded, never auth material).
+- The event write and the `users` update commit atomically: a grant that fails
+  to log fails entirely, and a logged event always matches the stored window.
+- No event row is ever updated or deleted except by account deletion cascade.
+- Admin/read surfaces for events are out of scope for v1; the table exists so a
+  later investigation ("who renewed account X on date Y and why?") has a
+  complete answer without reconstructing it from counters.
 
 ## Timezone / Clock Rules
 
@@ -331,11 +399,12 @@ Contract (existing harness + seedable fake): expired-Pro push of a Pro-shaped
 Persistence: downgrade changes no reading-table row counts; renewal restores Pro
   aggregates over pre-expiry rows; queued-Pro retry after renewal is accepted
   (idempotency preserved, no duplicates).
-Admin: non-admin grant → forbidden; grant sets window columns, increments
-  `renewalCount`, adds the granted duration to `totalSubscribedMs`, and emits
-  the audit log; revoke clears expiry, preserves history counters, and derives
-  Free on the next request; `durationDays` default 30, cap enforced, invalid
-  values 400.
+Admin: non-admin grant → forbidden; grant sets window columns per the
+  `max(now, expiry)` rule, increments `renewalCount`, adds the granted duration
+  to `totalSubscribedMs`, emits the audit log, and writes the atomic event row;
+  revoke clears expiry, preserves history counters, writes a `revoke` event row,
+  and derives Free on the next request; `durationDays` default 30, cap enforced,
+  invalid values 400.
 Regression: `npm run typecheck`, `npm test`, `npm run build` all exit 0. This
   specification runs none of these.
 
@@ -373,13 +442,13 @@ Schema reserves `trialStartedAt` / `trialEndsAt`; policy disables them:
 
 | File | Proposed change |
 |---|---|
-| `src/database/schema.ts` | Add the ten columns + `plan_status` check; keep existing `readingStatsPlan` default/check. |
+| `src/database/schema.ts` | Add the ten columns + `plan_status` check + new `subscription_events` table with type check and `(user_id, occurred_at, id)` index; keep existing `readingStatsPlan` default/check. |
 | `drizzle/*` | Generated migration for the above + documented backfill for existing Pro rows. |
 | `src/features/readingSync/freeStore.ts` | Extend `authoritativePlan` (or add `effectiveReadingPlan(row, nowMs)`) per § Effective-plan algorithm; fail closed. |
 | `src/routes/sync.ts` | Extend `SYNC_USER_COLUMNS` + `v2PlanProbe` select; derive in `pushV2`/`pullV2`; keep parse→resolve→409 order; `plan` in responses = derived. |
 | `src/routes/profile.ts` | Extend `PROFILE_USER_COLUMNS` (read-only, never projected); derive in the `readingStatsVersion=2` branch; legacy branch untouched. |
-| Admin surface (new or existing admin route) | Manual grant/revoke behind admin authz + audit log per § Renewal. |
-| Tests | Effective-plan matrix, probe/parse/409 cases, profile Free-after-expiry, downgrade-preserves-data, admin authz/defaults. |
+| Admin surface (new or existing admin route) | Manual grant/revoke behind admin authz + audit log + atomic `subscription_events` row per § Renewal and § Subscription event log. |
+| Tests | Effective-plan matrix, probe/parse/409 cases, profile Free-after-expiry, downgrade-preserves-data, admin authz/defaults, renewal-extension math (`max(now, expiry)`), total-subscribed-ms accumulation, event-row atomicity and field values. |
 
 `contracts.ts`, `calculations.ts`, `proStore.ts`/`proProtocol.ts` shapes, legacy v1
 paths, and `wrangler.toml`/`worker.ts` need no functional edits for this design.
