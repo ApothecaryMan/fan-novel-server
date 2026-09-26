@@ -54,11 +54,21 @@ describe.skipIf(!url)('Free reading plan sync (isolated PostgreSQL)', () => {
   const nextSubject = () => `${FIXTURE_PREFIX}${process.pid.toString(36)}-${(counter += 1)}`;
   async function createUser(plan: 'free' | 'pro' = 'free') {
     const externalId = nextSubject();
+    const now = Date.now();
     const [row] = await database.insert(users).values({
       externalId,
       email: `${externalId}@test.local`,
       username: externalId,
       readingStatsPlan: plan,
+      ...(plan === 'pro' ? {
+        readingStatsPlanStartedAt: now,
+        readingStatsPlanExpiresAt: now + 30 * 86_400_000,
+        readingStatsLastRenewedAt: now,
+        readingStatsPlanDurationDays: 30,
+        readingStatsPlanStatus: 'active' as const,
+        readingStatsRenewalCount: 1,
+        readingStatsTotalSubscribedMs: 30 * 86_400_000,
+      } : {}),
     }).returning();
     const token = await signToken({ id: externalId, email: `${externalId}@test.local`, role: 'reader' });
     return { row, externalId, token };
@@ -498,8 +508,9 @@ describe.skipIf(!url)('Free reading plan sync (isolated PostgreSQL)', () => {
     expect(await storedRows(free.row.id)).toHaveLength(0);
   });
 
-  // The legacy channel is plan-blind by design and must keep writing the same
-  // rows it always did: the v2 plan gate never touches v1 library/history.
+  // The legacy channel keeps wire shapes but gates Pro values per § Legacy v1
+  // gating: a Free-derived caller stores readDay '' for history (sessions get
+  // FREE_SESSION_SAFE_DEFAULTS). Library merge rules are untouched.
   it('keeps the legacy v1 library and history writes unchanged', async () => {
     const { row, externalId, token } = await createUser();
     const legacyPush = () => request('/sync/push', {
@@ -520,7 +531,7 @@ describe.skipIf(!url)('Free reading plan sync (isolated PostgreSQL)', () => {
       lastReadChapterId: 7, lastReadChapterNumber: 7, progressPercent: 40 });
     const [history] = await database.select().from(schema.readingHistory).where(eq(schema.readingHistory.userId, row.id));
     expect(history).toMatchObject({ novelId: '42', novelTitle: 'A Novel', novelAuthor: 'An Author', category: 'Fantasy',
-      chapterId: 7, chapterNumber: 7, readDay: '2026-09-20', readAt: 1782000000000 });
+      chapterId: 7, chapterNumber: 7, readDay: '', readAt: 1782000000000 });
 
     // The merge rules are untouched: an identical replay writes nothing.
     const replay = await legacyPush();

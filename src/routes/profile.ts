@@ -1,11 +1,11 @@
 import { Hono } from 'hono';
 import { and, count, eq, isNull, sql } from 'drizzle-orm';
 import { db, isDbAvailable } from '../database/db.js';
-import { comments, readingHistory, readingSessions, userLibrary, users } from '../database/schema.js';
+import { comments, readingHistory, readingSessions, subscriptionEvents, userLibrary, users } from '../database/schema.js';
 import { requireAuth } from '../middleware/auth.js';
 import { getEnv } from '../config/env.js';
 import { findMemoryUser } from './auth.js';
-import { authoritativePlan, loadFreeStatsForUser } from '../features/readingSync/freeStore.js';
+import { effectiveReadingPlan, loadFreeStatsForUser } from '../features/readingSync/freeStore.js';
 import { freeProjection } from '../features/readingSync/freeProtocol.js';
 import { proProjection } from '../features/readingSync/contracts.js';
 import { loadProStats } from '../features/readingSync/proStore.js';
@@ -130,6 +130,7 @@ const PROFILE_USER_COLUMNS = {
   createdAt: users.createdAt,
   // Plan gate for the versioned body; never projected to a client.
   readingStatsPlan: users.readingStatsPlan,
+  readingStatsPlanExpiresAt: users.readingStatsPlanExpiresAt,
 } as const;
 
 // Opt-in query for the plan-scoped reading statistics projection. Absent keeps
@@ -182,7 +183,7 @@ profileRouter.get('/me/profile', async (c, next) => {
     // for Pro. Not running the aggregate queries at all is also cheaper than
     // building the payload and dropping keys afterwards.
     if (version.requested) {
-      const plan = authoritativePlan(row);
+      const plan = effectiveReadingPlan(row, Date.now());
       if (plan === 'pro') {
         const yearRaw = Number(c.req.query('readingStatsYear'));
         const asOfDay = c.req.query('readingStatsAsOf');
@@ -197,12 +198,34 @@ profileRouter.get('/me/profile', async (c, next) => {
           })),
         });
       }
+      const freeStats = await loadFreeStatsForUser(row.id);
+      // Natural-expiry audit: best-effort, never fails the request, never
+      // trips the breaker. Null/corrupt expiries skip (fail-closed already).
+      if (row.readingStatsPlan === 'pro'
+        && typeof row.readingStatsPlanExpiresAt === 'number'
+        && Number.isSafeInteger(row.readingStatsPlanExpiresAt)
+        && Date.now() >= row.readingStatsPlanExpiresAt) {
+        try {
+          await db.insert(subscriptionEvents).values({
+            userId: row.id,
+            type: 'expired',
+            actorId: null,
+            previousExpiresAt: row.readingStatsPlanExpiresAt,
+            newExpiresAt: null,
+            durationDays: null,
+            reason: 'system: natural expiry',
+            occurredAt: Date.now(),
+          }).onConflictDoNothing();
+        } catch {
+          console.warn(JSON.stringify({ event: 'profile.plan_expired_log', outcome: 'unavailable' }));
+        }
+      }
       return c.json({
         success: true,
         user: toPublic(row),
         plan,
         readingStatsVersion: version.version,
-        readingStats: freeProjection(await loadFreeStatsForUser(row.id)),
+        readingStats: freeProjection(freeStats),
       });
     }
 
@@ -227,19 +250,21 @@ profileRouter.get('/me/profile', async (c, next) => {
     const levelInfo = legacyLevelInfo(getLevelFromSeconds(totalSeconds));
     const streakDays = streakFromReadDays(dayRows.map((r) => r.readDay).filter(Boolean));
 
-    // ---- PLAN GATE (legacy aggregates — not implemented yet) ---------------
-    // `totalWords` and `streakDays` (with `streakDays` needing the per-row
-    // `readDay` read above) are Pro reading dimensions, and this legacy payload
-    // is plan-blind: it serves them to a Free account exactly as it always has.
-    // When Pro push lands, these aggregates must be plan-gated on the
-    // authoritative `users.reading_stats_plan` — a Free account has no words,
-    // streaks or WPM to report, and the two day/session aggregate reads should
-    // not run for it at all. The versioned body above is the plan-scoped
-    // reference implementation; do not let this branch drift from it silently.
+    // ---- PLAN GATE (legacy aggregates) ------------------------------------
+    // Derived per § Legacy v1 gating: keys stay byte-identical, Pro values are
+    // zeroed for Free-derived callers. totalSeconds + level ladder stay live.
+    const legacyFree = effectiveReadingPlan(row, Date.now()) !== 'pro';
     const legacyPayload = {
       success: true,
       user: toPublic(row),
-      stats: { library, history, sessions, totalSeconds, totalWords, streakDays },
+      stats: {
+        library,
+        history,
+        sessions,
+        totalSeconds,
+        totalWords: legacyFree ? 0 : totalWords,
+        streakDays: legacyFree ? 0 : streakDays,
+      },
       ...levelInfo,
     };
     return c.json(legacyPayload);

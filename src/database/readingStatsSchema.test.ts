@@ -8,6 +8,7 @@ import {
   readingHistory,
   readingNovels,
   readingSessions,
+  subscriptionEvents,
   userLibrary,
   users,
 } from './schema.js';
@@ -137,6 +138,16 @@ describe('reading statistics database schema', () => {
       bio: column('varchar(500)', false),
       role: column('varchar(20)', true, { hasDefault: true, default: 'reader' }),
       reading_stats_plan: column('varchar(10)', true, { hasDefault: true, default: 'free' }),
+      reading_stats_plan_started_at: column('bigint', false),
+      reading_stats_plan_expires_at: column('bigint', false),
+      reading_stats_trial_started_at: column('bigint', false),
+      reading_stats_trial_ends_at: column('bigint', false),
+      reading_stats_last_renewed_at: column('bigint', false),
+      reading_stats_grace_until: column('bigint', false),
+      reading_stats_plan_duration_days: column('integer', true, { hasDefault: true, default: 30 }),
+      reading_stats_plan_status: column('varchar(20)', true, { hasDefault: true, default: 'free' }),
+      reading_stats_renewal_count: column('integer', true, { hasDefault: true, default: 0 }),
+      reading_stats_total_subscribed_ms: column('bigint', true, { hasDefault: true, default: 0 }),
       is_author: column('boolean', true, { hasDefault: true, default: false }),
       is_translator: column('boolean', true, { hasDefault: true, default: false }),
       created_at: column('timestamp', true, { hasDefault: true }),
@@ -242,6 +253,19 @@ describe('reading statistics database schema', () => {
       updated_at: column('bigint', true),
       received_at: column('timestamp', true, { hasDefault: true }),
     });
+
+    expectColumns(subscriptionEvents, {
+      id: column('integer', true, { primary: true, hasDefault: true, identity: 'always' }),
+      user_id: column('uuid', true),
+      type: column('varchar(16)', true),
+      actor_id: column('uuid', false),
+      previous_expires_at: column('bigint', false),
+      new_expires_at: column('bigint', false),
+      duration_days: column('integer', false),
+      reason: column('varchar(500)', false),
+      occurred_at: column('bigint', true),
+      received_at: column('timestamp', true, { hasDefault: true }),
+    });
   });
 
   it('keeps column uniqueness, check constraints, and foreign-key actions explicit', () => {
@@ -253,9 +277,12 @@ describe('reading statistics database schema', () => {
     expect(uniqueColumns(readingNovels)).toEqual([]);
 
     const userChecks = checksByName(users);
-    expect(Object.keys(userChecks)).toEqual(['users_reading_stats_plan_check']);
+    expect(Object.keys(userChecks).sort()).toEqual(['users_reading_stats_plan_check', 'users_reading_stats_plan_status_check']);
     expect(userChecks.users_reading_stats_plan_check).toMatch(
       /"reading_stats_plan" in \('free', 'pro'\)/,
+    );
+    expect(userChecks.users_reading_stats_plan_status_check).toMatch(
+      /"reading_stats_plan_status" in \('free', 'active', 'expired', 'cancelled'\)/,
     );
     const chapterStateChecks = checksByName(readingChapterState);
     expect(Object.keys(chapterStateChecks)).toEqual(['reading_chapter_state_origin_check']);
@@ -263,6 +290,11 @@ describe('reading statistics database schema', () => {
       /"origin" in \('manual', 'snapshot'\)/,
     );
     expect(checksByName(readingNovels)).toEqual({});
+    const eventChecks = checksByName(subscriptionEvents);
+    expect(Object.keys(eventChecks)).toEqual(['subscription_events_type_check']);
+    expect(eventChecks.subscription_events_type_check).toMatch(
+      /"type" in \('grant', 'renew', 'revoke', 'expired'\)/,
+    );
 
     expect(foreignKeysByName(users)).toEqual({});
     expect(foreignKeysByName(userLibrary)).toEqual({
@@ -307,6 +339,22 @@ describe('reading statistics database schema', () => {
         foreignTable: 'users',
         foreignColumns: ['id'],
         onDelete: 'cascade',
+        onUpdate: 'no action',
+      },
+    });
+    expect(foreignKeysByName(subscriptionEvents)).toEqual({
+      subscription_events_user_id_users_id_fk: {
+        columns: ['user_id'],
+        foreignTable: 'users',
+        foreignColumns: ['id'],
+        onDelete: 'cascade',
+        onUpdate: 'no action',
+      },
+      subscription_events_actor_id_users_id_fk: {
+        columns: ['actor_id'],
+        foreignTable: 'users',
+        foreignColumns: ['id'],
+        onDelete: 'set null',
         onUpdate: 'no action',
       },
     });
@@ -360,6 +408,10 @@ describe('reading statistics database schema', () => {
     });
     expect(indexesByName(readingNovels)).toEqual({
       reading_novels_user_novel_idx: { unique: true, columns: ['user_id', 'novel_id'] },
+    });
+    expect(indexesByName(subscriptionEvents)).toEqual({
+      subscription_events_user_occurred_idx: { unique: false, columns: ['user_id', 'occurred_at', 'id'] },
+      subscription_events_expired_unique_idx: { unique: true, columns: ['user_id', 'previous_expires_at'] },
     });
   });
 

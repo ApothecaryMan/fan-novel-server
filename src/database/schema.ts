@@ -17,12 +17,45 @@ export const users = pgTable('users', {
   bio: varchar('bio', { length: 500 }),
   role: varchar('role', { length: 20 }).default('reader').notNull(), // 'reader' | 'admin'
   readingStatsPlan: varchar('reading_stats_plan', { length: 10 }).default('free').notNull(),
+  readingStatsPlanStartedAt: bigint('reading_stats_plan_started_at', { mode: 'number' }),
+  readingStatsPlanExpiresAt: bigint('reading_stats_plan_expires_at', { mode: 'number' }),
+  readingStatsTrialStartedAt: bigint('reading_stats_trial_started_at', { mode: 'number' }),
+  readingStatsTrialEndsAt: bigint('reading_stats_trial_ends_at', { mode: 'number' }),
+  readingStatsLastRenewedAt: bigint('reading_stats_last_renewed_at', { mode: 'number' }),
+  readingStatsGraceUntil: bigint('reading_stats_grace_until', { mode: 'number' }),
+  readingStatsPlanDurationDays: integer('reading_stats_plan_duration_days').default(30).notNull(),
+  readingStatsPlanStatus: varchar('reading_stats_plan_status', { length: 20 }).default('free').notNull(),
+  readingStatsRenewalCount: integer('reading_stats_renewal_count').default(0).notNull(),
+  readingStatsTotalSubscribedMs: bigint('reading_stats_total_subscribed_ms', { mode: 'number' }).default(0).notNull(),
   isAuthor: boolean('is_author').default(false).notNull(),
   isTranslator: boolean('is_translator').default(false).notNull(),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull()
 }, (table) => ({
-  readingStatsPlanCheck: check('users_reading_stats_plan_check', sql`${table.readingStatsPlan} in ('free', 'pro')`)
+  readingStatsPlanCheck: check('users_reading_stats_plan_check', sql`${table.readingStatsPlan} in ('free', 'pro')`),
+  readingStatsPlanStatusCheck: check('users_reading_stats_plan_status_check', sql`${table.readingStatsPlanStatus} in ('free', 'active', 'expired', 'cancelled')`),
+}));
+
+// 1b. Pro subscription event log (append-only audit; never updated).
+// Counters on users answer "how much"; these rows answer "who, when, from
+// what expiry to what expiry, and why". Grant/renew/revoke writes commit
+// atomically with the users update; expired rows are best-effort idempotent
+// observations (partial unique on user + previous expiry where type=expired).
+export const subscriptionEvents = pgTable('subscription_events', {
+  id: serial('id').primaryKey(),
+  userId: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
+  type: varchar('type', { length: 16 }).notNull(),
+  actorId: uuid('actor_id').references(() => users.id, { onDelete: 'set null' }),
+  previousExpiresAt: bigint('previous_expires_at', { mode: 'number' }),
+  newExpiresAt: bigint('new_expires_at', { mode: 'number' }),
+  durationDays: integer('duration_days'),
+  reason: varchar('reason', { length: 500 }),
+  occurredAt: bigint('occurred_at', { mode: 'number' }).notNull(),
+  receivedAt: timestamp('received_at').defaultNow().notNull(),
+}, (table) => ({
+  subscriptionEventsTypeCheck: check('subscription_events_type_check', sql`${table.type} in ('grant', 'renew', 'revoke', 'expired')`),
+  subscriptionEventsUserOccurredIdx: index('subscription_events_user_occurred_idx').on(table.userId, table.occurredAt, table.id),
+  subscriptionEventsExpiredUniqueIdx: uniqueIndex('subscription_events_expired_unique_idx').on(table.userId, table.previousExpiresAt).where(sql`${table.type} = 'expired'`),
 }));
 
 // 2. جدول الروايات (Novels Table)

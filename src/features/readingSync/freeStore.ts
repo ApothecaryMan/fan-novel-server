@@ -86,6 +86,25 @@ export function authoritativePlan(user: { readingStatsPlan?: unknown } | null | 
   return normalizeReadingPlan(user?.readingStatsPlan);
 }
 
+/**
+ * Derive the effective plan from a resolved user row and server time.
+ *
+ * Single authority for push, pull, and profile. `plan` is the granted tier,
+ * `planExpiresAt` is the entitlement clock (exclusive: nowMs >= expiresAt is
+ * Free). Fail closed: a Pro flag without a safe-integer expiry grants nothing.
+ * `graceUntil` / trial columns are reserved and never consulted here;
+ * `planStatus`, counters, and durations are display/audit only.
+ */
+export function effectiveReadingPlan(
+  user: { readingStatsPlan?: unknown; readingStatsPlanExpiresAt?: unknown } | null | undefined,
+  nowMs: number,
+): ReadingPlan {
+  if (normalizeReadingPlan(user?.readingStatsPlan) !== 'pro') return 'free';
+  const expiresAt = (user as { readingStatsPlanExpiresAt?: unknown } | null | undefined)?.readingStatsPlanExpiresAt;
+  if (typeof expiresAt !== 'number' || !Number.isSafeInteger(expiresAt)) return 'free';
+  return nowMs < expiresAt ? 'pro' : 'free';
+}
+
 const sessionColumns = {
   clientSessionId: readingSessions.clientSessionId,
   novelId: readingSessions.novelId,

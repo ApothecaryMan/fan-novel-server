@@ -2,11 +2,12 @@ import { Hono, type Context } from 'hono';
 import { and, eq, gt } from 'drizzle-orm';
 import { z } from 'zod';
 import { db, isDbAvailable, noteDbFailure } from '../database/db.js';
-import { users, userLibrary, readingHistory, readingSessions } from '../database/schema.js';
+import { users, userLibrary, readingHistory, readingSessions, subscriptionEvents } from '../database/schema.js';
 import { verifySubject } from '../middleware/auth.js';
 import { getEnv } from '../config/env.js';
 import {
-  authoritativePlan,
+  effectiveReadingPlan,
+  FREE_SESSION_SAFE_DEFAULTS,
   loadFreeStatsForUser,
   storeFreeSessions,
 } from '../features/readingSync/freeStore.js';
@@ -119,9 +120,10 @@ const SYNC_USER_COLUMNS = {
   id: users.id,
   externalId: users.externalId,
   readingStatsPlan: users.readingStatsPlan,
+  readingStatsPlanExpiresAt: users.readingStatsPlanExpiresAt,
 } as const;
 
-type SyncUser = { id: string; externalId: string | null; readingStatsPlan: string | null };
+type SyncUser = { id: string; externalId: string | null; readingStatsPlan: string | null; readingStatsPlanExpiresAt: number | null };
 
 async function provisionUser(externalId: string): Promise<SyncUser | undefined> {
   const [existing] = await db.select(SYNC_USER_COLUMNS).from(users).where(eq(users.externalId, externalId)).limit(1);
@@ -240,17 +242,45 @@ async function v2PlanProbe(body: unknown): Promise<{ plan: ReadingPlan | null } 
   if (externalId === null) return { plan: null };
   try {
     const [row] = await db
-      .select({ readingStatsPlan: users.readingStatsPlan })
+      .select({ readingStatsPlan: users.readingStatsPlan, readingStatsPlanExpiresAt: users.readingStatsPlanExpiresAt })
       .from(users)
       .where(eq(users.externalId, externalId))
       .limit(1);
-    return { plan: row ? authoritativePlan(row) : null };
+    return { plan: row ? effectiveReadingPlan(row, Date.now()) : null };
   } catch {
     console.warn(JSON.stringify({ event: 'sync.plan_probe', outcome: 'unavailable' }));
     return { failure: storageUnavailableResponse() };
   }
 }
 
+/**
+ * Best-effort natural-expiry audit trace. Fires when a request derives Free
+ * from a lapsed Pro window. Never fails the request, never trips the storage
+ * breaker, never calls noteDbFailure(). Null/corrupt expiries skip silently
+ * (derivation already fails closed). No-target ON CONFLICT DO NOTHING keeps
+ * concurrent first-observers to one row without needing a partial-index
+ * arbiter in the query.
+ */
+async function logExpiredObservation(user: SyncUser): Promise<void> {
+  if (user.readingStatsPlan !== 'pro') return;
+  const prev = user.readingStatsPlanExpiresAt;
+  if (typeof prev !== 'number' || !Number.isSafeInteger(prev)) return;
+  if (Date.now() < prev) return;
+  try {
+    await db.insert(subscriptionEvents).values({
+      userId: user.id,
+      type: 'expired',
+      actorId: null,
+      previousExpiresAt: prev,
+      newExpiresAt: null,
+      durationDays: null,
+      reason: 'system: natural expiry',
+      occurredAt: Date.now(),
+    }).onConflictDoNothing();
+  } catch {
+    console.warn(JSON.stringify({ event: 'sync.plan_expired_log', outcome: 'unavailable' }));
+  }
+}
 /**
  * Resolve the v2 account and fail closed on its two failure modes. Shared by
  * push and pull so both surfaces answer the same normalized 401/503.
@@ -277,7 +307,7 @@ async function pushV2(c: Context, body: unknown, authedSub: string | null) {
 
   const user = await v2SyncUser(c, payload.user.externalId);
   if (user instanceof Response) return user;
-  const plan = authoritativePlan(user);
+  const plan = effectiveReadingPlan(user, Date.now());
   if ((plan === 'pro') !== proPayload) {
     return fail(c, syncFailure(409, 'plan_changed', 'reading plan changed; refresh and retry'));
   }
@@ -301,12 +331,14 @@ async function pushV2(c: Context, body: unknown, authedSub: string | null) {
     if (write.conflictingSessionIds.length > 0) {
       return fail(c, sessionConflictResponse(write.conflictingSessionIds, write.acceptedSessionIds));
     }
-    return c.json(buildFreePushResponse({
+    const response = buildFreePushResponse({
       stats: await loadFreeStatsForUser(user.id),
       serverNow: Date.now(),
       appliedSessions: write.applied,
       acceptedSessionIds: write.acceptedSessionIds,
-    }));
+    });
+    if (plan === 'free') await logExpiredObservation(user);
+    return c.json(response);
   } catch {
     noteDbFailure();
     return fail(c, storageUnavailableResponse());
@@ -329,7 +361,7 @@ async function pullV2(c: Context, body: unknown, authedSub: string | null) {
 
   const user = await v2SyncUser(c, payload.user.externalId);
   if (user instanceof Response) return user;
-  const plan = authoritativePlan(user);
+  const plan = effectiveReadingPlan(user, Date.now());
   if ((plan === 'pro') !== proPayload) {
     return fail(c, syncFailure(409, 'plan_changed', 'reading plan changed; refresh and retry'));
   }
@@ -339,7 +371,9 @@ async function pullV2(c: Context, body: unknown, authedSub: string | null) {
       return c.json(await pullProData(user.id, (payload as ProReadingSyncPull).readingStats));
     }
     if (plan === 'pro') return fail(c, syncFailure(400, 'invalid_sync_payload', 'pro pull requires readingStats cursors'));
-    return c.json(buildFreePullResponse(await loadFreeStatsForUser(user.id)));
+    const response = buildFreePullResponse(await loadFreeStatsForUser(user.id));
+    if (plan === 'free') await logExpiredObservation(user);
+    return c.json(response);
   } catch {
     console.warn(JSON.stringify({ event: 'sync.pro_read', outcome: 'unavailable' }));
     return fail(c, storageUnavailableResponse());
@@ -397,6 +431,11 @@ syncRouter.post('/push', async (c) => {
   const now = Date.now();
   const user = await resolveLegacySyncUser(c, externalId);
   if (user instanceof Response) return user;
+  // Derived-plan gate (§ Legacy v1 gating): owner check ran before resolve;
+  // derivation runs on the freshly resolved row. Free-derived callers store
+  // safe defaults for Pro dimensions instead of client-sent values.
+  const legacyPlan = effectiveReadingPlan(user, now);
+  const legacyFree = legacyPlan !== 'pro';
 
   let appliedLibrary = 0;
   for (const e of legacyBody.library ?? []) {
@@ -477,7 +516,7 @@ syncRouter.post('/push', async (c) => {
         chapterNumber: num(e.chapterNumber),
         chapterTitle: strDef(e.chapterTitle),
         progressPercent: num(e.progressPercent),
-        readDay: strDef(e.readDay),
+        readDay: legacyFree ? '' : strDef(e.readDay),
         readAt,
         updatedAt
       };
@@ -487,19 +526,10 @@ syncRouter.post('/push', async (c) => {
     }
   }
 
-  // ---- PLAN GATE (Pro push — not implemented yet) --------------------------
-  // `words`, `minuteOfDay`, `readDay` and `genre` are the Pro reading
-  // dimensions, and the legacy v1 channel above is plan-blind: it stores exactly
-  // what the client sent. When Pro push lands, THIS write must be plan-gated on
-  // the authoritative `users.reading_stats_plan === 'pro'`, and a Free row must
-  // keep the inert defaults plus `proFieldsPresent = false` that
-  // features/readingSync/freeStore.ts writes. Until then a Free account can
-  // keep back-filling Pro aggregates (words, WPM, streaks, hourly/genre
-  // distribution) through the permissive v1 schema — precisely the evidence the
-  // v2 contract refuses to store — so the future Pro projections would read a
-  // history that a Free client wrote. The v2 Free channel above is the
-  // plan-gated reference implementation; do not let the legacy loop diverge
-  // from it unnoticed when Pro lands.
+  // ---- PLAN GATE (legacy v1 sessions) -------------------------------------
+  // Derived above: a Free-derived caller stores FREE_SESSION_SAFE_DEFAULTS
+  // for the four Pro dimensions (words, minuteOfDay, readDay, genre), matching
+  // what features/readingSync/freeStore.ts writes on the v2 Free channel.
   let appliedSessions = 0;
   for (const e of legacyBody.sessions ?? []) {
     const key = typeof e.clientSessionId === 'string' ? e.clientSessionId : '';
@@ -512,10 +542,12 @@ syncRouter.post('/push', async (c) => {
         novelId: String(e.novelId ?? ''),
         chapterId: num(e.chapterId),
         seconds: num(e.seconds),
-        words: num(e.words),
-        minuteOfDay: num(e.minuteOfDay),
-        readDay: strDef(e.readDay),
-        genre: strDef(e.genre),
+        ...(legacyFree ? FREE_SESSION_SAFE_DEFAULTS : {
+          words: num(e.words),
+          minuteOfDay: num(e.minuteOfDay),
+          readDay: strDef(e.readDay),
+          genre: strDef(e.genre),
+        }),
         ts: num(e.ts, now)
       })
       .onConflictDoNothing({ target: [readingSessions.userId, readingSessions.clientSessionId] })
@@ -523,6 +555,7 @@ syncRouter.post('/push', async (c) => {
     if ((r as unknown[]).length > 0) appliedSessions++;
   }
 
+  if (legacyFree) await logExpiredObservation(user);
   return c.json({ success: true, applied: { library: appliedLibrary, history: appliedHistory, sessions: appliedSessions }, serverNow: now });
 });
 
@@ -548,17 +581,12 @@ syncRouter.post('/pull', async (c) => {
   const since = num(legacyBody.since, 0);
   const user = await resolveLegacySyncUser(c, externalId);
   if (user instanceof Response) return user;
+  // Derived-plan gate (§ Legacy v1 gating): values gated, shapes unchanged.
+  const pullFree = effectiveReadingPlan(user, Date.now()) !== 'pro';
 
-  // ---- PLAN GATE (Pro pull — not implemented yet) --------------------------
-  // The read side is plan-blind for the same reason the write side is (see the
-  // push comment above): this projection hands back every stored `words`,
-  // `minuteOfDay`, `readDay` and `genre` regardless of
-  // `users.reading_stats_plan`. Pro pull must therefore plan-gate THIS read the
-  // same way it gates the v1 write, or a Free account keeps a round-trip channel
-  // that returns the Pro aggregates the v2 contract refuses to store and the
-  // v2 pull refuses to serve. Filter/summarize per plan; never strip keys after
-  // the fact. The `sessions` rows themselves stay plan-blind (that is the v1
-  // contract) — only the Pro-dimension projection inside them is the gate.
+  // ---- PLAN GATE (v1 pull projection) ---------------------------------------
+  // Session/history rows stay stored as-is; only the Pro-dimension values in
+  // this projection are gated for Free-derived callers.
   const library = await db
     .select()
     .from(userLibrary)
@@ -577,6 +605,8 @@ syncRouter.post('/pull', async (c) => {
     .where(and(eq(readingSessions.userId, user.id), gt(readingSessions.ts, since)))
     .orderBy(readingSessions.ts)
     .limit(5000);
+
+  if (pullFree) await logExpiredObservation(user);
 
   return c.json({
     success: true,
@@ -605,7 +635,7 @@ syncRouter.post('/pull', async (c) => {
       chapterNumber: r.chapterNumber,
       chapterTitle: r.chapterTitle,
       progressPercent: r.progressPercent,
-      readDay: r.readDay,
+      readDay: pullFree ? '' : r.readDay,
       readAt: r.readAt,
       updatedAt: r.updatedAt
     })),
@@ -614,10 +644,12 @@ syncRouter.post('/pull', async (c) => {
       novelId: r.novelId,
       chapterId: r.chapterId,
       seconds: r.seconds,
-      words: r.words,
-      minuteOfDay: r.minuteOfDay,
-      readDay: r.readDay,
-      genre: r.genre,
+      ...(pullFree ? FREE_SESSION_SAFE_DEFAULTS : {
+        words: r.words,
+        minuteOfDay: r.minuteOfDay,
+        readDay: r.readDay,
+        genre: r.genre,
+      }),
       ts: r.ts
     }))
   });

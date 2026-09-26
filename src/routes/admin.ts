@@ -1,10 +1,11 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
-import { and, count, desc, eq, ilike, or } from 'drizzle-orm';
+import { and, count, desc, eq, ilike, inArray, or } from 'drizzle-orm';
 import { db, isDbAvailable, noteDbFailure } from '../database/db.js';
-import { novels, roleRequests, users } from '../database/schema.js';
+import { novels, roleRequests, subscriptionEvents, users } from '../database/schema.js';
 import { requireAuth } from '../middleware/auth.js';
 import { getCaller } from '../middleware/ownership.js';
+import { effectiveReadingPlan } from '../features/readingSync/freeStore.js';
 import { parseAdminUserRoles } from './adminUserFilters.js';
 
 export const adminRouter = new Hono();
@@ -148,6 +149,111 @@ adminRouter.put('/requests/:id', async (c) => {
   } catch (err) {
     console.error('[admin] decide failed', err); noteDbFailure();
     return c.json({ error: 'فشل البت في الطلب' }, 500);
+  }
+});
+
+const readingPlanGrantSchema = z.object({
+  plan: z.enum(['pro', 'free']),
+  durationDays: z.number().int().positive().max(365).optional().default(30),
+  reason: z.string().trim().min(1).max(500),
+});
+
+// POST /api/v1/admin/users/:id/reading-plan — manual grant/revoke (no billing).
+// Row-locked: SELECT FOR UPDATE inside the tx serializes concurrent grants so
+// the second reads the first grant's expiry as its base (max(now, expiry)).
+// Retries are additive by contract in v1: each grant intent extends again.
+adminRouter.post('/users/:id/reading-plan', async (c) => {
+  if (!isDbAvailable()) return c.json({ error: 'database not configured' }, 503);
+  const parsed = readingPlanGrantSchema.safeParse(await c.req.json().catch(() => null));
+  if (!parsed.success) return c.json({ error: 'invalid reading plan grant', issues: parsed.error.issues }, 400);
+  const id = c.req.param('id');
+  const caller = c.get('caller') as { row?: { id?: string } | null } | undefined;
+  const actorId: string | null = caller?.row?.id ?? null;
+  const now = Date.now();
+  const durationDays = parsed.data.durationDays ?? 30;
+  const durationMs = durationDays * 86_400_000;
+  const reason = parsed.data.reason;
+  try {
+    const result = await db.transaction(async (tx) => {
+      const locked = await tx.select().from(users).where(eq(users.id, id)).for('update').limit(1);
+      const target = locked[0] as typeof users.$inferSelect | undefined;
+      if (!target) return null;
+      if (parsed.data.plan === 'free') {
+        const [updated] = await tx.update(users).set({
+          readingStatsPlan: 'free',
+          readingStatsPlanExpiresAt: null,
+          readingStatsGraceUntil: null,
+          readingStatsPlanStatus: 'cancelled',
+          updatedAt: new Date(),
+        }).where(eq(users.id, id)).returning();
+        await tx.insert(subscriptionEvents).values({
+          userId: id,
+          type: 'revoke',
+          actorId,
+          previousExpiresAt: target.readingStatsPlanExpiresAt ?? null,
+          newExpiresAt: null,
+          durationDays: null,
+          reason,
+          occurredAt: now,
+        });
+        return { updated, eventType: 'revoke' as const, expiresAt: null as number | null };
+      }
+      // Coerce corrupt expiry fail-closed: only a safe integer in the future
+      // counts as a live window; anything else renews from now.
+      const prev = target.readingStatsPlanExpiresAt;
+      const livePrev = typeof prev === 'number' && Number.isSafeInteger(prev) && prev > now ? prev : null;
+      const base = livePrev ?? now;
+      const startedAt = livePrev !== null && typeof target.readingStatsPlanStartedAt === 'number'
+        && Number.isSafeInteger(target.readingStatsPlanStartedAt)
+        ? target.readingStatsPlanStartedAt
+        : now;
+      const expiresAt = base + durationMs;
+      const hasHistory = (target.readingStatsRenewalCount ?? 0) > 0
+        || (await tx.select({ id: subscriptionEvents.id }).from(subscriptionEvents)
+          .where(and(eq(subscriptionEvents.userId, id), inArray(subscriptionEvents.type, ['grant', 'renew']))).limit(1)).length > 0;
+      const eventType = hasHistory ? 'renew' : 'grant';
+      const [updated] = await tx.update(users).set({
+        readingStatsPlan: 'pro',
+        readingStatsPlanStartedAt: startedAt,
+        readingStatsPlanExpiresAt: expiresAt,
+        readingStatsLastRenewedAt: now,
+        readingStatsPlanDurationDays: durationDays,
+        readingStatsPlanStatus: 'active',
+        readingStatsRenewalCount: (target.readingStatsRenewalCount ?? 0) + 1,
+        readingStatsTotalSubscribedMs: Number(target.readingStatsTotalSubscribedMs ?? 0) + durationMs,
+        updatedAt: new Date(),
+      }).where(eq(users.id, id)).returning();
+      await tx.insert(subscriptionEvents).values({
+        userId: id,
+        type: eventType,
+        actorId,
+        previousExpiresAt: target.readingStatsPlanExpiresAt ?? null,
+        newExpiresAt: expiresAt,
+        durationDays,
+        reason,
+        occurredAt: now,
+      });
+      return { updated, eventType, expiresAt };
+    });
+    if (!result) return c.json({ error: 'المستخدم غير موجود' }, 404);
+    const effectivePlan = effectiveReadingPlan(result.updated, Date.now());
+    console.log(JSON.stringify({
+      event: result.eventType === 'revoke' ? 'reading_plan.revoke' : 'reading_plan.grant',
+      userId: id,
+      plan: parsed.data.plan,
+      durationDays: parsed.data.plan === 'pro' ? durationDays : undefined,
+      expiresAt: result.expiresAt,
+      actor: actorId,
+    }));
+    return c.json({
+      success: true,
+      effectivePlan,
+      planExpiresAt: result.expiresAt,
+      planStatus: (result.updated as typeof users.$inferSelect).readingStatsPlanStatus,
+    });
+  } catch (err) {
+    console.error('[admin] reading-plan failed', err); noteDbFailure();
+    return c.json({ error: 'فشل الحفظ' }, 500);
   }
 });
 

@@ -54,11 +54,12 @@ entitlement decisions.
   Pro requires `readingStats` cursors, served by `pullProData`; Free served by
   `buildFreePullResponse(loadFreeStatsForUser())`.
 - Profile (`src/routes/profile.ts:156-207`): `GET /me/profile` requires auth;
-  without `?readingStatsVersion=2` it returns the legacy plan-blind payload
-  (kept byte-for-byte); with `=2` it resolves `authoritativePlan(row)` then
+  without `?readingStatsVersion=2` it currently returns the legacy plan-blind
+  payload; with `=2` it resolves `authoritativePlan(row)` then
   serves `proProjection(loadProStats())` or `freeProjection(loadFreeStatsForUser())`
   with `{ success, user, plan, readingStatsVersion, readingStats }`. Unknown
   version value is `400`; `toPublic()` never emits plan/expiry internals.
+  (The legacy payload is value-gated by this design per § Legacy v1 gating.)
 - Free store (`freeStore.ts:35-40,163-178`): Free rows use
   `FREE_SESSION_SAFE_DEFAULTS` (`words 0`, `minuteOfDay 0`, `readDay ''`,
   `genre ''`) plus `proFieldsPresent = false`, `completionSignalPresent = true`.
@@ -215,14 +216,18 @@ Pro-evidence channel (`words`, `minuteOfDay`, `readDay`, `genre`,
 `totalWords`, `streakDays`), so leaving them plan-blind would keep a working
 Pro channel open for expired accounts while v2 correctly derives Free.
 
-- **v1 push:** resolve the account, derive `effectiveReadingPlan(row, nowMs)`
-  from the freshly resolved row, then write. When derived Free, v1 session rows
-  store `FREE_SESSION_SAFE_DEFAULTS` for the four Pro-dimension columns plus
-  `proFieldsPresent = false` (completion marker semantics unchanged); v1
-  history `readDay`/dimension columns store the same safe defaults. Shipped
-  Pro dimensions from a Free-derived caller are ignored, never stored.
-- **v1 pull:** same derivation first. When derived Free, session/history rows
-  are projected with the Pro-dimension columns replaced by the safe defaults
+- **v1 push:** owner check first (same `ownerMismatch` precedence as v2), then
+  resolve the account, derive `effectiveReadingPlan(row, nowMs)` from the
+  freshly resolved row, then write. When derived Free, v1 session rows store
+  `FREE_SESSION_SAFE_DEFAULTS` (`words 0`, `minuteOfDay 0`, `readDay ''`,
+  `genre ''`) plus `proFieldsPresent = false` (completion marker semantics
+  unchanged); v1 history rows store `readDay = ''` only — all other
+  history/library columns pass through unchanged (`reading_history` has no
+  `words`/`minuteOfDay`/`genre` columns). Shipped Pro dimensions from a
+  Free-derived caller are ignored, never stored.
+- **v1 pull:** same owner-check → derive-first order. When derived Free,
+  session rows are projected with the four Pro-dimension columns replaced by
+  the safe defaults and history rows with `readDay = ''`
   (shape unchanged, values gated). A Free account therefore cannot read back
   Pro dimensions it wrote through v1 while Pro, nor accumulate new ones.
 - **Legacy unversioned profile (no `readingStatsVersion`):** wire keys stay
@@ -255,7 +260,9 @@ contract parsing, owner policy, idempotency, and response shapes are unchanged.
 - `GET /me/profile?readingStatsVersion=2`: derive from the selected row
   (`PROFILE_USER_COLUMNS` extended with the expiry columns, never projected to
   the client) and serve the Pro or Free projection accordingly. `plan` in the body
-  is the derived plan. Legacy unversioned profile stays byte-for-byte plan-blind.
+  is the derived plan. Legacy unversioned profile keeps wire keys byte-identical
+  but values gated per § Legacy v1 gating (`totalWords = 0`, `streakDays = 0`
+  for Free-derived callers).
 - `SYNC_USER_COLUMNS` and `PROFILE_USER_COLUMNS` are extended with the new
   entitlement columns; `toPublic()` gains no new keys (expiry timestamps are never
   serialized to clients).
@@ -304,8 +311,10 @@ is a trusted manual admin/internal operation:
   forbidden/unauthorized bodies, never an entitlement hint. Rate-limited with the
   existing admin/users budgets; no new middleware.
 - **Request (sketch):** `{ plan: 'pro' | 'free', durationDays?: number (default
-  30, positive int, capped e.g. ≤ 365), reason?: string }`. No timestamps accepted
-  from the caller — the server computes all window timestamps. Retries are
+  30, positive int, capped ≤ 365), reason: string (required, trimmed non-empty,
+  max 500) }`. No timestamps accepted
+  from the caller — the server computes all window timestamps. A grant without
+  a reason is a 400, since the event table is the audit trail. Retries are
   **additive by contract in v1**: a retried grant intent creates a second
   extension. Operators confirm the result before retrying; clients disable
   double-submit. (A server-issued idempotency key is a future enhancement, not
@@ -431,11 +440,14 @@ Expiry is still derived, never executed by a background job. But the first
 request that observes an already-lapsed window must leave one audit trace, or
 the most common downgrade path stays silent:
 
-- When `pushV2` / `pullV2` / `GET /me/profile?readingStatsVersion=2` derives
+- When `pushV2` / `pullV2`, v1 push/pull (now deriving per § Legacy v1 gating),
+  or `GET /me/profile?readingStatsVersion=2` derives
   Free because `nowMs >= planExpiresAt` on a row whose stored `plan = 'pro'`,
   the same handler attempts one best-effort `expired` insert **after** the
   response inputs are computed, in a **separate step, not in the request's data
   transaction** (not in the Free session insert, not in the profile aggregate).
+  Legacy unversioned profile derives but does not log (deprecated surface,
+  excluded to avoid a write on every account-screen load).
 - Idempotency key is `(user_id, previous_expires_at)` for `type = 'expired'`:
   enforced by a partial unique index on
   `(user_id, previous_expires_at) WHERE type = 'expired'`, written with
@@ -504,7 +516,8 @@ the most common downgrade path stays silent:
   instead of instant revocation.
 - Wire: v2 Free/Pro request/response schemas unchanged; `plan` values remain
   `'free'`/`'pro'` (now derived rather than stored). Legacy v1 sync and legacy
-  unversioned profile payloads unchanged and remain plan-blind.
+  unversioned profile keep wire shapes unchanged but values gated per § Legacy
+  v1 gating; Pro-value compatibility is intentionally not preserved.
 - Client upgrade path: an expired Pro client sees `plan: 'free'` on its next
   profile/push/pull plus the existing `409 plan_changed` / strict-contract errors
   it already handles (`refresh and retry`); queued Pro sessions stay queued per §
@@ -531,8 +544,9 @@ Admin: non-admin grant → forbidden; grant sets window columns per the
   `max(now, expiry)` rule, increments `renewalCount`, adds the granted duration
   to `totalSubscribedMs`, emits the audit log, and writes the atomic event row;
   revoke clears expiry, preserves history counters, writes a `revoke` event row,
-  and derives Free on the next request; `durationDays` default 30, cap enforced,
-  invalid values 400. Expiry: first push/pull/profile that observes a lapsed
+  and derives Free on the next request; `durationDays` default 30, cap 365
+  enforced, missing/empty `reason` 400, invalid values 400. Expiry: first
+  push/pull (v1 or v2) or versioned profile that observes a lapsed
   window writes exactly one `expired` row (`actor_id` null, fixed reason,
   `previous_expires_at` = lapsed expiry) via `ON CONFLICT DO NOTHING` on the
   partial unique key; concurrent observers converge; a failed log write never
