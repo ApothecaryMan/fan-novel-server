@@ -7,6 +7,7 @@ import { requireAuth } from '../middleware/auth.js';
 import { getCaller } from '../middleware/ownership.js';
 import { effectiveReadingPlan } from '../features/readingSync/freeStore.js';
 import { parseAdminUserRoles } from './adminUserFilters.js';
+import { escapeLikePattern } from './adminUserSearch.js';
 
 export const adminRouter = new Hono();
 
@@ -83,7 +84,11 @@ adminRouter.get('/users', async (c) => {
   });
   const roleWhere = roleClauses.length > 0 ? or(...roleClauses) : undefined;
   const searchWhere = q
-    ? or(ilike(users.email, `%${q}%`), ilike(users.username, `%${q}%`), ilike(users.displayName, `%${q}%`))
+    ? or(
+        ilike(users.email, `%${escapeLikePattern(q)}%`),
+        ilike(users.username, `%${escapeLikePattern(q)}%`),
+        ilike(users.displayName, `%${escapeLikePattern(q)}%`),
+      )
     : undefined;
   const where = roleWhere && searchWhere ? and(roleWhere, searchWhere) : roleWhere ?? searchWhere;
   try {

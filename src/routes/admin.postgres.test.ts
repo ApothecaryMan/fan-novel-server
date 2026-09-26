@@ -156,4 +156,25 @@ describe.skipIf(!url)('GET /api/v1/admin/users (isolated PostgreSQL)', () => {
     expect(listQueries).toHaveLength(1);
     expect(listQueries[0]).toContain('over()');
   });
+
+  it('treats a percent wildcard in the search term as a literal', async () => {
+    // Without escaping, q=% becomes ILIKE '%%%', which matches every row.
+    await createUser({ displayName: 'literal-percent-fixture' });
+    const res = await app.request('/api/v1/admin/users?page=1&limit=100&q=%25', {
+      headers: { Authorization: `Bearer ${adminToken}` },
+    });
+    const json = await res.json();
+    expect(json.success).toBe(true);
+    expect(json.total).toBe(0);
+    expect(json.data).toEqual([]);
+  });
+
+  it('still matches a real substring containing no wildcard', async () => {
+    await createUser({ displayName: 'needle-in-haystack' });
+    const res = await app.request('/api/v1/admin/users?page=1&limit=100&q=needle-in', {
+      headers: { Authorization: `Bearer ${adminToken}` },
+    });
+    const json = await res.json();
+    expect(json.total).toBe(1);
+  });
 });
