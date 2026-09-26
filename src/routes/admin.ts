@@ -166,14 +166,19 @@ adminRouter.put('/users/:id', async (c) => {
       const admins = await db.select({ id: users.id }).from(users).where(eq(users.role, 'admin'));
       if (admins.length <= 1) return c.json({ error: 'لا يمكن إزالة آخر أدمن' }, 409);
     }
-    await db.update(users).set({
+    // .returning() replaces the update-then-re-select pair. Besides saving a
+    // round trip it removes a latent 500: if the row were deleted between the
+    // update and the re-select, `updated[0]` was undefined and publicUser threw
+    // a TypeError that the catch reported as a save failure.
+    const updated = await db.update(users).set({
       isAuthor: parsed.data.isAuthor ?? undefined,
       isTranslator: parsed.data.isTranslator ?? undefined,
       role: parsed.data.role ?? undefined,
       updatedAt: new Date(),
-    }).where(eq(users.id, id));
-    const updated = await db.select().from(users).where(eq(users.id, id)).limit(1);
-    return c.json({ success: true, data: publicUser(updated[0]) });
+    }).where(eq(users.id, id)).returning();
+    const row = updated[0];
+    if (!row) return c.json({ error: 'المستخدم غير موجود' }, 404);
+    return c.json({ success: true, data: publicUser(row) });
   } catch (err) {
     console.error('[admin] grant failed', err); noteDbFailure();
     return c.json({ error: 'فشل الحفظ' }, 500);

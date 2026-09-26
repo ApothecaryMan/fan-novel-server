@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import pg from 'pg';
 import { Hono } from 'hono';
-import { ne } from 'drizzle-orm';
+import { eq, ne } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import { migrate } from 'drizzle-orm/node-postgres/migrator';
 import * as schema from '../database/schema.js';
@@ -286,6 +286,54 @@ describe.skipIf(!url)('GET /api/v1/admin/users (isolated PostgreSQL)', () => {
       headers: { Authorization: `Bearer ${adminToken}` },
     });
     expect((await swallowed.json()).total).toBe(0);
+  });
+});
+
+describe.skipIf(!url)('PUT /api/v1/admin/users/:id (isolated PostgreSQL)', () => {
+  const auth = () => ({ Authorization: `Bearer ${adminToken}` });
+  const put = (id: string, body: unknown) =>
+    app.request(`/api/v1/admin/users/${id}`, {
+      method: 'PUT',
+      headers: { ...auth(), 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+
+  it('returns the updated user', async () => {
+    const target = await createUser({ isAuthor: false });
+    const res = await put(target.id, { isAuthor: true });
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.success).toBe(true);
+    expect(json.data.id).toBe(target.id);
+    expect(json.data.isAuthor).toBe(true);
+  });
+
+  it('applies a partial patch without disturbing the other grants', async () => {
+    const target = await createUser({ isAuthor: true, isTranslator: true });
+    const res = await put(target.id, { isTranslator: false });
+    const json = await res.json();
+    expect(json.data.isAuthor).toBe(true);
+    expect(json.data.isTranslator).toBe(false);
+  });
+
+  it('returns 404 for a well-formed id that does not exist', async () => {
+    const res = await put('00000000-0000-4000-8000-000000000000', { isAuthor: true });
+    expect(res.status).toBe(404);
+  });
+
+  it('returns 400 for a malformed body', async () => {
+    const target = await createUser();
+    const res = await put(target.id, { role: 'superuser' });
+    expect(res.status).toBe(400);
+  });
+
+  it('promotes a reader to admin', async () => {
+    const target = await createUser({});
+    const res = await put(target.id, { role: 'admin' });
+    expect(res.status).toBe(200);
+    expect((await res.json()).data.role).toBe('admin');
+    // Keep the admin set at exactly one (the fixture) for the race test.
+    await database.update(users).set({ role: 'reader' }).where(eq(users.id, target.id));
   });
 });
 
