@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
-import { and, count, desc, eq, ilike, inArray, or, sql } from 'drizzle-orm';
+import { and, desc, eq, ilike, inArray, or, sql } from 'drizzle-orm';
 import { db, isDbAvailable, noteDbFailure } from '../database/db.js';
 import { novels, roleRequests, subscriptionEvents, users } from '../database/schema.js';
 import { requireAuth } from '../middleware/auth.js';
@@ -22,12 +22,16 @@ adminRouter.use('*', async (c, next) => {
 });
 
 /**
- * `count(*) over()` returns int8, which node-postgres parses as a STRING when
- * the pool has no custom type parsers (see db.ts: a bare `new pg.Pool(...)`),
- * while neon-http returns int8 as a JSON number. Without `.mapWith(Number)`
- * the same endpoint would answer `total` as a string on Node and a number on
- * Workers. Drizzle's `count()` maps to Number for us; a raw window count does
- * not, so we map it explicitly.
+ * `count(*) over()` returns int8 (OID 20). BOTH drivers hand int8 back as a
+ * STRING unless something installs an int8 parser: node-postgres registers
+ * `parseInt8` as an opt-in setter that nothing in this repo sets, and
+ * `@neondatabase/serverless` decodes raw text through its own bundled copy of
+ * `pg-types`, whose `parseInt8` setter is likewise never called. So without an
+ * explicit decoder `total` serialises as `"42"` rather than `42`.
+ *
+ * Drizzle's own `count()` helper already does `.mapWith(Number)`; a raw window
+ * count does not, so we map it explicitly. The test asserts
+ * `typeof json.total === 'number'` to keep this load-bearing.
  */
 const totalOver = sql<number>`count(*) over()`.mapWith(Number);
 
@@ -66,7 +70,24 @@ function publicUser(u: AdminUserRow) {
   };
 }
 
-// GET /api/v1/admin/users?page&limit&q&roles (q searches email/username/displayName; roles is a CSV of admin, author, translator, reader)
+/**
+ * GET /api/v1/admin/users?page&limit&q&roles
+ *   q      searches email/username/displayName, LIKE-escaped, truncated to 100
+ *   roles  CSV of admin, author, translator, reader
+ *
+ * Response: `{ success, total, data }` where `total` is the count of the whole
+ * FILTERED set, not the page. The one behavioural change from the previous
+ * two-query implementation: an out-of-range page (OFFSET past the end) reports
+ * `total: 0` rather than the true filtered count, because a window function is
+ * not evaluated when the query returns no rows. Clients must treat
+ * `total === 0` as end-of-list.
+ *
+ * Note on scale: `count(*) over()` makes LIMIT non-short-circuitable and
+ * blocks the parallel top-N plan, so at very large row counts this is slower
+ * SERVER-side than a separate count query. That trade is deliberate: at the
+ * table's current size query time is negligible and one network round trip
+ * beats two. Revisit the construct if `users` grows by orders of magnitude.
+ */
 adminRouter.get('/users', async (c) => {
   if (!isDbAvailable()) return c.json({ error: 'database not configured' }, 503);
   const page = Math.max(1, Number(c.req.query('page') ?? 1) || 1);
@@ -83,11 +104,13 @@ adminRouter.get('/users', async (c) => {
     }
   });
   const roleWhere = roleClauses.length > 0 ? or(...roleClauses) : undefined;
+  // Escaped once: the three patterns are built from the same term.
+  const pattern = q ? `%${escapeLikePattern(q)}%` : '';
   const searchWhere = q
     ? or(
-        ilike(users.email, `%${escapeLikePattern(q)}%`),
-        ilike(users.username, `%${escapeLikePattern(q)}%`),
-        ilike(users.displayName, `%${escapeLikePattern(q)}%`),
+        ilike(users.email, pattern),
+        ilike(users.username, pattern),
+        ilike(users.displayName, pattern),
       )
     : undefined;
   const where = roleWhere && searchWhere ? and(roleWhere, searchWhere) : roleWhere ?? searchWhere;
