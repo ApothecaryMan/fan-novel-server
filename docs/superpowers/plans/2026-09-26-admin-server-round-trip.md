@@ -708,6 +708,42 @@ fix — the round trip dominates. Applies to GET /users and GET /requests."
 
 ---
 
+### Task 6 (DEFERRED, NOT DONE — tracked here so it is not lost): audit every noteDbFailure() caller for input-triggered outages
+
+**Status: OPEN. Not started. This is a real, already-observed failure mode, not a
+hypothesis** — Task 3's hotfix proved that one malformed input
+(`GET /admin/users?limit=2.5`, and `PUT /admin/users/not-a-uuid`) produced
+SQLSTATE 22P02, hit a route catch block, and called `noteDbFailure()`, which
+makes `isDbAvailable()` false for **30 seconds** and degrades every
+database-backed route in the API, including login.
+
+`noteDbFailure()` is still called from every route catch block in
+`src/routes/admin.ts`, `src/routes/auth.ts`, and `src/routes/upload.ts`. Only
+the three admin paths fixed in this branch validate their input. Any *other*
+route that can pass a malformed value through to a typed Postgres parameter has
+the same 30-second outage available to it, and none has been checked.
+
+**Do this as its own change, not folded into a perf commit.**
+
+1. `grep -rn "noteDbFailure()" src/` and enumerate every call site.
+2. For each route that calls it, determine whether any client-controlled value
+   reaches a typed Postgres parameter without prior validation — path params
+   cast to uuid/int/date/enum, query params, and JSON body fields that Zod does
+   not constrain to the column's type.
+3. Where one exists, either validate the input before the query (returning 400)
+   or, if the input legitimately cannot be validated, stop treating the error as
+   a database outage — a 22P02 from bad input is a client error, not an outage.
+4. Consider a global change so `noteDbFailure()` cannot be reached by a 4xx-class
+   error at all. This is the durable fix but it has a much wider blast radius
+   than a single-route guard, so it needs its own review.
+
+**Regression test to add:** for each fixed route, assert that a malformed
+request returns 4xx AND that a valid request immediately afterwards still
+succeeds. The second half is the part that matters — a test asserting only the
+4xx would keep passing if the cooldown were reintroduced by another path.
+
+---
+
 ## Verification
 
 Run all of these before calling the plan done:
