@@ -165,24 +165,7 @@ Expected: the first test FAILS. Before the fix `total` is produced by `count()`'
 
 - [ ] **Step 3: Write the failing test for the single-round-trip guarantee**
 
-Add to the same `describe` block. This asserts the query count, which is the actual point of the task:
-
-```ts
-  it('resolves the page and the total in one database round trip', async () => {
-    const before = database.$client.totalCount ?? 0;
-    const res = await app.request('/api/v1/admin/users?page=1&limit=20', {
-      headers: { Authorization: `Bearer ${adminToken}` },
-    });
-    const json = await res.json();
-    expect(json.success).toBe(true);
-
-    const executed = (database.$client as any).__adminRouteQueries ?? [];
-    expect(executed).toHaveLength(0); // placeholder replaced in Step 5
-    expect(typeof json.total).toBe('number');
-  });
-```
-
-Replace this placeholder assertion in Step 5 with a real round-trip count. The mechanism: `initDb` creates the pool inside `db.ts`, so instead of instrumenting Drizzle, wrap `pg.Pool.prototype.query` for the duration of one request:
+Add to the same `describe` block. This asserts the query count, which is the actual point of the task. The pool is created inside `src/database/db.ts`, so instrument `pg.Pool.prototype.query` for the duration of one request rather than trying to hook Drizzle:
 
 ```ts
   it('resolves the page and the total in one database round trip', async () => {
@@ -205,6 +188,8 @@ Replace this placeholder assertion in Step 5 with a real round-trip count. The m
     expect(seen[0]).toContain('count(*) over()');
   });
 ```
+
+Restore the prototype in a `finally` so a failing assertion cannot leak the patch into other tests in the file.
 
 - [ ] **Step 4: Run to verify the new test fails**
 
