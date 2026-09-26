@@ -250,7 +250,7 @@ Three deliberate details:
 - `where` may be `undefined` when no filter is supplied. Drizzle accepts `.where(undefined)`, so no conditional is needed.
 - `desc(users.id)` is added as a tie-break so `ORDER BY` is total and OFFSET pagination cannot skip or duplicate rows when two users share a `created_at`. This costs nothing without indexes and is a genuine correctness fix.
 
-Delete the now-unused `count` import **only if** `grep -n "count(" src/routes/admin.ts` shows no remaining use — Task 4 also uses it, so leave the import until Task 4 lands.
+The `count` import is already removed; drizzle's `count()` maps to Number, and Task 4 re-adds the helper it needs.
 
 - [ ] **Step 6: Run the test to verify it passes**
 
@@ -502,137 +502,105 @@ tests for the write path's 200/404/400 responses."
 
 ### Task 4: Make the last-admin guard atomic
 
-The current guard counts admins and then updates, with no lock. Two concurrent demotions can both observe two admins, both succeed, and leave **zero admins** in the system. Fold the condition into the `WHERE` clause so the count and the write cannot interleave.
+> **REVISED 2026-09-26 after empirical testing. The original approach in this
+> task was WRONG and has been replaced.** The original plan folded the admin
+> count into the UPDATE's `WHERE` clause. That does not work. An uncorrelated
+> subquery is evaluated once as an `InitPlan` against the statement's snapshot,
+> which cannot see another transaction's uncommitted UPDATE. Measured on a
+> real PostgreSQL instance with two connections forced to interleave
+> (`BEGIN` on both, run both UPDATEs, only then `COMMIT` either):
+>
+> ```
+> subquery-in-WHERE:   A updated: 1  B updated: 1  admins remaining: 0   FAILED 3/3
+> row-lock-then-count: A updated: 1  B updated: 0  admins remaining: 1   PASSED 3/3
+> ```
+>
+> So the "atomic" single-statement version leaves the system with **zero
+> admins** — the exact failure the task exists to prevent. Note that a naive
+> `Promise.all([a, b])` test **passes by luck**, because the race window is
+> sub-millisecond over a connection pool; it only fails under a forced
+> interleaving. Any test for this must force the interleaving or it proves
+> nothing.
 
 **Files:**
-- Modify: `src/routes/admin.ts:84-88` (the demotion guard)
+- Modify: `src/routes/admin.ts:84-88` (the demotion guard), `:1-10` (imports)
 - Test: `src/routes/admin.postgres.test.ts`
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Write the failing test, forcing the interleaving**
 
-Append a new `describe` block:
+The route must be exercised through its own database transaction, so the test
+drives two concurrent transactions on two explicit clients: `BEGIN` both, run
+the demotion on each, and commit only after both have evaluated their guard.
+
+Use `Promise.allSettled`, not `Promise.all`: the losing demotion is *supposed*
+to reject with 409, and `Promise.all` would throw before the assertions run.
+
+Do **not** reproduce the original plan's `database.update(users).set({ role:
+'reader' })` reset line: it demotes every admin including the fixture row
+`getCaller` resolves, so every subsequent request in the file 403s.
+
+- [ ] **Step 2: Implement the fix — lock, then count, then update, in one transaction**
+
+The invariant needs the count and the write serialised, which means a row
+lock, which means a transaction. Replace the read-then-update guard with:
 
 ```ts
-describe.skipIf(!url)('last-admin guard (isolated PostgreSQL)', () => {
-  it('refuses to demote the only admin with 409', async () => {
-    const subject = nextSubject();
-    await database.update(users).set({ role: 'reader' }).where(
-      sql`external_id <> ${subject}`,
-    );
-    const sole = await createUser({ role: 'admin' });
-
-    const res = await app.request(`/api/v1/admin/users/${sole.id}`, {
-      method: 'PUT',
-      headers: { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ role: 'reader' }),
-    });
-    expect(res.status).toBe(409);
-    const [after] = await database.select().from(users).where(eq(users.id, sole.id));
-    expect(after.role).toBe('admin');
-  });
-
-  it('does not reach zero admins when two demotions race', async () => {
-    // Reset to a known state: nobody is an admin except the two targets.
-    await database.update(users).set({ role: 'reader' });
-    const first = await createUser({ role: 'admin' });
-    const second = await createUser({ role: 'admin' });
-
-    const demote = (id: string) =>
-      app.request(`/api/v1/admin/users/${id}`, {
-        method: 'PUT',
-        headers: { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ role: 'reader' }),
+    if (parsed.data.role === 'reader' && target.role === 'admin') {
+      // Lock the whole admin set before counting. An uncorrelated count
+      // subquery in the WHERE clause does NOT work here: it is evaluated once
+      // against the statement's snapshot and cannot see a concurrent
+      // transaction's uncommitted demotion, so two racing demotions both
+      // observe two admins and both succeed, leaving zero admins. The row lock
+      // serialises them, so the loser re-reads the count after the winner
+      // commits. Verified 3/3 against a forced interleaving.
+      const result = await db.transaction(async (tx) => {
+        await tx.execute(sql`select id from ${users} where role = 'admin' for update`);
+        const counted = await tx.select({ n: count() }).from(users).where(eq(users.role, 'admin'));
+        const admins = Number(counted[0]?.n ?? 0);
+        if (admins <= 1) return null;
+        const [demoted] = await tx
+          .update(users)
+          .set({ role: 'reader', updatedAt: new Date() })
+          .where(eq(users.id, id))
+          .returning();
+        return demoted ?? null;
       });
-
-    const [a, b] = await Promise.all([demote(first.id), demote(second.id)]);
-    const statuses = [a.status, b.status].sort();
-    // Exactly one demotion may succeed: one 200 and one 409.
-    expect(statuses).toEqual([200, 409]);
-
-    const remaining = await database.select().from(users).where(eq(users.role, 'admin'));
-    expect(remaining).toHaveLength(1);
-  });
-});
+      if (!result) return c.json({ error: 'لا يمكن إزالة آخر أدمن' }, 409);
+      return c.json({ success: true, data: publicUser(result) });
+    }
 ```
 
-Add the needed imports at the top of the file: `import { eq, sql } from 'drizzle-orm';`.
+Note the early return: the demotion path completes here and must not fall
+through to the generic update below, which would issue a second write.
 
-- [ ] **Step 2: Run to verify the race test fails**
+- [ ] **Step 3: Run the forced-interleaving regression test**
 
 Run: `npm test -- src/routes/admin.postgres.test.ts`
-Expected: the race test FAILS. The current implementation has no lock, so both demotions can observe two admins. The likely observed failure is `expected [ 200, 200 ] to equal [ 200, 409 ]`, or the assertion on `remaining` catching zero admins. Record the actual failure.
+Expected: PASS, and the forced-interleaving test must FAIL if you revert to
+the subquery-in-WHERE form. Verify that by reverting temporarily.
 
-- [ ] **Step 3: Implement the atomic guard**
+- [ ] **Step 4: Full suite and typecheck**
 
-Replace the demotion guard in `src/routes/admin.ts` (currently lines 85-88):
+Run: `npm test && npx tsc --noEmit`
+Expected: PASS, no type errors.
 
-```ts
-    if (parsed.data.role === 'reader' && target.role === 'admin') {
-      // Atomic: the admin-count condition lives in the WHERE clause, so the
-      // count and the write cannot interleave. The previous read-then-update
-      // let two concurrent demotions both observe two admins and both succeed,
-      // leaving the system with zero admins.
-      const [demoted] = await db
-        .update(users)
-        .set({ role: 'reader', updatedAt: new Date() })
-        .where(and(
-          eq(users.id, id),
-          sql`role = 'admin'`,
-          sql`(select count(*) from ${users} where role = 'admin') > 1`,
-        ))
-        .returning();
-      if (!demoted) return c.json({ error: 'لا يمكن إزالة آخر أدمن' }, 409);
-    }
-```
-
-Then the generic update below still runs and sets `role: 'reader'` again, which is harmless and idempotent. If you prefer to avoid the double write, restructure so the demotion path returns early:
-
-```ts
-    if (parsed.data.role === 'reader' && target.role === 'admin') {
-      const [demoted] = await db
-        .update(users)
-        .set({ role: 'reader', updatedAt: new Date() })
-        .where(and(
-          eq(users.id, id),
-          sql`role = 'admin'`,
-          sql`(select count(*) from ${users} where role = 'admin') > 1`,
-        ))
-        .returning();
-      if (!demoted) return c.json({ error: 'لا يمكن إزالة آخر أدمن' }, 409);
-      return c.json({ success: true, data: publicUser(demoted) });
-    }
-```
-
-Prefer the early-return version. It is one write instead of two, and it removes any ambiguity about which row is returned.
-
-- [ ] **Step 4: Drop the now-unused `count` import**
-
-Run: `grep -n "count(" src/routes/admin.ts`
-Expected: no remaining uses. Then remove `count` from the Drizzle import on line 4.
-
-- [ ] **Step 5: Run the full server suite**
-
-Run: `npm test`
-Expected: PASS, including the pre-existing `src/routes/adminUserFilters.test.ts`, `auth.admin-persist.test.ts`, and the other `*.postgres.test.ts` files.
-
-- [ ] **Step 6: Typecheck**
-
-Run: `npx tsc --noEmit`
-Expected: no errors.
-
-- [ ] **Step 7: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add src/routes/admin.ts src/routes/admin.postgres.test.ts
-git commit -m "fix(admin): make the last-admin guard atomic
+git commit -m "fix(admin): serialise the last-admin guard with a row lock
 
 The guard counted admins and then updated with no lock, so two concurrent
 demotions could both observe two admins, both succeed, and leave the
-system with zero admins. Folds the count into the UPDATE's WHERE clause
-and returns the demoted row from the same statement."
-```
+system with zero admins.
 
----
+Folding the count into the UPDATE's WHERE clause does NOT fix this: an
+uncorrelated subquery is evaluated once against the statement snapshot
+and cannot see a concurrent uncommitted UPDATE. Measured against a real
+PostgreSQL instance with the interleaving forced, that form leaves zero
+admins 3 times out of 3. Locks the admin rows first, inside a
+transaction, so the loser re-reads the count after the winner commits."
+```
 
 ### Task 5: Explicit column projection
 
