@@ -289,6 +289,51 @@ describe.skipIf(!url)('GET /api/v1/admin/users (isolated PostgreSQL)', () => {
   });
 });
 
+describe.skipIf(!url)('admin route input validation (isolated PostgreSQL)', () => {
+  const auth = () => ({ Authorization: `Bearer ${adminToken}` });
+
+  it('rejects a non-integer limit with 400 instead of failing the query', async () => {
+    for (const bad of ['2.5', '0.1', 'abc', 'NaN', 'Infinity']) {
+      const res = await app.request(`/api/v1/admin/users?page=1&limit=${bad}`, { headers: auth() });
+      expect(res.status).toBe(400);
+    }
+  });
+
+  it('rejects a non-integer page with 400', async () => {
+    const res = await app.request('/api/v1/admin/users?page=1.5&limit=20', { headers: auth() });
+    expect(res.status).toBe(400);
+  });
+
+  it('rejects a malformed user id with 400 instead of failing the query', async () => {
+    const res = await app.request('/api/v1/admin/users/not-a-uuid', {
+      method: 'PUT',
+      headers: { ...auth(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ isAuthor: true }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it('keeps the database available after bad input', async () => {
+    // The real defect: a client-input error used to reach Postgres as a bigint
+    // cast, hit the catch, and call noteDbFailure(), which makes
+    // isDbAvailable() false for 30s and degrades EVERY db-backed route.
+    const bad = await app.request('/api/v1/admin/users?page=1&limit=2.5', { headers: auth() });
+    expect(bad.status).toBe(400);
+
+    const badId = await app.request('/api/v1/admin/users/not-a-uuid', {
+      method: 'PUT',
+      headers: { ...auth(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ isAuthor: true }),
+    });
+    expect(badId.status).toBe(400);
+
+    // A perfectly valid request immediately afterwards must still work.
+    const good = await app.request('/api/v1/admin/users?page=1&limit=20', { headers: auth() });
+    expect(good.status).toBe(200);
+    expect((await good.json()).success).toBe(true);
+  });
+});
+
 describe.skipIf(!url)('GET /api/v1/admin/users role filters (isolated PostgreSQL)', () => {
   const auth = () => ({ Authorization: `Bearer ${adminToken}` });
 

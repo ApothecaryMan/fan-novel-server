@@ -8,6 +8,7 @@ import { getCaller } from '../middleware/ownership.js';
 import { effectiveReadingPlan } from '../features/readingSync/freeStore.js';
 import { parseAdminUserRoles } from './adminUserFilters.js';
 import { escapeLikePattern } from './adminUserSearch.js';
+import { isUuid, parseBoundedInt } from './adminQueryParams.js';
 
 export const adminRouter = new Hono();
 
@@ -90,8 +91,13 @@ function publicUser(u: AdminUserRow) {
  */
 adminRouter.get('/users', async (c) => {
   if (!isDbAvailable()) return c.json({ error: 'database not configured' }, 503);
-  const page = Math.max(1, Number(c.req.query('page') ?? 1) || 1);
-  const limit = Math.min(100, Math.max(1, Number(c.req.query('limit') ?? 20) || 20));
+  // Validated before the query: an unvalidated 2.5 reaches Postgres as a bigint,
+  // fails with 22P02, and the catch below calls noteDbFailure() — which
+  // disables every db-backed route in the API for 30 seconds.
+  const page = parseBoundedInt(c.req.query('page'), 1, 1, Number.MAX_SAFE_INTEGER);
+  if (page === null) return c.json({ error: 'invalid page' }, 400);
+  const limit = parseBoundedInt(c.req.query('limit'), 20, 1, 100);
+  if (limit === null) return c.json({ error: 'invalid limit' }, 400);
   const q = (c.req.query('q') ?? '').trim().slice(0, 100);
   const roleFilter = parseAdminUserRoles(c.req.query('roles'));
   if (roleFilter.invalid !== null) return c.json({ error: 'invalid role filter' }, 400);
@@ -148,7 +154,10 @@ adminRouter.put('/users/:id', async (c) => {
   if (!isDbAvailable()) return c.json({ error: 'database not configured' }, 503);
   const parsed = grantSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return c.json({ error: 'حقول غير صالحة', issues: parsed.error.issues }, 400);
+  // Validated before the query for the same reason as page/limit above: a
+  // malformed id fails the uuid cast with 22P02 and poisons the DB cooldown.
   const id = c.req.param('id');
+  if (!isUuid(id)) return c.json({ error: 'invalid user id' }, 400);
   try {
     const found = await db.select().from(users).where(eq(users.id, id)).limit(1);
     const target = found[0];
@@ -238,6 +247,7 @@ adminRouter.post('/users/:id/reading-plan', async (c) => {
   const parsed = readingPlanGrantSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return c.json({ error: 'invalid reading plan grant', issues: parsed.error.issues }, 400);
   const id = c.req.param('id');
+  if (!isUuid(id)) return c.json({ error: 'invalid user id' }, 400);
   const caller = c.get('caller') as { row?: { id?: string } | null } | undefined;
   const actorId: string | null = caller?.row?.id ?? null;
   const now = Date.now();
