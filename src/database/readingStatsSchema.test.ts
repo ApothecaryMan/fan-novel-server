@@ -169,6 +169,7 @@ describe('reading statistics database schema', () => {
       cover_url: column('text', true),
       summary: column('text', true),
       featured_rank: column('integer', false),
+      translation_rank: column('varchar(2)', false),
       comments_enabled: column('boolean', true, { hasDefault: true, default: true }),
       author_user_id: column('uuid', false),
       translator_user_id: column('uuid', false),

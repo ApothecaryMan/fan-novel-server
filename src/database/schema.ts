@@ -74,6 +74,12 @@ export const novels = pgTable('novels', {
   coverUrl: text('cover_url').notNull(),
   summary: text('summary').notNull(),
   featuredRank: integer('featured_rank'),
+  /**
+   * Editorial translation-quality grade shown on the novel details screen.
+   * One of TRANSLATION_RANKS ('B' | 'A' | 'S' | 'S+'). Nullable: a novel with
+   * no grade set must stay unranked on the client, never default to a tier.
+   */
+  translationRank: varchar('translation_rank', { length: 2 }),
   commentsEnabled: boolean('comments_enabled').default(true).notNull(),
   authorUserId: uuid('author_user_id').references(() => users.id, { onDelete: 'set null' }),
   translatorUserId: uuid('translator_user_id').references(() => users.id, { onDelete: 'set null' }),

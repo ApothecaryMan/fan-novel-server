@@ -6,6 +6,7 @@ import { novels } from '../database/schema.js';
 import { requireAuthOrPat } from '../middleware/authorToken.js';
 import { ensureNovelOwner, getCaller } from '../middleware/ownership.js';
 import { getEnv } from '../config/env.js';
+import { parseTranslationRank, TRANSLATION_RANKS, type TranslationRank } from '../domain/translationRank.js';
 
 export const novelsRouter = new Hono();
 
@@ -25,6 +26,8 @@ export interface NovelData {
   summary: string;
   tags: string[];
   commentsEnabled: boolean;
+  /** Editorial translation grade, or null when the novel is unranked. */
+  translationRank?: TranslationRank | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -34,7 +37,12 @@ export const NOVELS_STORE: Map<string, NovelData> = new Map();
 
 type NovelRow = typeof novels.$inferSelect;
 
-function toApi(row: NovelRow): NovelData {
+/**
+ * Row → API payload. Exported for the null-guarantee regression test: the
+ * translation grade MUST cross the wire as an explicit `null` when unset, never
+ * a default tier, so the client can reliably hide the badge.
+ */
+export function toApi(row: NovelRow): NovelData {
   return {
     id: row.id,
     title: row.title,
@@ -50,6 +58,9 @@ function toApi(row: NovelRow): NovelData {
     summary: row.summary ?? '',
     tags: (row.tags as string[]) ?? [],
     commentsEnabled: row.commentsEnabled ?? true,
+    // Normalize defensively: an unexpected stored value degrades to "unranked"
+    // instead of leaking a tier the client has no label for.
+    translationRank: parseTranslationRank(row.translationRank),
     createdAt: row.createdAt?.toISOString() ?? new Date().toISOString(),
     updatedAt: row.updatedAt?.toISOString() ?? new Date().toISOString(),
   };
@@ -75,6 +86,7 @@ const createNovelSchema = z.object({
   coverUrl: z.string().max(2000).optional(),
   summary: z.string().max(50000).optional(),
   tags: z.union([z.array(z.string()), z.string()]).optional(),
+  translationRank: z.enum(TRANSLATION_RANKS).nullish(),
   kind: z.enum(['author', 'translator']).optional(),
 });
 
@@ -220,6 +232,7 @@ novelsRouter.post('/', prodGuard(requireAuthOrPat), async (c) => {
         coverUrl: body.coverUrl ?? '',
         summary: body.summary ?? '',
         tags: normalizeTags(body.tags),
+        translationRank: body.translationRank ?? null,
         ...ownerPatch,
         createdAt: now,
         updatedAt: now,
@@ -237,7 +250,8 @@ novelsRouter.post('/', prodGuard(requireAuthOrPat), async (c) => {
     translator: body.translator || '', category: body.category, status: body.status || 'مستمرة',
     rating: body.rating ?? 5.0, readersCount: body.readersCount || '0', totalChapters: body.totalChapters ?? 0,
     coverUrl: body.coverUrl || '', summary: body.summary || '', tags: normalizeTags(body.tags),
-    commentsEnabled: true, createdAt: now, updatedAt: now,
+    commentsEnabled: true, translationRank: body.translationRank ?? null,
+    createdAt: now, updatedAt: now,
   };
   NOVELS_STORE.set(id, novel);
   return c.json({ success: true, message: 'تم إضافة الرواية بنجاح', data: novel }, 201);
@@ -248,6 +262,18 @@ novelsRouter.put('/:id', prodGuard(requireAuthOrPat, ensureNovelOwner()), async 
   const id = c.req.param('id');
   const body = await c.req.json().catch(() => ({}));
   const tags = body.tags !== undefined ? normalizeTags(body.tags) : undefined;
+  // `undefined` = leave the stored grade alone; `null` = clear it back to
+  // unranked. Any other value must be a known tier — reject a typo outright
+  // rather than silently downgrading the novel to unranked.
+  if (body.translationRank !== undefined && body.translationRank !== null) {
+    if (!parseTranslationRank(body.translationRank)) {
+      return c.json({ success: false, error: `تقييم جودة الترجمة يجب أن يكون أحد: ${TRANSLATION_RANKS.join(' | ')}` }, 400);
+    }
+  }
+  const translationRank =
+    body.translationRank === undefined
+      ? undefined
+      : parseTranslationRank(body.translationRank);
 
   if (isDbAvailable()) {
     try {
@@ -266,6 +292,7 @@ novelsRouter.put('/:id', prodGuard(requireAuthOrPat, ensureNovelOwner()), async 
         coverUrl: body.coverUrl ?? undefined,
         summary: body.summary ?? undefined,
         tags: tags ?? undefined,
+        translationRank: translationRank === undefined ? undefined : translationRank,
         updatedAt: new Date(),
       }).where(eq(novels.id, id));
       const updated = await db.select().from(novels).where(eq(novels.id, id)).limit(1);
@@ -277,7 +304,13 @@ novelsRouter.put('/:id', prodGuard(requireAuthOrPat, ensureNovelOwner()), async 
 
   const existing = NOVELS_STORE.get(id);
   if (!existing) return c.json({ success: false, error: 'الرواية غير موجودة للتعديل' }, 404);
-  const updated: NovelData = { ...existing, ...body, tags: tags ?? existing.tags, updatedAt: new Date().toISOString() };
+  const updated: NovelData = {
+    ...existing,
+    ...body,
+    tags: tags ?? existing.tags,
+    translationRank: translationRank === undefined ? existing.translationRank : translationRank,
+    updatedAt: new Date().toISOString(),
+  };
   NOVELS_STORE.set(id, updated);
   return c.json({ success: true, message: 'تم تعديل بيانات الرواية بنجاح', data: updated });
 });

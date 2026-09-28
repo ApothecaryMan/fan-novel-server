@@ -92,6 +92,13 @@
       "when": 1790410977826,
       "tag": "0013_pro_subscription_entitlement",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1790410978826,
+      "tag": "0014_translation_rank",
+      "breakpoints": true
     }
   ]
 }
