@@ -293,6 +293,45 @@ describe('comments API (memory fallback, open mode)', () => {
     expect(shown).toEqual(['r2', 'r3']);
   });
 
+  it('preview carries the ancestor chain so a reply-to-a-reply can nest', async () => {
+    // Mirrors the DB path's ancestor CTE (commentsPreview.postgres.test.ts
+    // proves it against a real planner). The picked newest-2 rows here are
+    // both grandchildren, so their parent is outside the window and must be
+    // supplied — otherwise the client cannot nest them or name their target.
+    const app = openApp();
+    const novel = `anc_${Date.now()}`;
+    const post = (body: string, parentId?: number) =>
+      app.request(`/api/v1/novels/${novel}/comments`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(parentId ? { body, parentId } : { body }),
+      });
+    const num = (id: string) => Number(String(id).replace('app_', ''));
+
+    const root: any = await (await post('anc root')).json();
+    const rid = num(root.data.id);
+    const a: any = await (await post('anc a', rid)).json();
+    const aid = num(a.data.id);
+    const b: any = await (await post('anc b', aid)).json();
+    void b;
+    await post('anc c', aid);
+    await post('anc d', aid);
+
+    const list: any = await (await app.request(`/api/v1/novels/${novel}/comments`)).json();
+    const preview = list.data[0].preview as any[];
+    const ids = preview.map((p) => p.id);
+    // The picked newest-2 are `c` and `d`; their parent `a` is outside that
+    // window and must arrive as an ancestor, or both render as replies to the
+    // root instead of to `a`. `b` is NOT an ancestor of either and is
+    // correctly absent — the preview carries the chain, not the whole thread.
+    expect(ids).toContain(a.data.id);
+    expect(ids).not.toContain(b.data.id);
+    // The root is the thread itself, never a member of its own preview.
+    expect(ids).not.toContain(root.data.id);
+    // Oldest-first, and the ancestor sits before the rows that need it.
+    expect(ids[0]).toBe(a.data.id);
+    expect(ids).toHaveLength(3);
+  });
+
   it('watermark moves only when the thread changes, and is never cached', async () => {
     const app = openApp();
     const novel = `wm_${Date.now()}`;

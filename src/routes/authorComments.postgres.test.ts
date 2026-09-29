@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import pg from 'pg';
 import { Hono } from 'hono';
-import { ne } from 'drizzle-orm';
+import { eq, ne } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import { migrate } from 'drizzle-orm/node-postgres/migrator';
 import * as schema from '../database/schema.js';
@@ -18,6 +18,8 @@ type ListedComment = {
   likes: number;
   novelTitle: string;
   createdAt: string;
+  replyToAuthor?: string;
+  replyToBody?: string;
 };
 
 const DATABASE_NAME = 'author_comments_route_test';
@@ -216,6 +218,57 @@ describe.skipIf(!url)('GET /users/:id/comments (author comment list)', () => {
     // The invariant that matters: list length equals the stat the hero shows.
     const profile = await get(`/api/v1/users/${authorRowId}/profile`);
     expect(body.data.length).toBe(profile.body.stats.commentsCount);
+  });
+
+  // Without these, a reply card is unattributable: the reader cannot tell a
+  // reply-to-a-reply from a reply-to-the-comment.
+  it('names the parent author and quotes the parent body on replies only', async () => {
+    const [parentAuthor] = await database.insert(users).values({
+      externalId: nextSubject(), email: `parent-${nextSubject()}@test.local`,
+      username: `parent-${nextSubject()}`, displayName: 'سارة', role: 'reader',
+    }).returning();
+    const [root] = await database.insert(comments).values({
+      novelId: novelA, userId: parentAuthor.id, chapterNumber: 1, body: 'تعليق الأصل',
+      bodyHash: 'h-quote-root', status: 'visible', createdAt: new Date(Date.now() - 60_000),
+    }).returning();
+    await seedComments([
+      { novelId: novelA, chapterNumber: 1, body: 'الرد', parentId: root.id, rootId: root.id, depth: 1, minutesAgo: 5 },
+      { novelId: novelA, chapterNumber: 1, body: 'تعليق مستقل', minutesAgo: 1 },
+    ]);
+
+    const { body } = await get(`/api/v1/users/${authorRowId}/comments?novelId=${novelA}`);
+    const reply = body.data.find((c: ListedComment) => c.body === 'الرد');
+    expect(reply.replyToAuthor).toBe('سارة');
+    expect(reply.replyToBody).toBe('تعليق الأصل');
+
+    // A top-level comment has no parent, so the keys are ABSENT rather than
+    // null — the client branches on presence.
+    const top = body.data.find((c: ListedComment) => c.body === 'تعليق مستقل');
+    expect(top.parentId).toBeNull();
+    expect('replyToAuthor' in top).toBe(false);
+    expect('replyToBody' in top).toBe(false);
+  });
+
+  it('blanks the quoted body of a deleted parent but still names them', async () => {
+    // Quoting "[محذوف]" would read as the parent having said that, so the text
+    // is dropped while the name — the only part that identifies the branch — stays.
+    const [other] = await database.insert(users).values({
+      externalId: nextSubject(), email: `gone-${nextSubject()}@test.local`,
+      username: `gone-${nextSubject()}`, displayName: 'اختفى', role: 'reader',
+    }).returning();
+    const [root] = await database.insert(comments).values({
+      novelId: novelA, userId: other.id, chapterNumber: 1, body: 'سأُحذف',
+      bodyHash: 'h-deleted-root', status: 'visible', createdAt: new Date(Date.now() - 60_000),
+    }).returning();
+    await database.update(comments).set({ status: 'deleted' }).where(eq(comments.id, root.id));
+    await seedComments([
+      { novelId: novelA, chapterNumber: 1, body: 'رد على محذوف', parentId: root.id, rootId: root.id, depth: 1, minutesAgo: 5 },
+    ]);
+
+    const { body } = await get(`/api/v1/users/${authorRowId}/comments?novelId=${novelA}`);
+    const reply = body.data.find((c: ListedComment) => c.body === 'رد على محذوف');
+    expect(reply.replyToAuthor).toBe('اختفى');
+    expect(reply.replyToBody).toBe('');
   });
 
   it('excludes pending, hidden and deleted rows', async () => {

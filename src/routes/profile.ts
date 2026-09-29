@@ -1,12 +1,12 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
-import { and, desc, eq, lt, or, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, lt, or, sql } from 'drizzle-orm';
 import { db, isDbAvailable } from '../database/db.js';
 import { comments, novels, subscriptionEvents, users } from '../database/schema.js';
 import { requireAuth } from '../middleware/auth.js';
 import { getEnv } from '../config/env.js';
 import { findMemoryUser } from './auth.js';
-import { encodeCursor, decodeCursor, toApi, type RootsCursor, type ApiAuthor } from './comments.js';
+import { buildAuthorLookup, encodeCursor, decodeCursor, toApi, type RootsCursor, type ApiAuthor } from './comments.js';
 import { effectivePlanExpiry, effectiveReadingPlan, loadFreeStatsForUser } from '../features/readingSync/freeStore.js';
 import { freeProjection } from '../features/readingSync/freeProtocol.js';
 import { proProjection } from '../features/readingSync/contracts.js';
@@ -480,12 +480,43 @@ profileRouter.get('/:id/comments', async (c) => {
     // so it must fall through here too — ApiAuthor.name is a string, never null.
     const author: ApiAuthor = { id: String(row.id), name: row.displayName || row.username || 'مستخدم', avatarUrl: row.avatarUrl ?? undefined };
 
+    // "Replying to <name>: <body>" for every reply on the page. Without it a
+    // reply card gives the reader no way to tell a reply-to-a-reply from a
+    // reply-to-the-comment — the exact ambiguity the reader view already
+    // resolves. Two batched queries (parents, then their authors) rather than
+    // one per row, mirroring buildAuthorLookup in comments.ts.
+    const parentIds = [...new Set(page.map(({ row: r }) => r.parentId).filter((v): v is number => v != null))];
+    const parentById = new Map<number, { name: string; body: string }>();
+    if (parentIds.length) {
+      const prows = await db
+        .select({ id: comments.id, userId: comments.userId, body: comments.body, status: comments.status })
+        .from(comments)
+        .where(inArray(comments.id, parentIds));
+      const lookup = await buildAuthorLookup(prows.map((p) => p.userId).filter((v): v is string => !!v));
+      for (const p of prows) {
+        // A deleted parent is quoted by its author alone; quoting "[محذوف]"
+        // would read as the parent having said that.
+        parentById.set(p.id, {
+          name: p.userId ? (lookup.get(p.userId)?.name ?? 'مستخدم') : 'مستخدم محذوف',
+          body: p.status === 'deleted' ? '' : p.body,
+        });
+      }
+    }
+
     const data = page.map(({ row: r, novelTitle }) => ({
       ...toApi(r, author, 0),
       // The host already holds the author's identity and avatar; the novel
       // title is included because the list is novel-scoped and the client
       // renders a chapter label, not a novel one.
       novelTitle,
+      // Omitted (not null) when the row is top-level, so the client can branch
+      // on presence. Absent-tolerant on the client until this ships.
+      ...(r.parentId != null && parentById.get(r.parentId)
+        ? {
+            replyToAuthor: parentById.get(r.parentId)!.name,
+            replyToBody: parentById.get(r.parentId)!.body,
+          }
+        : {}),
     }));
 
     const nextCursor =

@@ -162,7 +162,7 @@ function authorOf(userId: string | null, lookup: Map<string, { name: string; ava
 }
 
 /** Single author batch for every DB read path. Live reads off users table. */
-async function buildAuthorLookup(userIds: string[]): Promise<Map<string, { name: string; avatarUrl?: string }>> {
+export async function buildAuthorLookup(userIds: string[]): Promise<Map<string, { name: string; avatarUrl?: string }>> {
   const lookup = new Map<string, { name: string; avatarUrl?: string }>();
   const uniq = [...new Set(userIds.filter(Boolean))];
   if (!uniq.length) return lookup;
@@ -422,11 +422,31 @@ commentsNovelsRouter.get('/:novelId/comments', async (c) => {
     }
     const page = all.slice(start, start + limit);
     const roots = page.map((m) => memToApi(m, 0));
-    // reply preview: NEWEST 2 visible children per root, rendered oldest→newest
+    // reply preview: NEWEST 2 visible rows per root plus their ancestor chain
+    // (mirrors the DB path above — see the CTE comment for why), oldest→newest.
     const data = roots.map((r) => {
       const rid = Number(String(r.id).replace('app_', ''));
-      const kids = [...MEM.values()].filter((m) => m.rootId === rid && (visibleOnly ? m.status === 'visible' : true))
-        .sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id - a.id).slice(0, 2)
+      const inThread = [...MEM.values()].filter((m) => m.rootId === rid && (visibleOnly ? m.status === 'visible' : true));
+      const picked = inThread
+        .sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id - a.id).slice(0, 2);
+      // Walk up from the picked rows, bounded by MAX_DEPTH like the SQL.
+      // `m.rootId === rid` is the guard that keeps the THREAD ROOT out: a root
+      // has rootId null, and it is already the thread being rendered.
+      const chain = new Map<number, (typeof picked)[number]>();
+      for (const k of picked) chain.set(k.id, k);
+      let frontier = picked.map((k) => k.parentId).filter((v): v is number => v != null);
+      for (let i = 0; i < MAX_DEPTH && frontier.length; i++) {
+        const next: number[] = [];
+        for (const pid of frontier) {
+          if (chain.has(pid)) continue;
+          const p = [...MEM.values()].find((m) => m.id === pid && m.rootId === rid);
+          if (!p) continue;
+          chain.set(p.id, p);
+          if (p.parentId != null) next.push(p.parentId);
+        }
+        frontier = next;
+      }
+      const kids = [...chain.values()]
         .map((m) => memToApi(m, 0))
         .sort((a, b) => a.createdAt.localeCompare(b.createdAt)
           || Number(String(a.id).replace('app_', '')) - Number(String(b.id).replace('app_', '')));
@@ -488,24 +508,46 @@ commentsNovelsRouter.get('/:novelId/comments', async (c) => {
       }
     }
     // reply preview: ONE round trip via window function (neon-http: each
-    // query = HTTPS). NEWEST ≤2 visible children per listed root, so a
+    // query = HTTPS). NEWEST ≤2 visible rows per listed root, so a
     // just-posted reply is always in the inline preview. (Was oldest-first,
     // which hid new replies on any thread with more than 2 children.)
     // Rows are re-sorted ascending on the client-facing `preview` array
     // (see below) so rendering order stays oldest→newest; only the SELECT
     // picks the newest.
+    //
+    // The picked rows span EVERY depth, so a reply-to-a-reply routinely arrives
+    // without its parent — the client then cannot nest it or name its target,
+    // and a reply-to-a-reply is indistinguishable from a reply-to-the-comment.
+    // The `ancestors` CTE therefore walks UP from the picked rows and carries
+    // the missing chain along, bounded by MAX_DEPTH so the result stays small.
+    // It is part of the same statement, so this is still one round trip.
     const previews = new Map<number, CommentRow[]>();
     if (page.length) {
       const ids = page.map((r) => r.id);
       const statusFilter = visibleOnly ? sql`AND c."status" = 'visible'` : sql``;
       const result = await db.execute(sql`
-        SELECT c.* FROM (
-          SELECT c.*,
-            ROW_NUMBER() OVER (PARTITION BY c."root_id" ORDER BY c."created_at" DESC, c."id" DESC) AS rn
-          FROM "comments" c
-          WHERE c."root_id" IN (${sql.join(ids.map((id) => sql`${id}`), sql`, `)})
-          ${statusFilter}
-        ) c WHERE c.rn <= 2 ORDER BY c."created_at" DESC, c."id" DESC
+        WITH RECURSIVE picked AS (
+          SELECT c.* FROM "comments" c
+          WHERE c."id" IN (
+            SELECT w."id" FROM (
+              SELECT c2."id",
+                ROW_NUMBER() OVER (PARTITION BY c2."root_id" ORDER BY c2."created_at" DESC, c2."id" DESC) AS rn
+              FROM "comments" c2
+              WHERE c2."root_id" IN (${sql.join(ids.map((id) => sql`${id}`), sql`, `)})
+              ${statusFilter}
+            ) w WHERE w.rn <= 2
+          )
+        ),
+        ancestors AS (
+          SELECT p.* FROM "comments" p
+          WHERE p."id" IN (SELECT "parent_id" FROM picked WHERE "parent_id" IS NOT NULL)
+          UNION
+          SELECT p.* FROM "comments" p JOIN ancestors a ON p."id" = a."parent_id"
+        )
+        SELECT * FROM picked
+        UNION
+        SELECT * FROM ancestors WHERE "id" NOT IN (SELECT "id" FROM picked)
+        ORDER BY "created_at" ASC, "id" ASC
       `);
       const rawRows = ((result as unknown as { rows?: Record<string, unknown>[] }).rows ?? result) as unknown as Record<string, any>[];
       for (const r of page) previews.set(r.id, []);
@@ -533,8 +575,9 @@ commentsNovelsRouter.get('/:novelId/comments', async (c) => {
           decidedReason: w.decided_reason,
         } as CommentRow;
         const rk = k.rootId as unknown as number;
-        // cap at 2 per root even if the DB shape ever drifts
-        if (rk != null && previews.has(rk) && previews.get(rk)!.length < 2) previews.get(rk)!.push(k);
+        // The bound now lives in the statement: ≤2 picked rows (rn <= 2) plus
+        // at most MAX_DEPTH-1 ancestors, so there is no cap to re-apply here.
+        if (rk != null && previews.has(rk)) previews.get(rk)!.push(k);
       }
     }
     // authors batch: roots ∪ previews union
@@ -542,7 +585,8 @@ commentsNovelsRouter.get('/:novelId/comments', async (c) => {
     const lookup = await buildAuthorLookup([...page.map((r) => r.userId).filter(Boolean) as string[], ...previewUids]);
     const data = page.map((r) => ({
       ...toApi(r, authorOf(r.userId, lookup), (liked.has(r.id) ? 1 : 0) as 1 | -1 | 0),
-      // The window selected the NEWEST 2; render them oldest→newest.
+      // The window selected the NEWEST 2 plus their ancestor chain; render the
+      // whole connected subtree oldest→newest.
       preview: (previews.get(r.id) ?? [])
         .map((k) => toApi(k, authorOf(k.userId, lookup), 0))
         .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
