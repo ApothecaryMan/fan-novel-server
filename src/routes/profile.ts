@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 import { and, desc, eq, inArray, lt, or, sql } from 'drizzle-orm';
 import { db, isDbAvailable } from '../database/db.js';
-import { comments, novels, subscriptionEvents, users } from '../database/schema.js';
+import { chapters, comments, novels, subscriptionEvents, users } from '../database/schema.js';
 import { requireAuth } from '../middleware/auth.js';
 import { getEnv } from '../config/env.js';
 import { findMemoryUser } from './auth.js';
@@ -462,10 +462,19 @@ profileRouter.get('/:id/comments', async (c) => {
     );
 
     // One extra row is the hasMore probe; no second COUNT query on page 2+.
+    // `chapterTitle` comes from a LEFT join on (novel_id, chapter_number),
+    // which `novel_chapter_idx` makes unique per novel — so the join can never
+    // multiply a row and the keyset boundary below stays correct. A novel-level
+    // comment has chapter_number NULL, so the join yields NULL and the client
+    // falls back to the novel title.
     const rows = await db
-      .select({ row: comments, novelTitle: novels.title })
+      .select({ row: comments, novelTitle: novels.title, chapterTitle: chapters.title })
       .from(comments)
       .innerJoin(novels, eq(novels.id, comments.novelId))
+      .leftJoin(
+        chapters,
+        and(eq(chapters.novelId, comments.novelId), eq(chapters.chapterNumber, comments.chapterNumber)),
+      )
       .where(where)
       .orderBy(desc(comments.createdAt), desc(comments.id))
       .limit(limit + 1);
@@ -503,12 +512,16 @@ profileRouter.get('/:id/comments', async (c) => {
       }
     }
 
-    const data = page.map(({ row: r, novelTitle }) => ({
+    const data = page.map(({ row: r, novelTitle, chapterTitle }) => ({
       ...toApi(r, author, 0),
       // The host already holds the author's identity and avatar; the novel
       // title is included because the list is novel-scoped and the client
       // renders a chapter label, not a novel one.
       novelTitle,
+      // The chapter's own title, so the client can label a card
+      // "<number> - <title>" instead of a bare number. Null for a novel-level
+      // comment or a chapter that was removed from the book.
+      chapterTitle: chapterTitle ?? null,
       // Omitted (not null) when the row is top-level, so the client can branch
       // on presence. Absent-tolerant on the client until this ships.
       ...(r.parentId != null && parentById.get(r.parentId)

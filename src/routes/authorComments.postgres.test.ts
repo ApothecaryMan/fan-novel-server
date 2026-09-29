@@ -5,7 +5,7 @@ import { eq, ne } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import { migrate } from 'drizzle-orm/node-postgres/migrator';
 import * as schema from '../database/schema.js';
-import { comments, novels, users } from '../database/schema.js';
+import { chapters, comments, novels, users } from '../database/schema.js';
 import { closeDb, initDb } from '../database/db.js';
 import { profileRouter } from './profile.js';
 
@@ -17,6 +17,7 @@ type ListedComment = {
   body: string;
   likes: number;
   novelTitle: string;
+  chapterTitle: string | null;
   createdAt: string;
   replyToAuthor?: string;
   replyToBody?: string;
@@ -158,6 +159,9 @@ beforeEach(async () => {
   // count and ordering assertions below are scoped to this author, whose rows
   // are deleted here, but OTHER authors' rows must not leak in either.
   await database.delete(comments);
+  // The novels outlive each test, so their chapters must be cleared too or the
+  // (novelId, chapterNumber) unique index rejects the next test's fixture.
+  await database.delete(chapters);
   await database.delete(users).where(ne(users.externalId, authorExternalId));
 });
 
@@ -269,6 +273,49 @@ describe.skipIf(!url)('GET /users/:id/comments (author comment list)', () => {
     const reply = body.data.find((c: ListedComment) => c.body === 'رد على محذوف');
     expect(reply.replyToAuthor).toBe('اختفى');
     expect(reply.replyToBody).toBe('');
+  });
+
+  // The card renders "<number> - <title>", so the route has to carry the
+  // chapter's own title — the number alone is what it shipped before.
+  it('carries the chapter title so the client can label "3 - title"', async () => {
+    await database.insert(chapters).values({
+      novelId: novelA, chapterNumber: 1, title: 'البداية', contentHash: 'ch-hash-1',
+    });
+    await seedComments([
+      { novelId: novelA, chapterNumber: 1, body: 'on a titled chapter', minutesAgo: 5 },
+      { novelId: novelA, chapterNumber: null, body: 'on the novel wall', minutesAgo: 1 },
+    ]);
+
+    const { body } = await get(`/api/v1/users/${authorRowId}/comments?novelId=${novelA}`);
+    const titled = body.data.find((c: ListedComment) => c.body === 'on a titled chapter');
+    expect(titled.chapterTitle).toBe('البداية');
+    // A novel-level comment belongs to no chapter, so the join yields null and
+    // the client falls back to the novel title.
+    const wall = body.data.find((c: ListedComment) => c.body === 'on the novel wall');
+    expect(wall.chapterTitle).toBeNull();
+  });
+
+  it('returns a null chapter title for a comment whose chapter was removed', async () => {
+    // The chapter row can be deleted while its comments remain; the number must
+    // still render, so the client falls back to the bare number.
+    await seedComments([
+      { novelId: novelA, chapterNumber: 9, body: 'orphan chapter', minutesAgo: 5 },
+    ]);
+    const { body } = await get(`/api/v1/users/${authorRowId}/comments?novelId=${novelA}`);
+    expect(body.data[0].chapterTitle).toBeNull();
+  });
+
+  it('does not duplicate a row when the chapter join matches', async () => {
+    // `novel_chapter_idx` is unique per (novelId, chapterNumber), so the LEFT
+    // JOIN cannot fan out — if it ever could, the cursor would repeat rows.
+    await database.insert(chapters).values({
+      novelId: novelA, chapterNumber: 1, title: 'البداية', contentHash: 'ch-hash-1',
+    });
+    await seedComments([
+      { novelId: novelA, chapterNumber: 1, body: 'only one', minutesAgo: 5 },
+    ]);
+    const { body } = await get(`/api/v1/users/${authorRowId}/comments?novelId=${novelA}`);
+    expect(body.data).toHaveLength(1);
   });
 
   it('excludes pending, hidden and deleted rows', async () => {
