@@ -13,3 +13,16 @@ extensions-repo/public/
 # they carry a different EAS projectId than the real app.
 app.json
 eas.json
+
+# Local tooling artifacts — per-machine state, never deployable.
+#   .wrangler/         Miniflare dev cache + local R2 blob store (~22 MB of
+#                      metadata.sqlite and hash-named blobs; rewritten by every
+#                      `wrangler dev` run, nothing in it is a build input).
+#   .agents/, .claude/ Agent skill directories installed by the `skills` CLI.
+#                      Per-developer reference docs, duplicated across both
+#                      paths, and .claude/skills is a symlink.
+#   skills-lock.json   Pin file written by `skills add` to track those installs.
+.wrangler/
+.agents/
+.claude/
+skills-lock.json
