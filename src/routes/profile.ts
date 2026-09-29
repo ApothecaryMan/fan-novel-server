@@ -1,8 +1,8 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
-import { and, count, desc, eq, isNull, lt, or, sql } from 'drizzle-orm';
+import { and, desc, eq, lt, or, sql } from 'drizzle-orm';
 import { db, isDbAvailable } from '../database/db.js';
-import { comments, novels, readingHistory, readingSessions, subscriptionEvents, userLibrary, users } from '../database/schema.js';
+import { comments, novels, subscriptionEvents, users } from '../database/schema.js';
 import { requireAuth } from '../middleware/auth.js';
 import { getEnv } from '../config/env.js';
 import { findMemoryUser } from './auth.js';
@@ -231,26 +231,48 @@ profileRouter.get('/me/profile', async (c, next) => {
       });
     }
 
-    const [libRows, histRows, sessRows, dayRows] = await Promise.all([
-      db.select({ total: count() }).from(userLibrary)
-        .where(and(eq(userLibrary.userId, row.id), isNull(userLibrary.deletedAt))),
-      db.select({ total: count() }).from(readingHistory).where(eq(readingHistory.userId, row.id)),
-      db.select({
-        total: count(),
-        seconds: sql<number>`COALESCE(SUM(${readingSessions.seconds}), 0)`,
-        words: sql<number>`COALESCE(SUM(${readingSessions.words}), 0)`,
-      }).from(readingSessions).where(eq(readingSessions.userId, row.id)),
-      db.select({ readDay: readingSessions.readDay }).from(readingSessions)
-        .where(eq(readingSessions.userId, row.id)).limit(60),
-    ]);
+    // ---- Legacy aggregates: ONE round trip, not four.
+    //
+    // Scalar subqueries over the resolved users row, so neon-http pays one
+    // HTTPS request instead of four and node-postgres pays one pool checkout.
+    // Every subquery is scoped by user_id and served by an existing leading-
+    // column index (user_library_idx, history_user_read_at_id_idx,
+    // sessions_user_read_day_idx), so this stays index scans, not seq scans.
+    // The days subquery returns DISTINCT days newest-first (capped at 60):
+    // the old `LIMIT 60` without ORDER BY read an arbitrary slice and could
+    // miss the recent days the streak is computed from.
+    //
+    // Identifiers inside these fragments are hand-qualified ("user_library"."user_id",
+    // not ${userLibrary.userId}): drizzle's sql`` renders BARE column names in the
+    // select list, which here would bind to the wrong table or fail the query
+    // (e.g. "user_id" = "id" compares a uuid to the integer PK). Verified
+    // against the generated SQL; if a table/column is renamed, Postgres fails
+    // loudly here instead of returning wrong numbers.
+    const [agg] = await db.select({
+      library: sql<number>`(SELECT COUNT(*) FROM "user_library" WHERE "user_library"."user_id" = "users"."id" AND "user_library"."deleted_at" IS NULL)`,
+      history: sql<number>`(SELECT COUNT(*) FROM "reading_history" WHERE "reading_history"."user_id" = "users"."id")`,
+      sessions: sql<number>`(SELECT COUNT(*) FROM "reading_sessions" WHERE "reading_sessions"."user_id" = "users"."id")`,
+      // GREATEST mirrors the per-row clamp the canonical engine applies
+      // (calculations.ts sumSeconds/sumWords both use addNonNegative): a
+      // legacy v1 row with negative `seconds` or `words` contributes nothing.
+      // Without the clamp the same reader could see two different totalWords —
+      // here versus the Pro readingStats projection — which is exactly the
+      // drift this route is not allowed to have.
+      seconds: sql<number>`(SELECT COALESCE(SUM(GREATEST("reading_sessions"."seconds", 0)), 0) FROM "reading_sessions" WHERE "reading_sessions"."user_id" = "users"."id")`,
+      words: sql<number>`(SELECT COALESCE(SUM(GREATEST("reading_sessions"."words", 0)), 0) FROM "reading_sessions" WHERE "reading_sessions"."user_id" = "users"."id")`,
+      readDays: sql<string[]>`(SELECT COALESCE(ARRAY_AGG(t.day), '{}') FROM (SELECT DISTINCT "reading_sessions"."read_day" AS day FROM "reading_sessions" WHERE "reading_sessions"."user_id" = "users"."id" ORDER BY day DESC LIMIT 60) t)`,
+    }).from(users).where(eq(users.id, row.id));
 
-    const library = Number(libRows[0]?.total ?? 0);
-    const history = Number(histRows[0]?.total ?? 0);
-    const sessions = Number(sessRows[0]?.total ?? 0);
-    const totalSeconds = Number(sessRows[0]?.seconds ?? 0);
-    const totalWords = Number(sessRows[0]?.words ?? 0);
+    const library = Number(agg?.library ?? 0);
+    const history = Number(agg?.history ?? 0);
+    const sessions = Number(agg?.sessions ?? 0);
+    const totalSeconds = Number(agg?.seconds ?? 0);
+    const totalWords = Number(agg?.words ?? 0);
     const levelInfo = legacyLevelInfo(getLevelFromSeconds(totalSeconds));
-    const streakDays = streakFromReadDays(dayRows.map((r) => r.readDay).filter(Boolean));
+    // node-postgres parses text[] to string[]; neon-http returns the array as
+    // well. Anything else (driver drift) degrades to "no streak", never a crash.
+    const days = Array.isArray(agg?.readDays) ? agg.readDays.filter((d): d is string => typeof d === 'string' && d.length > 0) : [];
+    const streakDays = streakFromReadDays(days);
 
     // ---- PLAN GATE (legacy aggregates) ------------------------------------
     // Derived per § Legacy v1 gating: keys stay byte-identical, Pro values are
@@ -289,20 +311,23 @@ function toPublicSafe(u: any) {
 
 /**
  * Resolve a public `:id` (users.id UUID or users.externalId) to the users row.
- * UUID first, then externalId — the same precedence and the same reason the
- * profile route uses it: comment author chips carry the UUID.
+ * UUID-shaped input hits BOTH key spaces in one round trip; the ORDER BY keeps
+ * the documented precedence (id match sorts above an externalId-only match),
+ * which is why comment author chips carrying the UUID stay on the fast path.
+ * A UUID-shaped externalId still resolves — it just never shadows the real row.
  *
  * Shared by /:id/profile and /:id/comments so the two public routes can never
  * disagree about who an id refers to.
  */
 async function resolvePublicUser(raw: string) {
-  let row: any = null;
   if (UUID_RE.test(raw)) {
-    [row] = await db.select(PROFILE_USER_COLUMNS).from(users).where(eq(users.id, raw)).limit(1);
+    const rows = await db.select(PROFILE_USER_COLUMNS).from(users)
+      .where(or(eq(users.id, raw), eq(users.externalId, raw)))
+      .orderBy(sql`${users.id} = ${raw} DESC`)
+      .limit(1);
+    return rows[0] ?? null;
   }
-  if (!row) {
-    [row] = await db.select(PROFILE_USER_COLUMNS).from(users).where(eq(users.externalId, raw)).limit(1);
-  }
+  const [row] = await db.select(PROFILE_USER_COLUMNS).from(users).where(eq(users.externalId, raw)).limit(1);
   return row ?? null;
 }
 
@@ -321,23 +346,36 @@ profileRouter.get('/:id/profile', async (c) => {
     const mem = findMemoryUser(raw);
     if (!mem) return c.json({ success: false, code: 'user_not_found', error: 'user not found' }, 404);
     c.header('Cache-Control', 'public, max-age=60, stale-while-revalidate=60');
-    return c.json({ success: true, user: toPublicSafe(mem), stats: { commentsCount: 0, likesReceived: 0 } });
+    return c.json({ success: true, user: toPublicSafe(mem), stats: { commentsCount: 0, likesReceived: 0 }, level: 1, isPro: false });
   }
   try {
     // UUID-first: comment author chips carry the users.id UUID (dominant tap path).
     // A UUID-shaped externalId still resolves via the externalId fallthrough.
     const row = await resolvePublicUser(raw);
     if (!row) return c.json({ success: false, code: 'user_not_found', error: 'user not found' }, 404);
-    // Single aggregate over the RESOLVED uuid; visible rows only (replies included,
-    // pending/hidden/deleted excluded; orphaned user_id IS NULL rows never match).
-    const [statsRow] = await db.select({
-      commentsCount: count(),
-      likesReceived: sql<number>`COALESCE(SUM(${comments.likesCount}), 0)`,
-    }).from(comments).where(and(eq(comments.userId, row.id), eq(comments.status, 'visible')));
-    const commentsCount = Number(statsRow?.commentsCount ?? 0);
-    const likesReceived = Number(statsRow?.likesReceived ?? 0);
+    // ONE round trip for both aggregates, correlated over the resolved row:
+    // the comments aggregate reads visible rows only (replies included,
+    // pending/hidden/deleted excluded; orphaned user_id IS NULL rows never
+    // match) and the level SUM runs through the SAME canonical ladder as
+    // /me/profile. Only the level number is exposed — never minutes,
+    // progress, or remaining time, which stay behind the readingStats contract.
+    // GREATEST mirrors the per-row clamp in freeStore: a legacy v1 row with a
+    // negative `seconds` contributes time in no projection.
+    // Identifiers are hand-qualified (see the note on the /me/profile
+    // aggregate): drizzle renders bare column names in select-list sql``.
+    const [pub] = await db.select({
+      commentsCount: sql<number>`(SELECT COUNT(*) FROM "comments" WHERE "comments"."user_id" = "users"."id" AND "comments"."status" = 'visible')`,
+      likesReceived: sql<number>`(SELECT COALESCE(SUM("comments"."likes_count"), 0) FROM "comments" WHERE "comments"."user_id" = "users"."id" AND "comments"."status" = 'visible')`,
+      seconds: sql<number>`(SELECT COALESCE(SUM(GREATEST("reading_sessions"."seconds", 0)), 0) FROM "reading_sessions" WHERE "reading_sessions"."user_id" = "users"."id")`,
+    }).from(users).where(eq(users.id, row.id));
+    const commentsCount = Number(pub?.commentsCount ?? 0);
+    const likesReceived = Number(pub?.likesReceived ?? 0);
+    const level = getLevelFromSeconds(Number(pub?.seconds ?? 0)).level;
+    // Pro seal: the effective plan off the already-resolved row (fail-closed:
+    // a lapsed expiry reads free). Boolean only — no clocks leave the server.
+    const isPro = effectiveReadingPlan(row, Date.now()) === 'pro';
     c.header('Cache-Control', 'public, max-age=60, stale-while-revalidate=60');
-    return c.json({ success: true, user: toPublicSafe(row), stats: { commentsCount, likesReceived } });
+    return c.json({ success: true, user: toPublicSafe(row), stats: { commentsCount, likesReceived }, level, isPro });
   } catch (error) {
     // Read-only route: see the note on /me/profile — a failed read must not
     // trip the write-side breaker.
@@ -428,8 +466,11 @@ profileRouter.get('/:id/comments', async (c) => {
     const page = hasMore ? rows.slice(0, limit) : rows;
     const last = page[page.length - 1]?.row;
 
-    // One author for the whole page, so it is projected once.
-    const author: ApiAuthor = { id: String(row.id), name: row.displayName ?? null, avatarUrl: row.avatarUrl ?? undefined };
+    // One author for the whole page, so it is projected once. Fallback chain
+    // mirrors buildAuthorLookup in comments.ts exactly (falsy chain, not
+    // nullish): an empty-string displayName falls through to username there,
+    // so it must fall through here too — ApiAuthor.name is a string, never null.
+    const author: ApiAuthor = { id: String(row.id), name: row.displayName || row.username || 'مستخدم', avatarUrl: row.avatarUrl ?? undefined };
 
     const data = page.map(({ row: r, novelTitle }) => ({
       ...toApi(r, author, 0),

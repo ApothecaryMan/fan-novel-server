@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { eq } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { requestId } from 'hono/request-id';
 import { identityDb, productionBindings } from '../test/identityDb.js';
@@ -133,6 +134,79 @@ describe('GET /users/me/profile', () => {
       tierMeta: { nameKey: `levels.tier${canonical.tier}` },
     });
   });
+
+  // The days subquery feeds the streak through the same single aggregate:
+  // DISTINCT days, newest-first, capped at 60. streakDays is a Pro dimension
+  // on the legacy payload, so the caller is pro here — a free caller reads 0.
+  it('derives streakDays from distinct recent read days in the same aggregate', async () => {
+    const { token }: any = await (await loginAs('streak-9', 'streak9@test.com')).json();
+    const me = fake().rows.find((r) => r.email === 'streak9@test.com');
+    if (!me) throw new Error('test setup: login did not persist a user row');
+    await fake().db.update(users)
+      .set({ readingStatsPlan: 'pro', readingStatsPlanExpiresAt: Date.now() + 86_400_000 })
+      .where(eq(users.id, me.id));
+    const day = (ago: number) => {
+      const d = new Date();
+      d.setUTCDate(d.getUTCDate() - ago);
+      return d.toISOString().slice(0, 10);
+    };
+    fake().seedSessions([
+      { userId: me.id, seconds: 120, readDay: day(0) },
+      { userId: me.id, seconds: 120, readDay: day(0) },
+      { userId: me.id, seconds: 120, readDay: day(1) },
+      { userId: me.id, seconds: 120, readDay: day(5) },
+    ]);
+    const body: any = await (await app.request('/users/me/profile', {
+      headers: { Authorization: `Bearer ${token}` },
+    })).json();
+    expect(body.stats.sessions).toBe(4);
+    expect(body.stats.streakDays).toBe(2);
+  });
+
+  // The four aggregates all arrive in ONE query keyed off the resolved users
+  // row, so a hand-written identifier regression (a dropped `deleted_at IS
+  // NULL`, a subquery bound to the wrong table) would otherwise be invisible:
+  // without fixtures for user_library / reading_history these read 0 either
+  // way. These cases pin the subqueries at NON-zero values, scoped to the
+  // caller, so a wrong correlation fails loudly.
+  it('reports the library/history/session/word aggregates scoped to the caller', async () => {
+    const { token }: any = await (await loginAs('agg-7', 'agg7@test.com')).json();
+    const me = fake().rows.find((r) => r.email === 'agg7@test.com');
+    if (!me) throw new Error('test setup: login did not persist a user row');
+    const [other] = await fake().db.insert(users).values({
+      externalId: 'google_agg_other', email: 'agg-other@test.com',
+      username: 'agg-other', displayName: 'Other', role: 'reader',
+    }).returning();
+    // Pro: totalWords is a Pro dimension, zeroed for a Free-derived caller.
+    await fake().db.update(users)
+      .set({ readingStatsPlan: 'pro', readingStatsPlanExpiresAt: Date.now() + 86_400_000 })
+      .where(eq(users.id, me.id));
+    // Two live rows plus one soft-deleted: the deleted row must not count.
+    fake().seedLibrary([
+      { userId: me.id },
+      { userId: me.id, deletedAt: 1_700_000_000_000 },
+      { userId: me.id },
+    ]);
+    fake().seedHistory([{ userId: me.id }, { userId: me.id }]);
+    fake().seedSessions([
+      { userId: me.id, seconds: 3600, words: 900 },
+      { userId: me.id, seconds: 600, words: 150, readDay: '2026-09-28' },
+    ]);
+    // Another account's rows: any leak here is a correlation failure.
+    fake().seedLibrary([{ userId: other.id }, { userId: other.id }, { userId: other.id }]);
+    fake().seedHistory([{ userId: other.id }]);
+    fake().seedSessions([{ userId: other.id, seconds: 999_999, words: 999_999 }]);
+    const body: any = await (await app.request('/users/me/profile', {
+      headers: { Authorization: `Bearer ${token}` },
+    })).json();
+    expect(body.stats).toMatchObject({
+      library: 2,
+      history: 2,
+      sessions: 2,
+      totalSeconds: 4200,
+      totalWords: 1050,
+    });
+  });
 });
 describe('GET /users/:id/profile (public)', () => {
   const A1_UUID = '11111111-1111-4111-8111-111111111111';
@@ -192,6 +266,74 @@ describe('GET /users/:id/profile (public)', () => {
     expect(a.stats).toEqual({ commentsCount: 2, likesReceived: 8 });
     const b: any = await (await app.request(`/users/${B_UUID}/profile`)).json();
     expect(b.stats).toEqual({ commentsCount: 0, likesReceived: 0 });
+  });
+
+  it('exposes the reading level from session seconds, scoped to the resolved user', async () => {
+    await seedAuthorA();
+    await fake().db.insert(users).values({ id: B_UUID, externalId: 'google_subB',
+      email: 'b@test.com', displayName: 'B', role: 'reader' }).returning();
+    fake().seedComments([]);
+    fake().seedSessions([
+      { userId: A1_UUID, seconds: 3600 },
+      { userId: B_UUID, seconds: 10800 },
+    ]);
+    const a: any = await (await app.request(`/users/${A1_UUID}/profile`)).json();
+    expect(a.level).toBe(2);
+    const b: any = await (await app.request(`/users/${B_UUID}/profile`)).json();
+    expect(b.level).toBe(3);
+  });
+
+  it('reports level 1 when the author has no sessions', async () => {
+    await seedAuthorA();
+    fake().seedComments([]);
+    const a: any = await (await app.request(`/users/${A1_UUID}/profile`)).json();
+    expect(a.level).toBe(1);
+    expect(a.isPro).toBe(false);
+  });
+
+  it('clamps negative session seconds to zero before deriving the level', async () => {
+    await seedAuthorA();
+    fake().seedComments([]);
+    // A legacy v1 row with negative `seconds` contributes nothing: 3600 -
+    // 500 as a raw sum is 3100s (level 1), clamped it is 3600s (level 2).
+    // This must match the freeStore projection, which clamps per row.
+    fake().seedSessions([
+      { userId: A1_UUID, seconds: 3600 },
+      { userId: A1_UUID, seconds: -500 },
+    ]);
+    const a: any = await (await app.request(`/users/${A1_UUID}/profile`)).json();
+    expect(a.level).toBe(2);
+  });
+
+  it('keeps UUID precedence when an externalId is UUID-shaped', async () => {
+    await seedAuthorA();
+    // A second account whose externalId collides with A's UUID. The resolver
+    // probes both key spaces in one query with id-first ordering, so A1_UUID
+    // must still resolve to A — never to the shadow row.
+    const C_UUID = '44444444-4444-4444-8444-444444444444';
+    await fake().db.insert(users).values({ id: C_UUID, externalId: A1_UUID,
+      email: 'shadow@test.com', displayName: 'Shadow', role: 'reader' }).returning();
+    fake().seedComments([]);
+    const a: any = await (await app.request(`/users/${A1_UUID}/profile`)).json();
+    expect(a.user.externalId).toBe(A1_EXTERNAL);
+    const shadow: any = await (await app.request(`/users/${C_UUID}/profile`)).json();
+    expect(shadow.user.externalId).toBe(A1_UUID);
+  });
+
+  it('exposes isPro from the effective plan, fail-closed on expiry', async () => {
+    await fake().db.insert(users).values({ id: A1_UUID, externalId: A1_EXTERNAL,
+      email: A1_EMAIL, displayName: 'Author One', role: 'reader',
+      readingStatsPlan: 'pro', readingStatsPlanExpiresAt: Date.now() + 86400000 }).returning();
+    fake().seedComments([]);
+    const pro: any = await (await app.request(`/users/${A1_UUID}/profile`)).json();
+    expect(pro.isPro).toBe(true);
+    // Level is plan-independent and must serialize as a plain number for a Pro
+    // caller too — never null, never a string, never absent.
+    expect(typeof pro.level).toBe('number');
+    expect(Number.isInteger(pro.level)).toBe(true);
+    await fake().db.update(users).set({ readingStatsPlanExpiresAt: Date.now() - 1000 }).where(eq(users.id, A1_UUID));
+    const lapsed: any = await (await app.request(`/users/${A1_UUID}/profile`)).json();
+    expect(lapsed.isPro).toBe(false);
   });
 
   it('never exposes email (key absent, address absent from serialized body)', async () => {
