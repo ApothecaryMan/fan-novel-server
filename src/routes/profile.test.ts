@@ -207,6 +207,42 @@ describe('GET /users/me/profile', () => {
       totalWords: 1050,
     });
   });
+
+  // The whole point of the feature: what the owner picked has to come back to
+  // the OWNER too, or the account page could never reconcile against the server
+  // and the two would drift on the next pick.
+  it('returns the stored decorations on the private profile', async () => {
+    const { token }: any = await (await loginAs('deco-1', 'deco1@test.com')).json();
+    const me = fake().rows.find((r) => r.email === 'deco1@test.com');
+    if (!me) throw new Error('test setup: login did not persist a user row');
+    const stored = {
+      nameEffect: { kind: 'fire', color: '#FF7043', color2: '#FFD740' },
+      bannerGradient: { target: 'banner', color: '#FF7043', fade: 'soft', extent: 'mid', strength: 60 },
+      avatarFrameKey: 'fan_avatar/gold_avatar_frame_512.png',
+    };
+    await fake().db.update(users).set({ profileDecorations: stored as any }).where(eq(users.id, me.id));
+    const body: any = await (await app.request('/users/me/profile', {
+      headers: { Authorization: `Bearer ${token}` },
+    })).json();
+    expect(body.user.decorations).toEqual(stored);
+  });
+
+  // A row this build cannot validate must read as null, never as a partial card.
+  // The client's own normalizer runs one step further out, but a bad value must
+  // not survive the server hop either.
+  it('degrades an unvalidatable stored value to null', async () => {
+    const { token }: any = await (await loginAs('deco-2', 'deco2@test.com')).json();
+    const me = fake().rows.find((r) => r.email === 'deco2@test.com');
+    if (!me) throw new Error('test setup: login did not persist a user row');
+    // A kind from a newer client, hand-written straight past the write gate.
+    await fake().db.update(users)
+      .set({ profileDecorations: { nameEffect: { kind: 'hologram', color: '#fff', color2: '#000' } } as any })
+      .where(eq(users.id, me.id));
+    const body: any = await (await app.request('/users/me/profile', {
+      headers: { Authorization: `Bearer ${token}` },
+    })).json();
+    expect(body.user.decorations).toBeNull();
+  });
 });
 describe('GET /users/:id/profile (public)', () => {
   const A1_UUID = '11111111-1111-4111-8111-111111111111';
@@ -291,6 +327,28 @@ describe('GET /users/:id/profile (public)', () => {
     expect(a.isPro).toBe(false);
   });
 
+  // The visitor case: the whole feature exists so another reader sees the
+  // owner's card, so this has to be on the PUBLIC projection too.
+  it('carries the owner decorations onto the public author card', async () => {
+    await seedAuthorA();
+    const stored = {
+      nameEffect: { kind: 'gold', color: '#FFD740', color2: '#FF7043' },
+      bannerGradient: { target: 'below', color: '#4CAF50', fade: 'sharp', extent: 'low', strength: 40 },
+      avatarFrameKey: 'fan_avatar/white_rabbit_ears.png',
+    };
+    await fake().db.update(users).set({ profileDecorations: stored as any }).where(eq(users.id, A1_UUID));
+    fake().seedComments([]);
+    const body: any = await (await app.request(`/users/${A1_UUID}/profile`)).json();
+    expect(body.user.decorations).toEqual(stored);
+  });
+
+  it('reports null decorations for an owner who picked nothing', async () => {
+    await seedAuthorA();
+    fake().seedComments([]);
+    const body: any = await (await app.request(`/users/${A1_UUID}/profile`)).json();
+    expect(body.user.decorations).toBeNull();
+  });
+
   it('clamps negative session seconds to zero before deriving the level', async () => {
     await seedAuthorA();
     fake().seedComments([]);
@@ -345,7 +403,8 @@ describe('GET /users/:id/profile (public)', () => {
     expect(body.user).not.toHaveProperty('email');
     expect(JSON.stringify(body)).not.toContain(A1_EMAIL);
     expect(Object.keys(body.user).sort()).toEqual(['avatarUrl', 'bannerUrl', 'bio',
-      'createdAt', 'externalId', 'id', 'isAuthor', 'isTranslator', 'memberSince', 'name', 'provider', 'role', 'status', 'username']);
+      'createdAt', 'decorations', 'externalId', 'id', 'isAuthor', 'isTranslator', 'memberSince', 'name',
+      'provider', 'role', 'status', 'username']);
   });
 
   it('exposes join date as ISO createdAt + memberSince on public and private profiles', async () => {

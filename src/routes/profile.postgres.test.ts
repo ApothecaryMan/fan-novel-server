@@ -1,7 +1,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import pg from 'pg';
 import { Hono } from 'hono';
-import { eq, like } from 'drizzle-orm';
+import { eq, like, sql } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import { migrate } from 'drizzle-orm/node-postgres/migrator';
 import * as schema from '../database/schema.js';
@@ -9,6 +9,7 @@ import { comments, readingSessions, users } from '../database/schema.js';
 import { closeDb, initDb } from '../database/db.js';
 import { signToken } from '../middleware/auth.js';
 import { profileRouter } from './profile.js';
+import type { ProfileDecorations } from '../domain/profileDecorations.js';
 
 /**
  * The profile aggregates against REAL PostgreSQL, not the in-memory fake.
@@ -273,6 +274,43 @@ describe.skipIf(!url)('Profile aggregates (isolated PostgreSQL)', () => {
     expect(body.stats).toEqual({ commentsCount: 2, likesReceived: 8 });
     expect(body.level).toBe(3);
     expect(body.isPro).toBe(true);
+  });
+
+  // The unit fake cannot catch this one: it answers from row OBJECTS and matches
+  // on select keys, so it never executes the column list. Omitting
+  // `profileDecorations` from PROFILE_USER_COLUMNS therefore left all 29 unit
+  // tests green while the real query returned no such column and the projection
+  // read `undefined`. Only Postgres runs the SQL, so only Postgres catches it.
+  it('reads the decorations column off the real users row', async () => {
+    const { row, token } = await createUser('pro');
+    const stored: ProfileDecorations = {
+      nameEffect: { kind: 'fire', color: '#FF7043', color2: '#FFD740' },
+      bannerGradient: { target: 'below', color: '#4CAF50', fade: 'soft', extent: 'mid', strength: 60 },
+      avatarFrameKey: 'fan_avatar/gold_avatar_frame_512.png',
+    };
+    await database.update(users)
+      .set({ profileDecorations: stored })
+      .where(eq(users.id, row.id));
+    // Private projection.
+    const priv = await me(token);
+    expect(priv.status).toBe(200);
+    expect(priv.body.user.decorations).toEqual(stored);
+    // And the public one, which reads the same row through a different route.
+    const publicCard = await pub(row.id);
+    expect(publicCard.body.user.decorations).toEqual(stored);
+  });
+
+  // A row that cannot be validated must not reach a renderer as a partial card.
+  it('degrades a hand-written unvalidatable column to null on real Postgres', async () => {
+    const { row } = await createUser();
+    // Written past the zod gate, exactly what a newer client or a hand edit does.
+    await database.execute(sql`
+      UPDATE "users" SET "profile_decorations" = ${JSON.stringify({
+        nameEffect: { kind: 'hologram', color: '#fff', color2: '#000' },
+      })}::jsonb WHERE "id" = ${row.id}::uuid
+    `);
+    const body = await pub(row.id);
+    expect(body.body.user.decorations).toBeNull();
   });
 
   it('never exposes email on the public card, and rejects unknown ids', async () => {

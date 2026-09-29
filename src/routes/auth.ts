@@ -8,6 +8,8 @@ import { db, isDbAvailable, noteDbFailure } from '../database/db.js';
 import { users } from '../database/schema.js';
 import { requireAuth, signToken } from '../middleware/auth.js';
 import { adminEmails, getEnv } from '../config/env.js';
+import { isEmptyDecorations, profileDecorationsSchema } from '../domain/profileDecorations.js';
+import { toPublic as projectAccount } from '../domain/accountProjection.js';
 
 export const authRouter = new Hono();
 
@@ -43,17 +45,12 @@ function toIso(value: unknown): string | null {
   return null;
 }
 
+// The wire shape is defined once, in domain/accountProjection.ts. This file
+// used to keep its own copy while routes/profile.ts kept another, and they had
+// already drifted: `decorations` landed in one and not the other, so a PATCH
+// echoed back a user body without it. One authority now.
 function toPublic(u: any) {
-  const joined = toIso(u.createdAt);
-  return {
-    id: u.externalId ?? u.id, externalId: u.externalId ?? u.id, email: u.email,
-    name: u.displayName ?? null, username: u.username ?? null,
-    avatarUrl: u.avatarUrl, bannerUrl: u.bannerUrl ?? null,
-    bio: u.bio ?? null, status: u.bio ?? null,
-    role: u.role ?? 'reader', isAuthor: Boolean(u.isAuthor), isTranslator: Boolean(u.isTranslator),
-    provider: 'google',
-    createdAt: joined, memberSince: joined,
-  };
+  return projectAccount(u);
 }
 
 function accountError(c: import('hono').Context, error: unknown) {
@@ -184,6 +181,10 @@ const profilePatchSchema = z.object({
   status: z.string().max(500).nullable().optional(),
   avatarUrl: z.string().max(2000).nullable().optional(),
   bannerUrl: z.string().max(2000).nullable().optional(),
+  // Owner-chosen display decorations, replaced as ONE value. `null` clears them
+  // all, which is what the reset action means. The schema is the write gate, so
+  // the column can never hold a shape no renderer can draw.
+  decorations: profileDecorationsSchema.nullable().optional(),
 });
 
 authRouter.patch('/me', requireAuth, async (c) => {
@@ -191,9 +192,10 @@ authRouter.patch('/me', requireAuth, async (c) => {
   const sub = payload.sub ?? '';
   const parsed = profilePatchSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return c.json({ error: 'بيانات الملف الشخصي غير صالحة', issues: parsed.error.issues }, 400);
-  const { name, username, bio, status, avatarUrl, bannerUrl } = parsed.data;
+  const { name, username, bio, status, avatarUrl, bannerUrl, decorations } = parsed.data;
   const bioInput = bio !== undefined ? bio : status;
-  if (name === undefined && username === undefined && bioInput === undefined && avatarUrl === undefined && bannerUrl === undefined) {
+  if (name === undefined && username === undefined && bioInput === undefined && avatarUrl === undefined
+    && bannerUrl === undefined && decorations === undefined) {
     return c.json({ error: 'لا يوجد ما يتم تحديثه' }, 400);
   }
   for (const [label, url] of [['avatarUrl', avatarUrl], ['bannerUrl', bannerUrl]] as const) {
@@ -224,6 +226,11 @@ authRouter.patch('/me', requireAuth, async (c) => {
       if (bioInput !== undefined) patch.bio = cleanBio(bioInput);
       if (avatarUrl !== undefined) patch.avatarUrl = avatarUrl === null ? null : cleanMediaUrl(avatarUrl);
       if (bannerUrl !== undefined) patch.bannerUrl = bannerUrl === null ? null : cleanMediaUrl(bannerUrl);
+      // Whole-value replace. An empty object is normalised to NULL so a reset
+      // leaves no residue to be read back as "configured but invisible".
+      if (decorations !== undefined) {
+        patch.profileDecorations = isEmptyDecorations(decorations) ? null : decorations;
+      }
       const [updated] = await db.update(users).set(patch).where(eq(users.id, row.id)).returning();
       if (!updated) return c.json({ error: 'account not found' }, 401);
       return c.json({ success: true, user: toPublic({ ...updated, externalId: row.externalId }) });

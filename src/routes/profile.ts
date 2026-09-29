@@ -13,6 +13,7 @@ import { freeProjection } from '../features/readingSync/freeProtocol.js';
 import { proProjection } from '../features/readingSync/contracts.js';
 import { loadProStats } from '../features/readingSync/proStore.js';
 import { getLevelFromSeconds, type LevelInfo as CanonicalLevelInfo } from '../features/readingSync/calculations.js';
+import { toIso, toPublic as projectAccount } from '../domain/accountProjection.js';
 
 export const profileRouter = new Hono();
 
@@ -90,28 +91,6 @@ export function streakFromReadDays(readDays: string[], today = new Date()): numb
   return streak;
 }
 
-function toIso(value: unknown): string | null {
-  if (value instanceof Date) return isNaN(value.getTime()) ? null : value.toISOString();
-  if (typeof value === 'string' && value) {
-    const d = new Date(value);
-    return isNaN(d.getTime()) ? null : d.toISOString();
-  }
-  return null;
-}
-
-function toPublic(u: any) {
-  const joined = toIso(u.createdAt);
-  return {
-    id: u.externalId ?? u.id, externalId: u.externalId ?? u.id, email: u.email,
-    name: u.displayName ?? null, username: u.username ?? null,
-    avatarUrl: u.avatarUrl, bannerUrl: u.bannerUrl ?? null,
-    bio: u.bio ?? null, status: u.bio ?? null,
-    role: u.role ?? 'reader', isAuthor: Boolean(u.isAuthor), isTranslator: Boolean(u.isTranslator),
-    provider: 'google',
-    createdAt: joined, memberSince: joined,
-  };
-}
-
 /**
  * Every column a profile payload can name, and nothing else. Both profile
  * routes read through this list so a `users` row can never drag an auth anchor
@@ -131,6 +110,10 @@ const PROFILE_USER_COLUMNS = {
   isAuthor: users.isAuthor,
   isTranslator: users.isTranslator,
   createdAt: users.createdAt,
+  // Owner-chosen name effect / banner wash / avatar frame. Carried on the SAME
+  // row the projections above already read, so adding it costs no extra query
+  // on either profile route.
+  profileDecorations: users.profileDecorations,
   // Plan gate for the versioned body; never projected to a client.
   readingStatsPlan: users.readingStatsPlan,
   readingStatsPlanExpiresAt: users.readingStatsPlanExpiresAt,
@@ -198,7 +181,7 @@ profileRouter.get('/me/profile', async (c, next) => {
         const asOfDay = c.req.query('readingStatsAsOf');
         return c.json({
           success: true,
-          user: toPublic(row),
+          user: projectAccount(row),
           plan,
           planExpiresAt,
           readingStatsVersion: version.version,
@@ -232,7 +215,7 @@ profileRouter.get('/me/profile', async (c, next) => {
       }
       return c.json({
         success: true,
-        user: toPublic(row),
+        user: projectAccount(row),
         plan,
         planExpiresAt,
         readingStatsVersion: version.version,
@@ -289,7 +272,7 @@ profileRouter.get('/me/profile', async (c, next) => {
     const legacyFree = effectiveReadingPlan(row, Date.now()) !== 'pro';
     const legacyPayload = {
       success: true,
-      user: toPublic(row),
+      user: projectAccount(row),
       stats: {
         library,
         history,
@@ -311,11 +294,11 @@ profileRouter.get('/me/profile', async (c, next) => {
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-// Public projection: identical to toPublic() except the `email` key is ABSENT
-// (destructured away, never null) so publicly cacheable bodies cannot leak PII.
+// Public projection: identical to the private one except the `email` key is
+// ABSENT (never null) so a publicly cacheable body cannot leak PII. Handled by
+// the shared projection's own switch rather than by destructuring it away here.
 function toPublicSafe(u: any) {
-  const { email: _email, ...rest } = toPublic(u);
-  return rest;
+  return projectAccount(u, { includeEmail: false });
 }
 
 /**

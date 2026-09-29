@@ -135,6 +135,10 @@ describe('reading statistics database schema', () => {
       password_hash: column('text', false),
       avatar_url: column('text', false),
       banner_url: column('text', false),
+      // Owner decorations (name effect / banner wash / avatar frame). Nullable
+      // with NO default on purpose: a default would force a full table rewrite
+      // when 0015 adds it, whereas nullable+no-default is a catalog-only change.
+      profile_decorations: column('jsonb', false),
       bio: column('varchar(500)', false),
       role: column('varchar(20)', true, { hasDefault: true, default: 'reader' }),
       reading_stats_plan: column('varchar(10)', true, { hasDefault: true, default: 'free' }),

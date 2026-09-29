@@ -1,5 +1,6 @@
 import { sql } from 'drizzle-orm';
 import { pgTable, varchar, text, integer, smallint, real, boolean, timestamp, uuid, jsonb, bigint, uniqueIndex, index, check } from 'drizzle-orm/pg-core';
+import type { ProfileDecorations } from '../domain/profileDecorations.js';
 
 // 1. جدول المستخدمين (Users Table)
 // Production identity is google_<verified subject>; sync cannot create accounts.
@@ -14,6 +15,14 @@ export const users = pgTable('users', {
   passwordHash: text('password_hash'),
   avatarUrl: text('avatar_url'),
   bannerUrl: text('banner_url'),
+  // Display-name effect, banner wash and avatar frame, all three in ONE atomic
+  // value: a half-updated card is impossible, and a decoration added later needs
+  // no migration. NULL means "never picked" and costs one bit in the null map.
+  // No DEFAULT on purpose — a default would force a full table rewrite on the
+  // migration; nullable + no default is a catalog-only change in PG 11+.
+  // Shape is gated by zod at the write (PATCH /auth/me) and re-read trust-nothing
+  // via parseProfileDecorations on the way out. See domain/profileDecorations.ts.
+  profileDecorations: jsonb('profile_decorations').$type<ProfileDecorations | null>(),
   bio: varchar('bio', { length: 500 }),
   role: varchar('role', { length: 20 }).default('reader').notNull(), // 'reader' | 'admin'
   readingStatsPlan: varchar('reading_stats_plan', { length: 10 }).default('free').notNull(),
