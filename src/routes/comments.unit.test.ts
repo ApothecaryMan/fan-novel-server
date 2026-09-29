@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { decodeCursor, encodeCursor, parseCommentId } from './comments.js';
+import { decodeCursor, encodeCursor, parseCommentId, toApiAuthor } from './comments.js';
 
 // resolveEffectiveChapter lives in comments.ts (Task 5). Pure rule:
 // explicit != null -> explicit; else parent chapter; else null.
@@ -52,5 +52,44 @@ describe('chapter inheritance resolver', () => {
     expect(mismatch(72, 72)).toBe(false);
     expect(mismatch(undefined, 72)).toBe(false);
     expect(mismatch(5, null)).toBe(false);
+  });
+});
+
+// The commenter-profile sheet paints its first frame from the author block on
+// each comment row, so the profile-card fields have to be on the wire. They
+// cost nothing to send: buildAuthorLookup already selected the whole users row
+// for the name and avatar, so username/banner/createdAt were already in memory
+// and discarded. These fail if the projection is ever narrowed back.
+describe('toApiAuthor', () => {
+  const card = {
+    name: 'ليث',
+    avatarUrl: 'https://cdn.test/a.png',
+    username: 'lith',
+    bannerUrl: 'https://cdn.test/b.jpg',
+    createdAt: '2024-03-05T00:00:00.000Z',
+  };
+
+  it('carries the card fields the sheet needs for its first frame', () => {
+    expect(toApiAuthor('u1', card)).toEqual({
+      id: 'u1',
+      name: 'ليث',
+      avatarUrl: 'https://cdn.test/a.png',
+      username: 'lith',
+      bannerUrl: 'https://cdn.test/b.jpg',
+      createdAt: '2024-03-05T00:00:00.000Z',
+    });
+  });
+
+  it('omits an empty field rather than sending null or an empty string', () => {
+    // Null and absent are equivalent to the client, but absent is smaller — and
+    // an empty string would render as a blank handle or a broken banner.
+    const out = toApiAuthor('u1', { name: 'ليث', username: '', bannerUrl: '' });
+    expect(Object.keys(out).sort()).toEqual(['id', 'name']);
+    expect('username' in out).toBe(false);
+    expect('bannerUrl' in out).toBe(false);
+  });
+
+  it('falls back to the generic label for an unknown commenter', () => {
+    expect(toApiAuthor('u1', undefined)).toEqual({ id: 'u1', name: 'مستخدم' });
   });
 });

@@ -484,11 +484,22 @@ profileRouter.get('/:id/comments', optionalAuth, async (c) => {
     const page = hasMore ? rows.slice(0, limit) : rows;
     const last = page[page.length - 1]?.row;
 
-    // One author for the whole page, so it is projected once. Fallback chain
-    // mirrors buildAuthorLookup in comments.ts exactly (falsy chain, not
-    // nullish): an empty-string displayName falls through to username there,
-    // so it must fall through here too — ApiAuthor.name is a string, never null.
-    const author: ApiAuthor = { id: String(row.id), name: row.displayName || row.username || 'مستخدم', avatarUrl: row.avatarUrl ?? undefined };
+    // Same ISO coercion the comments route applies, so a malformed clock is
+    // dropped rather than serialized as junk the client would try to format.
+    const createdAt = toIso(row.createdAt) ?? undefined;
+
+    // One author for the whole page, so it is projected once. The card fields
+    // mirror what buildAuthorLookup puts on a comments row (comments.ts), so
+    // the commenter sheet gets the same first-paint data whichever route fed
+    // the list. Absent keys are omitted rather than nulled, same as there.
+    const author: ApiAuthor = {
+      id: String(row.id),
+      name: row.displayName || row.username || 'مستخدم',
+      ...(row.avatarUrl ? { avatarUrl: row.avatarUrl } : {}),
+      ...(row.username ? { username: row.username } : {}),
+      ...(row.bannerUrl ? { bannerUrl: row.bannerUrl } : {}),
+      ...(createdAt ? { createdAt } : {}),
+    };
 
     // Liked-by-me batch, so a card the reader already voted on renders filled
     // instead of re-showing an empty heart and inviting a second vote. Same

@@ -134,7 +134,37 @@ const listQuerySchema = z.object({
 
 export type CommentRow = typeof comments.$inferSelect;
 
-export interface ApiAuthor { id: string; name: string; avatarUrl?: string }
+/**
+ * The author block carried on every comment row.
+ *
+ * `username` / `bannerUrl` / `createdAt` are the commenter's card fields the
+ * commenter-profile sheet would otherwise have to wait a second round trip to
+ * learn. They ride along because `buildAuthorLookup` already selects the whole
+ * `users` row for the name and avatar, so carrying them is projection only —
+ * no extra query, no extra column fetched, no extra request on the client.
+ *
+ * They are OPTIONAL: a source that cannot supply them (deleted author, memory
+ * fallback, an older payload) omits the key rather than sending null, and the
+ * client falls back to the comment's own author data.
+ */
+export interface ApiAuthor {
+  id: string;
+  name: string;
+  avatarUrl?: string;
+  username?: string;
+  bannerUrl?: string;
+  /** ISO join date, the raw `users.created_at`. */
+  createdAt?: string;
+}
+
+/** What the batched author lookup caches per commenter. */
+export type AuthorCard = {
+  name: string;
+  avatarUrl?: string;
+  username?: string;
+  bannerUrl?: string;
+  createdAt?: string;
+};
 
 export function toApi(row: CommentRow, author: ApiAuthor, myVote: 1 | -1 | 0) {
   return {
@@ -155,19 +185,66 @@ export function toApi(row: CommentRow, author: ApiAuthor, myVote: 1 | -1 | 0) {
   };
 }
 
-function authorOf(userId: string | null, lookup: Map<string, { name: string; avatarUrl?: string }>): ApiAuthor {
-  if (!userId) return { id: 'deleted', name: 'مستخدم محذوف' };
-  const hit = lookup.get(userId);
-  return hit ? { id: userId, name: hit.name, avatarUrl: hit.avatarUrl } : { id: userId, name: 'مستخدم' };
+/** ISO-8601 or null. Keeps a malformed clock from reaching the client as junk. */
+function toIsoStamp(value: unknown): string | undefined {
+  if (value instanceof Date && !isNaN(value.getTime())) return value.toISOString();
+  if (typeof value === 'string' && value) {
+    const d = new Date(value);
+    if (!isNaN(d.getTime())) return d.toISOString();
+  }
+  return undefined;
 }
 
-/** Single author batch for every DB read path. Live reads off users table. */
-export async function buildAuthorLookup(userIds: string[]): Promise<Map<string, { name: string; avatarUrl?: string }>> {
-  const lookup = new Map<string, { name: string; avatarUrl?: string }>();
+/**
+ * Project one cached author card onto the wire block.
+ *
+ * Spread-then-omit: an empty value DROPS its key instead of sending null. The
+ * client treats absent and null the same way, and omitting keeps the payload
+ * small for the overwhelmingly common commenter who set neither a handle nor a
+ * banner. Exported as a pure helper so the wire shape is testable without a
+ * database, matching the other pure helpers in this file.
+ */
+export function toApiAuthor(id: string, card: AuthorCard | undefined): ApiAuthor {
+  if (!card) return { id, name: 'مستخدم' };
+  const { name, avatarUrl, username, bannerUrl, createdAt } = card;
+  return {
+    id,
+    name,
+    ...(avatarUrl ? { avatarUrl } : {}),
+    ...(username ? { username } : {}),
+    ...(bannerUrl ? { bannerUrl } : {}),
+    ...(createdAt ? { createdAt } : {}),
+  };
+}
+
+function authorOf(userId: string | null, lookup: Map<string, AuthorCard>): ApiAuthor {
+  if (!userId) return { id: 'deleted', name: 'مستخدم محذوف' };
+  return toApiAuthor(userId, lookup.get(userId));
+}
+
+/**
+ * Single author batch for every DB read path. Live reads off users table.
+ *
+ * The projection carries the profile-card fields the commenter sheet needs. The
+ * `db.select()` below has always read the WHOLE users row (it is a single
+ * unfiltered select keyed by the id list), so username/banner/createdAt were
+ * already in memory and discarded. Widening the map is therefore free: same
+ * query, same rows, same indexes.
+ */
+export async function buildAuthorLookup(userIds: string[]): Promise<Map<string, AuthorCard>> {
+  const lookup = new Map<string, AuthorCard>();
   const uniq = [...new Set(userIds.filter(Boolean))];
   if (!uniq.length) return lookup;
   const urows = await db.select().from(users).where(inArray(users.id, uniq));
-  for (const u of urows) lookup.set(u.id, { name: u.displayName || u.username || 'مستخدم', avatarUrl: u.avatarUrl ?? undefined });
+  for (const u of urows) {
+    lookup.set(u.id, {
+      name: u.displayName || u.username || 'مستخدم',
+      avatarUrl: u.avatarUrl ?? undefined,
+      username: u.username ?? undefined,
+      bannerUrl: u.bannerUrl ?? undefined,
+      createdAt: toIsoStamp(u.createdAt),
+    });
+  }
   return lookup;
 }
 
@@ -224,7 +301,10 @@ function memToApi(m: MemComment, myVote: 1 | -1 | 0) {
     parentId: m.parentId != null ? `app_${m.parentId}` : null,
     rootId: m.rootId != null ? `app_${m.rootId}` : null,
     chapterNumber: m.chapterNumber,
-    author: { id: m.userId ?? 'anon', name: m.userName, avatarUrl: m.avatarUrl },
+    // Dev fixtures carry no banner/handle/join date; the keys are simply absent,
+    // exactly as the DB path emits them for a commenter who has none. The client
+    // must not be able to tell the two apart.
+    author: { id: m.userId ?? 'anon', name: m.userName, ...(m.avatarUrl ? { avatarUrl: m.avatarUrl } : {}) },
     body: m.status === 'deleted' ? '[محذوف]' : m.body,
     likes: m.likesCount, repliesCount: m.repliesCount, myVote,
     isEdited: m.editedAt != null || m.editCount > 0,
