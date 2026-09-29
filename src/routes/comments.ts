@@ -547,7 +547,16 @@ commentsNovelsRouter.get('/:novelId/comments', optionalAuth, async (c) => {
         )
         SELECT * FROM picked
         UNION
-        SELECT * FROM ancestors WHERE "id" NOT IN (SELECT "id" FROM picked)
+        -- The listed roots are the containers the preview hangs off, so they
+        -- must never come back as members of their own preview. Excluding them
+        -- HERE, in SQL, is what stops the walk from fetching a full root row —
+        -- body included — for every thread whose newest replies are direct
+        -- children, which is the overwhelmingly common shape. Dropping them in
+        -- JS instead (their rootId is null) still paid the fetch and the
+        -- transfer for every one of them.
+        SELECT * FROM ancestors
+        WHERE "id" NOT IN (SELECT "id" FROM picked)
+          AND "id" NOT IN (${sql.join(ids.map((id) => sql`${id}`), sql`, `)})
         ORDER BY "created_at" ASC, "id" ASC
       `);
       const rawRows = ((result as unknown as { rows?: Record<string, unknown>[] }).rows ?? result) as unknown as Record<string, any>[];
