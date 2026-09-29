@@ -593,7 +593,7 @@ describe.skipIf(!url)('Free reading plan sync (isolated PostgreSQL)', () => {
     const versionedText = await versioned.text();
     const versionedBody: any = JSON.parse(versionedText);
 
-    expect(Object.keys(versionedBody).sort()).toEqual(['plan', 'readingStats', 'readingStatsVersion', 'success', 'user']);
+    expect(Object.keys(versionedBody).sort()).toEqual(['plan', 'planExpiresAt', 'readingStats', 'readingStatsVersion', 'success', 'user']);
     // The identity projection is identical on both payloads.
     expect(versionedBody.user).toEqual(legacyBody.user);
     // `stats` and the levelInfo spread are Pro dimensions, so no legacy-only key

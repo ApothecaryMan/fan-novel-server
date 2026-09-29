@@ -105,6 +105,30 @@ export function effectiveReadingPlan(
   return nowMs < expiresAt ? 'pro' : 'free';
 }
 
+/**
+ * The entitlement clock that GOVERNS the plan currently in force, or null.
+ *
+ * Published alongside `plan` so a client can retire an expired Pro locally
+ * instead of waiting for its next round trip. Two properties are deliberate:
+ *
+ *  - It is derived from `effectiveReadingPlan`, so it can never disagree with
+ *    the tier in the same response. A lapsed row still holding a stale
+ *    `readingStatsPlanExpiresAt` publishes `null`, not a past timestamp, because
+ *    the plan it governed is already Free.
+ *  - It is non-null ONLY while the plan is `pro`. A client therefore can never
+ *    use the presence of an expiry to infer Pro — the value can only ever
+ *    REVOKE, never grant. That keeps the client's local check fail-closed no
+ *    matter how wrong the device clock is.
+ */
+export function effectivePlanExpiry(
+  user: { readingStatsPlan?: unknown; readingStatsPlanExpiresAt?: unknown } | null | undefined,
+  nowMs: number,
+): number | null {
+  if (effectiveReadingPlan(user, nowMs) !== 'pro') return null;
+  const expiresAt = (user as { readingStatsPlanExpiresAt?: unknown } | null | undefined)?.readingStatsPlanExpiresAt;
+  return typeof expiresAt === 'number' && Number.isSafeInteger(expiresAt) ? expiresAt : null;
+}
+
 const sessionColumns = {
   clientSessionId: readingSessions.clientSessionId,
   novelId: readingSessions.novelId,

@@ -563,11 +563,62 @@ describe('GET /users/me/profile?readingStatsVersion=2', () => {
     expect(body.plan).toBe('free');
     expect(Object.keys(body.readingStats).sort()).toEqual([...FREE_STATS_KEYS].sort());
     expect(body.readingStats).toEqual({ level: 1, levelProgress: 0, totalSecondsRead: 0, uniqueInAppCompletedChapters: 0 });
-    // Plan-scoped means plan-scoped: the identity fields plus the plan, the
-    // version and the four Free stats — nothing else at the top level.
-    expect(Object.keys(body).sort()).toEqual(['plan', 'readingStats', 'readingStatsVersion', 'success', 'user']);
+    // Plan-scoped means plan-scoped: the identity fields, the plan, the
+    // entitlement clock that governs it, the version and the four Free stats —
+    // nothing else at the top level. `planExpiresAt` belongs here because it is
+    // the same entitlement, not a legacy aggregate.
+    expect(Object.keys(body).sort()).toEqual(['plan', 'planExpiresAt', 'readingStats', 'readingStatsVersion', 'success', 'user']);
+    // Free means null, so a client can only ever REVOKE a Pro with this value.
+    expect(body.planExpiresAt).toBeNull();
     expect(body.success).toBe(true);
     expect(body.user).toMatchObject({ id: SUBJECT, externalId: SUBJECT, email: `${SUBJECT}@test.com` });
+  });
+
+  // The client uses `planExpiresAt` to retire a lapsed Pro locally, so its whole
+  // value is "is it non-null, and is the governing plan still pro".
+  it('publishes the entitlement clock only while the plan is pro', async () => {
+    const proExpiry = Date.now() + 30 * 86_400_000;
+    await seedUser(SUBJECT, {
+      readingStatsPlan: 'pro',
+      readingStatsPlanStartedAt: Date.now(),
+      readingStatsPlanExpiresAt: proExpiry,
+    });
+    const res = await app.request('/users/me/profile?readingStatsVersion=2', {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    const body: any = await res.json();
+    expect(body.plan).toBe('pro');
+    expect(body.planExpiresAt).toBe(proExpiry);
+  });
+
+  // The fail-closed guarantee: a lapsed Pro row still holds a PAST expiry in
+  // the database. Publishing it would invite a client to compare a stale clock
+  // and infer something. It must publish null so the value can only revoke.
+  it('publishes null once the plan has lapsed, never the stale past expiry', async () => {
+    const past = Date.now() - 86_400_000;
+    await seedUser(SUBJECT, {
+      readingStatsPlan: 'pro',
+      readingStatsPlanStartedAt: past - 30 * 86_400_000,
+      readingStatsPlanExpiresAt: past,
+    });
+    const res = await app.request('/users/me/profile?readingStatsVersion=2', {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    const body: any = await res.json();
+    expect(body.plan).toBe('free');
+    expect(body.planExpiresAt).toBeNull();
+  });
+
+  // A Pro flag with no usable expiry grants nothing (the existing fail-closed
+  // rule), so there is no clock to publish either.
+  it('publishes null for a pro flag with no safe-integer expiry', async () => {
+    await seedUser(SUBJECT, { readingStatsPlan: 'pro' });
+    const res = await app.request('/users/me/profile?readingStatsVersion=2', {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    const body: any = await res.json();
+    expect(body.plan).toBe('free');
+    expect(body.planExpiresAt).toBeNull();
   });
 
   it('omits every Pro aggregate from the serialized body', async () => {

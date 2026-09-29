@@ -7,7 +7,7 @@ import { requireAuth } from '../middleware/auth.js';
 import { getEnv } from '../config/env.js';
 import { findMemoryUser } from './auth.js';
 import { encodeCursor, decodeCursor, toApi, type RootsCursor, type ApiAuthor } from './comments.js';
-import { effectiveReadingPlan, loadFreeStatsForUser } from '../features/readingSync/freeStore.js';
+import { effectivePlanExpiry, effectiveReadingPlan, loadFreeStatsForUser } from '../features/readingSync/freeStore.js';
 import { freeProjection } from '../features/readingSync/freeProtocol.js';
 import { proProjection } from '../features/readingSync/contracts.js';
 import { loadProStats } from '../features/readingSync/proStore.js';
@@ -185,7 +185,13 @@ profileRouter.get('/me/profile', async (c, next) => {
     // for Pro. Not running the aggregate queries at all is also cheaper than
     // building the payload and dropping keys afterwards.
     if (version.requested) {
-      const plan = effectiveReadingPlan(row, Date.now());
+      const now = Date.now();
+      const plan = effectiveReadingPlan(row, now);
+      // Published so the client can retire an expired Pro without a round trip
+      // (getDownloadCap and the badge read it locally). Null whenever the plan
+      // is free, so it can only revoke — never grant — and it is derived from
+      // the same call as `plan`, so the two can never disagree.
+      const planExpiresAt = effectivePlanExpiry(row, now);
       if (plan === 'pro') {
         const yearRaw = Number(c.req.query('readingStatsYear'));
         const asOfDay = c.req.query('readingStatsAsOf');
@@ -193,6 +199,7 @@ profileRouter.get('/me/profile', async (c, next) => {
           success: true,
           user: toPublic(row),
           plan,
+          planExpiresAt,
           readingStatsVersion: version.version,
           readingStats: proProjection(await loadProStats(row.id, {
             year: Number.isSafeInteger(yearRaw) && yearRaw >= 1 && yearRaw <= 9999 ? yearRaw : undefined,
@@ -226,6 +233,7 @@ profileRouter.get('/me/profile', async (c, next) => {
         success: true,
         user: toPublic(row),
         plan,
+        planExpiresAt,
         readingStatsVersion: version.version,
         readingStats: freeProjection(freeStats),
       });
