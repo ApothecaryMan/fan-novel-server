@@ -5,8 +5,9 @@ import { eq, ne } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import { migrate } from 'drizzle-orm/node-postgres/migrator';
 import * as schema from '../database/schema.js';
-import { chapters, comments, novels, users } from '../database/schema.js';
+import { chapters, commentVotes, comments, novels, users } from '../database/schema.js';
 import { closeDb, initDb } from '../database/db.js';
+import { signToken } from '../middleware/auth.js';
 import { profileRouter } from './profile.js';
 
 type ListedComment = {
@@ -432,6 +433,55 @@ describe.skipIf(!url)('GET /users/:id/comments (author comment list)', () => {
     const blank = await get(`/api/v1/users/%20/comments?novelId=${novelA}`);
     expect(blank.status).toBe(400);
     expect(blank.body.code).toBe('invalid_id');
+  });
+
+  // myVote is per-caller, so it must not ride on a publicly cacheable body —
+  // that would hand one reader's votes to whoever hits the shared cache next.
+  it('marks the caller’s own vote and keeps that answer out of shared caches', async () => {
+    // Per-caller state is only resolved in closed mode; SYNC_OPEN defaults to
+    // 'true' (env.ts:67), which is the open LAN/dev posture where every reader
+    // is the same local user. getEnv() re-reads on each call, so toggling it
+    // here is enough — but it must be restored for the other tests.
+    const prevSyncOpen = process.env.SYNC_OPEN;
+    process.env.SYNC_OPEN = 'false';
+    try {
+      const voterExternal = nextSubject();
+      const [voter] = await database.insert(users).values({
+        externalId: voterExternal, email: `${voterExternal}@test.local`,
+        username: voterExternal, displayName: 'Voter', role: 'reader',
+      }).returning();
+      const token = await signToken({ id: voterExternal, email: `${voterExternal}@test.local`, role: 'reader' });
+
+      await seedComments([
+        { novelId: novelA, chapterNumber: 1, body: 'voted on', minutesAgo: 5 },
+        { novelId: novelA, chapterNumber: 1, body: 'untouched', minutesAgo: 1 },
+      ]);
+      const votedId = Number(
+        (await database.select({ id: comments.id }).from(comments)
+          .where(eq(comments.body, 'voted on')))[0].id,
+      );
+      await database.insert(commentVotes).values({ commentId: votedId, userId: voter.id, value: 1 });
+
+      const anon = await app.request(`/api/v1/users/${authorRowId}/comments?novelId=${novelA}`);
+      const anonBody = await anon.json() as any;
+      expect(anonBody.data.every((c: any) => c.myVote === 0)).toBe(true);
+      expect(anon.headers.get('cache-control')).toBe('public, max-age=60, stale-while-revalidate=60');
+      expect(anon.headers.get('vary')).toBeNull();
+
+      const mine = await app.request(`/api/v1/users/${authorRowId}/comments?novelId=${novelA}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const mineBody = await mine.json() as any;
+      const voted = mineBody.data.find((c: any) => c.body === 'voted on');
+      const untouched = mineBody.data.find((c: any) => c.body === 'untouched');
+      expect(voted.myVote).toBe(1);
+      expect(untouched.myVote).toBe(0);
+      expect(mine.headers.get('cache-control')).toContain('private');
+      expect(mine.headers.get('vary')).toBe('Authorization');
+    } finally {
+      if (prevSyncOpen === undefined) delete process.env.SYNC_OPEN;
+      else process.env.SYNC_OPEN = prevSyncOpen;
+    }
   });
 
   it('never exposes email in a publicly cacheable body', async () => {

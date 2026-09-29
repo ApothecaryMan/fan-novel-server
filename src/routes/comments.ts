@@ -4,7 +4,7 @@ import { and, asc, desc, eq, gt, inArray, lt, or, sql } from 'drizzle-orm';
 import { db, isDbAvailable, noteDbFailure } from '../database/db.js';
 import { chapters, comments, commentModLog, commentVotes, novels, users } from '../database/schema.js';
 import { NOVELS_STORE } from './novels.js';
-import { requireAuth } from '../middleware/auth.js';
+import { requireAuth, optionalAuth } from '../middleware/auth.js';
 import { getCaller } from '../middleware/ownership.js';
 import { rateLimit } from '../middleware/rateLimit.js';
 import { getEnv } from '../config/env.js';
@@ -384,7 +384,8 @@ async function requireNovelMod(c: any, novelId: string) {
 // ---------- novel-scoped routes ----------
 
 // GET /api/v1/novels/:novelId/comments?chapter&cursor&limit&sort=new|top
-commentsNovelsRouter.get('/:novelId/comments', async (c) => {
+// optionalAuth: public, but the caller's own like state is per-reader.
+commentsNovelsRouter.get('/:novelId/comments', optionalAuth, async (c) => {
   const novelId = c.req.param('novelId');
   const parsed = listQuerySchema.safeParse({
     chapter: c.req.query('chapter'), cursor: c.req.query('cursor'),

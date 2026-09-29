@@ -45,6 +45,37 @@ export const requireAuth: MiddlewareHandler = async (c, next) => {
   await next();
 };
 
+/**
+ * Verify a Bearer token ONLY when one is present, then continue either way.
+ *
+ * Public reads need this to answer per-caller questions — "did I already like
+ * this comment?" — because `getCaller` reads `authUser`, which `requireAuth`
+ * sets but which never runs on an unauthenticated route. Without it, every
+ * public read looked anonymous to itself, so a reader's own likes were never
+ * marked and always came back unfilled after a reload.
+ *
+ * A malformed or expired token is treated as anonymous, NOT as a 401: the read
+ * is public, and rejecting it would break a signed-out reader's page. Writes go
+ * through `requireAuth`, which is where a bad token must fail.
+ */
+export const optionalAuth: MiddlewareHandler = async (c, next) => {
+  if (c.get('authUser')) return next();
+  const header = c.req.header('Authorization');
+  const token = header?.startsWith('Bearer ') ? header.slice(7) : undefined;
+  if (token) {
+    try {
+      const { payload } = await jwtVerify(token, getSecretKey(), {
+        issuer: 'web-novel',
+        audience: 'web-novel-app'
+      });
+      c.set('authUser', payload);
+    } catch {
+      /* anonymous: see the note above */
+    }
+  }
+  await next();
+};
+
 declare module 'hono' {
   interface ContextVariableMap {
     authUser: Record<string, unknown>;

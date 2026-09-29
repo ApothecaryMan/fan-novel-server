@@ -2,11 +2,12 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 import { and, desc, eq, inArray, lt, or, sql } from 'drizzle-orm';
 import { db, isDbAvailable } from '../database/db.js';
-import { chapters, comments, novels, subscriptionEvents, users } from '../database/schema.js';
-import { requireAuth } from '../middleware/auth.js';
+import { chapters, commentVotes, comments, novels, subscriptionEvents, users } from '../database/schema.js';
+import { requireAuth, optionalAuth } from '../middleware/auth.js';
 import { getEnv } from '../config/env.js';
 import { findMemoryUser } from './auth.js';
 import { buildAuthorLookup, encodeCursor, decodeCursor, toApi, type RootsCursor, type ApiAuthor } from './comments.js';
+import { getCaller } from '../middleware/ownership.js';
 import { effectivePlanExpiry, effectiveReadingPlan, loadFreeStatsForUser } from '../features/readingSync/freeStore.js';
 import { freeProjection } from '../features/readingSync/freeProtocol.js';
 import { proProjection } from '../features/readingSync/contracts.js';
@@ -412,7 +413,7 @@ const authorCommentsQuerySchema = z.object({
 
 // Registered AFTER /:id/profile. Both are `/:id/...`; Hono matches on the full
 // path shape, and this one carries a second segment.
-profileRouter.get('/:id/comments', async (c) => {
+profileRouter.get('/:id/comments', optionalAuth, async (c) => {
   const raw = String(c.req.param('id') ?? '').trim();
   if (!raw) return c.json({ success: false, code: 'invalid_id', error: 'invalid user id' }, 400);
 
@@ -489,6 +490,20 @@ profileRouter.get('/:id/comments', async (c) => {
     // so it must fall through here too — ApiAuthor.name is a string, never null.
     const author: ApiAuthor = { id: String(row.id), name: row.displayName || row.username || 'مستخدم', avatarUrl: row.avatarUrl ?? undefined };
 
+    // Liked-by-me batch, so a card the reader already voted on renders filled
+    // instead of re-showing an empty heart and inviting a second vote. Same
+    // one-query shape as the roots list (comments.ts), and gated the same way:
+    // the route is publicly cacheable, so a per-caller answer must vary the
+    // cache key rather than be baked into a shared response.
+    const liked = new Set<string>();
+    const profileCaller = getEnv().syncOpen ? null : await getCaller(c);
+    if (profileCaller?.row && page.length) {
+      const vrows = await db.select({ commentId: commentVotes.commentId })
+        .from(commentVotes)
+        .where(and(eq(commentVotes.userId, profileCaller.row.id), inArray(commentVotes.commentId, page.map((r) => r.row.id))));
+      for (const v of vrows) liked.add(String(v.commentId));
+    }
+
     // "Replying to <name>: <body>" for every reply on the page. Without it a
     // reply card gives the reader no way to tell a reply-to-a-reply from a
     // reply-to-the-comment — the exact ambiguity the reader view already
@@ -513,7 +528,7 @@ profileRouter.get('/:id/comments', async (c) => {
     }
 
     const data = page.map(({ row: r, novelTitle, chapterTitle }) => ({
-      ...toApi(r, author, 0),
+      ...toApi(r, author, (liked.has(String(r.id)) ? 1 : 0) as 1 | -1 | 0),
       // The host already holds the author's identity and avatar; the novel
       // title is included because the list is novel-scoped and the client
       // renders a chapter label, not a novel one.
@@ -537,7 +552,16 @@ profileRouter.get('/:id/comments', async (c) => {
         ? encodeCursor({ t: new Date(last.createdAt as unknown as string).getTime(), i: last.id })
         : null;
 
-    c.header('Cache-Control', 'public, max-age=60, stale-while-revalidate=60');
+    // The body now carries per-caller `myVote`, so a signed-in reader's answer
+    // must never be served to anyone else from a shared cache. Anonymous reads
+    // stay publicly cacheable and carry myVote=0 for everyone, so the same
+    // policy as the roots list (comments.ts:601) applies here.
+    if (profileCaller?.row) {
+      c.header('Cache-Control', 'private, max-age=30, stale-while-revalidate=60');
+      c.header('Vary', 'Authorization');
+    } else {
+      c.header('Cache-Control', 'public, max-age=60, stale-while-revalidate=60');
+    }
     return c.json({
       success: true,
       // Null on cursor pages, matching /novels/:id/comments: the badge/count

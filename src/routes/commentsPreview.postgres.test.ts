@@ -5,8 +5,9 @@ import { eq } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import { migrate } from 'drizzle-orm/node-postgres/migrator';
 import * as schema from '../database/schema.js';
-import { comments, novels, users } from '../database/schema.js';
+import { commentVotes, comments, novels, users } from '../database/schema.js';
 import { closeDb, initDb } from '../database/db.js';
+import { signToken } from '../middleware/auth.js';
 import { commentsNovelsRouter } from './comments.js';
 
 /**
@@ -171,6 +172,41 @@ describe('GET /novels/:id/comments — reply preview', () => {
     const [listed] = await listRoots();
     const ids = listed.preview.map((p) => Number(p.id.replace('app_', '')));
     expect(ids).toEqual([a, b]);
+  });
+
+  it("marks the reader's own like on a public read", async () => {
+    // The roots list is public and never ran requireAuth, so getCaller saw no
+    // authUser and every reader's own likes came back unfilled. optionalAuth
+    // on the route is what fixes it; without it this reads myVote 0 twice.
+    const prevSyncOpen = process.env.SYNC_OPEN;
+    process.env.SYNC_OPEN = 'false';
+    try {
+      const external = `cprev-voter-${process.pid.toString(36)}-${(counter += 1)}`;
+      const [voter] = await database.insert(users).values({
+        externalId: external, email: `${external}@test.local`,
+        username: external, displayName: 'Voter', role: 'reader',
+      }).returning();
+      const token = await signToken({ id: external, email: `${external}@test.local`, role: 'reader' });
+
+      const root = await add({ body: 'root', userKey: 'rootUser', minutesAgo: 60 });
+      await add({ body: 'a', userKey: 'aUser', parentId: root, rootId: root, depth: 1, minutesAgo: 5 });
+      // The list computes myVote for ROOT rows only (comments.ts), so the vote
+      // goes on the root — that is the row `data[0]` is.
+      await database.insert(commentVotes).values({ commentId: root, userId: voter.id, value: 1 });
+
+      const anon = await app.request(`/api/v1/novels/${novelId}/comments?limit=20&chapter=1`);
+      const anonBody = await anon.json() as { data: Array<{ myVote: number }> };
+      expect(anonBody.data[0].myVote).toBe(0);
+
+      const mine = await app.request(`/api/v1/novels/${novelId}/comments?limit=20&chapter=1`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const mineBody = await mine.json() as { data: Array<{ myVote: number }> };
+      expect(mineBody.data[0].myVote).toBe(1);
+    } finally {
+      if (prevSyncOpen === undefined) delete process.env.SYNC_OPEN;
+      else process.env.SYNC_OPEN = prevSyncOpen;
+    }
   });
 
   it('terminates on a self-referential row instead of looping forever', async () => {
