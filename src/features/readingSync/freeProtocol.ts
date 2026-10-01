@@ -238,7 +238,6 @@ export function proPlanNotImplementedResponse(plan: ReadingPlan = 'pro'): SyncFa
 }
 
 export function buildFreePushResponse(input: {
-  stats: FreeStats;
   serverNow: number;
   appliedSessions: number;
   acceptedSessionIds: readonly string[];
@@ -252,7 +251,6 @@ export function buildFreePushResponse(input: {
     // counts only the rows this request created, so an identical retry is a
     // success that reports 0 applied instead of double-counting the event.
     acceptedSessionIds: [...input.acceptedSessionIds],
-    stats: freeProjection(input.stats),
   };
 }
 

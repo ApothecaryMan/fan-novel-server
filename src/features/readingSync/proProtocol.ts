@@ -18,7 +18,6 @@ export function parseProV2Pull(body: unknown): ProReadingSyncPull {
 }
 
 export function buildProPushResponse(input: {
-  stats: ProStats;
   serverNow: number;
   applied: {
     sessions: number;
@@ -35,7 +34,6 @@ export function buildProPushResponse(input: {
     serverNow: input.serverNow,
     applied: { ...input.applied },
     acceptedSessionIds: [...input.acceptedSessionIds],
-    stats: proProjection(input.stats),
   };
 }
 

@@ -478,13 +478,19 @@ export const proReadingSyncAppliedCountsSchema = strictObject({
   novels: nonNegativeInteger(),
 });
 
+// A push response deliberately carries NO `stats`.
+//
+// Nothing consumes it: the client validates the envelope and then reads only
+// `acceptedSessionIds` and `applied` (its flush result has no stats field). On
+// the Pro channel the aggregate cost three unbounded scans of the account's
+// entire history per push, which is the single hottest write path there is.
+// The aggregate still ships on PULL, where it is actually read.
 export const freeReadingSyncPushResponseSchema = strictObject({
   success: successSchema,
   plan: z.literal('free'),
   serverNow: epochMilliseconds(),
   applied: freeReadingSyncAppliedCountsSchema,
   acceptedSessionIds: acceptedSessionIdsSchema,
-  stats: freeStatsSchema,
 });
 
 export const proReadingSyncPushResponseSchema = strictObject({
@@ -493,7 +499,6 @@ export const proReadingSyncPushResponseSchema = strictObject({
   serverNow: epochMilliseconds(),
   applied: proReadingSyncAppliedCountsSchema,
   acceptedSessionIds: acceptedSessionIdsSchema,
-  stats: proStatsSchema,
 });
 
 export const readingSyncPushResponseSchema = z.union([

@@ -186,7 +186,6 @@ const validFreePushResponse = {
   serverNow: 1782470501000,
   applied: { sessions: 1 },
   acceptedSessionIds: [validFreeSession.clientSessionId],
-  stats: validFreeStats,
 };
 
 const validProPushResponse = {
@@ -201,7 +200,6 @@ const validProPushResponse = {
     novels: 1,
   },
   acceptedSessionIds: [validProSession.clientSessionId],
-  stats: validProStats,
 };
 
 const validFreePullResponse = {
@@ -582,7 +580,6 @@ describe('reading sync v2 contracts', () => {
         'serverNow',
         'applied',
         'acceptedSessionIds',
-        'stats',
       ]);
       expectExactKeys(validProPushResponse, [
         'success',
@@ -590,7 +587,6 @@ describe('reading sync v2 contracts', () => {
         'serverNow',
         'applied',
         'acceptedSessionIds',
-        'stats',
       ]);
       expectExactKeys(validFreePushResponse.applied, ['sessions']);
       expectExactKeys(validProPushResponse.applied, [
@@ -603,13 +599,25 @@ describe('reading sync v2 contracts', () => {
     });
 
     it('rejects cross-plan push responses and non-exact response keys', () => {
+      // A push response carries NO aggregate: the client never read one, and on
+      // the Pro channel it cost three unbounded scans of the account's history
+      // on the hottest write path. Its presence is now a contract violation.
+      expect(freeReadingSyncPushResponseSchema.safeParse({
+        ...validFreePushResponse,
+        stats: validFreeStats,
+      }).success).toBe(false);
+      expect(proReadingSyncPushResponseSchema.safeParse({
+        ...validProPushResponse,
+        stats: validProStats,
+      }).success).toBe(false);
+      // The plan tag and the applied-count shape must agree.
       expect(readingSyncPushResponseSchema.safeParse({
         ...validFreePushResponse,
-        stats: validProStats,
+        plan: 'pro',
       }).success).toBe(false);
       expect(readingSyncPushResponseSchema.safeParse({
         ...validProPushResponse,
-        stats: validFreeStats,
+        plan: 'free',
       }).success).toBe(false);
       expect(freeReadingSyncPushResponseSchema.safeParse({
         ...validFreePushResponse,

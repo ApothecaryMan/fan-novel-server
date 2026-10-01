@@ -331,13 +331,15 @@ export async function storeProPush(
 ): Promise<ProPushWriteResult> {
   const sessions = await storeProSessions(userId, payload.sessions);
   if (sessions.conflictingSessionIds.length > 0) return { ...sessions, collections: { library: 0, history: 0, chapterStates: 0, novels: 0 } };
-  const collections = {
-    library: await storeLibrary(userId, payload.library ?? [], now, skewMs),
-    history: await storeHistory(userId, payload.history ?? [], now, skewMs),
-    chapterStates: await storeChapterStates(userId, payload.chapterStates ?? []),
-    novels: await storeNovels(userId, payload.novels ?? []),
-  };
-  return { ...sessions, collections };
+  // The four collections are independent tables, so they overlap rather than
+  // queueing: four sequential HTTPS round trips to Neon become one.
+  const [library, history, chapterStates, novels] = await Promise.all([
+    storeLibrary(userId, payload.library ?? [], now, skewMs),
+    storeHistory(userId, payload.history ?? [], now, skewMs),
+    storeChapterStates(userId, payload.chapterStates ?? []),
+    storeNovels(userId, payload.novels ?? []),
+  ]);
+  return { ...sessions, collections: { library, history, chapterStates, novels } };
 }
 
 export async function loadProStats(

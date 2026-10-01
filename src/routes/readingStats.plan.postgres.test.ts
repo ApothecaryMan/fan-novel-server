@@ -180,7 +180,6 @@ describe.skipIf(!url)('Free reading plan sync (isolated PostgreSQL)', () => {
       serverNow: expect.any(Number),
       applied: { sessions: 2 },
       acceptedSessionIds: ['m-abc123-7', 'm-def456-8'],
-      stats: { level: 1, levelProgress: expect.any(Number), totalSecondsRead: 166, uniqueInAppCompletedChapters: 2 },
     });
     // The route assembles the envelope field by field; parsing it back through
     // the declared contract keeps that hand-assembly from drifting.
@@ -253,7 +252,8 @@ describe.skipIf(!url)('Free reading plan sync (isolated PostgreSQL)', () => {
     expect(retry.success).toBe(true);
     expect(retry.applied).toEqual({ sessions: 0 });
     expect(retry.acceptedSessionIds).toEqual(['m-abc123-7']);
-    expect(retry.stats).toEqual(first.stats);
+    // A push response no longer carries an aggregate at all.
+    expect(retry).not.toHaveProperty('stats');
     expect(await storedRows(row.id)).toHaveLength(1);
   });
 
@@ -401,8 +401,11 @@ describe.skipIf(!url)('Free reading plan sync (isolated PostgreSQL)', () => {
       session({ clientSessionId: 'm-again-2', chapterId: 2, progressPercent: 100, completed: true }),
     ], token);
     expect(res.status).toBe(200);
+    // The aggregate is a READ: the push only acknowledges the write.
+    const pulled: any = await (await request('/sync/pull', { syncVersion: 2, user: { externalId } }, token)).json();
+    expect(pulled.stats.uniqueInAppCompletedChapters).toBe(2);
     const body: any = await res.json();
-    expect(body.stats.uniqueInAppCompletedChapters).toBe(2);
+    expect(body).not.toHaveProperty('stats');
     expect(body.applied).toEqual({ sessions: 4 });
   });
 
@@ -424,8 +427,8 @@ describe.skipIf(!url)('Free reading plan sync (isolated PostgreSQL)', () => {
       proFieldsPresent: false,
     });
     // Signed but below the boundary: time counts, the chapter does not.
-    const body: any = await res.json();
-    expect(body.stats).toMatchObject({ totalSecondsRead: 120, uniqueInAppCompletedChapters: 0 });
+    const pulled: any = await (await request('/sync/pull', { syncVersion: 2, user: { externalId } }, token)).json();
+    expect(pulled.stats).toMatchObject({ totalSecondsRead: 120, uniqueInAppCompletedChapters: 0 });
   });
 
   it('treats a legacy v1 session as time only, never as completion evidence', async () => {
@@ -446,11 +449,13 @@ describe.skipIf(!url)('Free reading plan sync (isolated PostgreSQL)', () => {
     expect(stored.proFieldsPresent).toBe(false);
 
     const push: any = await (await freePush(externalId, [session({ clientSessionId: 'v2-1', chapterId: 11 })], token)).json();
-    expect(push.stats).toMatchObject({ totalSecondsRead: 683, uniqueInAppCompletedChapters: 1 });
+    // The write is acknowledged without an aggregate; only the pull returns one.
+    expect(push).not.toHaveProperty('stats');
+    expect(push.applied).toEqual({ sessions: 1 });
 
     const pulled: any = await (await request('/sync/pull', { syncVersion: 2, user: { externalId } }, token)).json();
     expect(Object.keys(pulled).sort()).toEqual(['plan', 'stats', 'success']);
-    expect(pulled.stats).toEqual(push.stats);
+    expect(pulled.stats).toMatchObject({ totalSecondsRead: 683, uniqueInAppCompletedChapters: 1 });
   });
 
   it('keeps the existing owner policy on the v2 channel', async () => {
@@ -630,16 +635,19 @@ describe.skipIf(!url)('Free reading plan sync (isolated PostgreSQL)', () => {
     const proOnly = PRO_ONLY_STATS_KEYS;
     const rawRowPattern = /"clientSessionId"|"library"|"history"|"chapterStates"|"novels"|"words"|"scrollY"|"content"/;
 
-    for (const res of [
-      await freePush(externalId, [], token),
-      await request('/sync/pull', { syncVersion: 2, user: { externalId } }, token),
-    ]) {
-      const text = await res.text();
-      const body = JSON.parse(text);
-      expect(Object.keys(body.stats).sort()).toEqual([...FREE_STATS_KEYS].sort());
-      for (const key of proOnly) expect(body).not.toHaveProperty(key);
-      expect(text).not.toMatch(rawRowPattern);
-    }
+    // A push now carries NO aggregate at all, which is the strongest form of
+    // this check: there is no projection to leak.
+    const pushText = await (await freePush(externalId, [], token)).text();
+    const pushBody = JSON.parse(pushText);
+    expect(pushBody).not.toHaveProperty('stats');
+    for (const key of proOnly) expect(pushBody).not.toHaveProperty(key);
+    expect(pushText).not.toMatch(rawRowPattern);
+
+    const pullText = await (await request('/sync/pull', { syncVersion: 2, user: { externalId } }, token)).text();
+    const pullBody = JSON.parse(pullText);
+    expect(Object.keys(pullBody.stats).sort()).toEqual([...FREE_STATS_KEYS].sort());
+    for (const key of proOnly) expect(pullBody).not.toHaveProperty(key);
+    expect(pullText).not.toMatch(rawRowPattern);
 
     // The plan-scoped profile body is checked WHOLE, not only inside
     // readingStats: the legacy payload used to be spread into it, so a leak
@@ -685,14 +693,13 @@ describe.skipIf(!url)('Free reading plan sync (isolated PostgreSQL)', () => {
     expect(overflow.status).toBe(400);
   }, 30_000);
 
-  it('answers an empty push with the current projection and no writes', async () => {
+  it('answers an empty push without writing anything', async () => {
     const { row, externalId, token } = await createUser();
     const res = await freePush(externalId, [], token);
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({
       applied: { sessions: 0 },
       acceptedSessionIds: [],
-      stats: { level: 1, totalSecondsRead: 0, uniqueInAppCompletedChapters: 0 },
     });
     expect(await storedRows(row.id)).toHaveLength(0);
   });
@@ -800,13 +807,7 @@ describe.skipIf(!url)('Free reading plan sync (isolated PostgreSQL)', () => {
     const body: any = await res.json();
     expect(body.plan).toBe('pro');
     expect(body.applied).toEqual({ sessions: 1, library: 1, history: 1, chapterStates: 1, novels: 1 });
-    expect(body.stats).toMatchObject({
-      totalSecondsRead: 600,
-      totalWords: 1000,
-      uniqueInAppCompletedChapters: 1,
-      combinedTotalChaptersCompleted: 2,
-      completedNovels: [{ novelId: '42', title: 'Example' }],
-    });
+    expect(body).not.toHaveProperty('stats');
 
     const pull = await request('/sync/pull', {
       syncVersion: 2, user: { externalId },
@@ -818,7 +819,13 @@ describe.skipIf(!url)('Free reading plan sync (isolated PostgreSQL)', () => {
     expect(pulled.sessions.rows).toHaveLength(1);
     expect(pulled.library.rows).toHaveLength(1);
     expect(pulled.history.rows).toHaveLength(1);
-    expect(pulled.stats.combinedTotalChaptersCompleted).toBe(2);
+    expect(pulled.stats).toMatchObject({
+      totalSecondsRead: 600,
+      totalWords: 1000,
+      uniqueInAppCompletedChapters: 1,
+      combinedTotalChaptersCompleted: 2,
+      completedNovels: [{ novelId: '42', title: 'Example' }],
+    });
   });
 
   it('keeps Pro session events immutable and idempotent', async () => {

@@ -13,6 +13,7 @@ export interface WorkerBindings {
   R2_SECRET_KEY?: string;
   R2_PUBLIC_URL?: string;
   COVERS?: unknown;
+  RATE_LIMITER?: unknown;
 }
 
 export default {

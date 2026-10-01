@@ -11,7 +11,7 @@ import {
   loadFreeStatsForUser,
   storeFreeSessions,
 } from '../features/readingSync/freeStore.js';
-import { loadProStats, pullProData, storeProPush } from '../features/readingSync/proStore.js';
+import { pullProData, storeProPush } from '../features/readingSync/proStore.js';
 import { buildProPushResponse, parseProV2Pull, parseProV2Push } from '../features/readingSync/proProtocol.js';
 import type { ReadingPlan, ProReadingSyncPush, ProReadingSyncPull } from '../features/readingSync/contracts.js';
 import {
@@ -320,7 +320,6 @@ async function pushV2(c: Context, body: unknown, authedSub: string | null) {
         return fail(c, sessionConflictResponse(write.conflictingSessionIds, write.acceptedSessionIds));
       }
       return c.json(buildProPushResponse({
-        stats: await loadProStats(user.id),
         serverNow: now,
         applied: { sessions: write.applied, ...write.collections },
         acceptedSessionIds: write.acceptedSessionIds,
@@ -332,7 +331,6 @@ async function pushV2(c: Context, body: unknown, authedSub: string | null) {
       return fail(c, sessionConflictResponse(write.conflictingSessionIds, write.acceptedSessionIds));
     }
     const response = buildFreePushResponse({
-      stats: await loadFreeStatsForUser(user.id),
       serverNow: Date.now(),
       appliedSessions: write.applied,
       acceptedSessionIds: write.acceptedSessionIds,

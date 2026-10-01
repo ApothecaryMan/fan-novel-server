@@ -49,4 +49,35 @@ describe('rate limiting of the sync surface', () => {
     expect((await server.request('/health')).status).toBe(200);
     expect((await post(server, '/api/v1/auth/google')).status).toBe(400);
   });
+
+  it('prefers the Cloudflare binding when one is bound', async () => {
+    const limit = vi.fn(async () => ({ success: false }));
+    (globalThis as any).__WORKER_BINDINGS__ = { RATE_LIMITER: { limit } };
+    try {
+      const server = app();
+      // /comments is a coded path the earlier tests never touched, so this
+      // cannot disturb their shared map state.
+      const res = await post(server, '/api/v1/comments');
+      expect(res.status).toBe(429);
+      expect(limit).toHaveBeenCalledTimes(1);
+    } finally {
+      delete (globalThis as any).__WORKER_BINDINGS__;
+    }
+  });
+
+  it('falls back to the in-memory guard when the binding throws', async () => {
+    const limit = vi.fn(async () => { throw new Error('limiter unavailable'); });
+    (globalThis as any).__WORKER_BINDINGS__ = { RATE_LIMITER: { limit } };
+    try {
+      const server = app();
+      // /pull has only one hit against its map budget (the second test), so the
+      // fallback must let this through to the route's own 503 rather than
+      // rejecting it. A limiter outage must not become an outage of the API.
+      const res = await post(server, '/api/v1/sync/pull');
+      expect(res.status).toBe(503);
+      expect(limit).toHaveBeenCalledTimes(1);
+    } finally {
+      delete (globalThis as any).__WORKER_BINDINGS__;
+    }
+  });
 });
