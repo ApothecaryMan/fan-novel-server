@@ -6,7 +6,7 @@ import { drizzle } from 'drizzle-orm/node-postgres';
 import { migrate } from 'drizzle-orm/node-postgres/migrator';
 import * as schema from '../database/schema.js';
 import { readingSessions, users } from '../database/schema.js';
-import { FREE_STATS_KEYS, MAX_SESSIONS_PER_PUSH, PRO_ONLY_STATS_KEYS, freeReadingSyncPushResponseSchema } from '../features/readingSync/contracts.js';
+import { FREE_STATS_KEYS, MAX_SESSIONS_PER_PUSH, PRO_ONLY_STATS_KEYS, freeReadingSyncPushResponseSchema, proReadingSyncPullResponseSchema } from '../features/readingSync/contracts.js';
 import { calculateFreeStats } from '../features/readingSync/calculations.js';
 import { toFreeScanSession } from '../features/readingSync/freeStore.js';
 import { signToken } from '../middleware/auth.js';
@@ -826,6 +826,12 @@ describe.skipIf(!url)('Free reading plan sync (isolated PostgreSQL)', () => {
       combinedTotalChaptersCompleted: 2,
       completedNovels: [{ novelId: '42', title: 'Example' }],
     });
+    // Every strict reader validates the page rows against proSessionSchema, so
+    // ONE stale key invalidates the whole pull rather than just that row. The
+    // matchObject assertions above cannot see that; this can.
+    const parsed = proReadingSyncPullResponseSchema.safeParse(pulled);
+    expect(parsed.success ? null : parsed.error.issues.slice(0, 3)).toBeNull();
+    expect(pulled.sessions.rows[0]).not.toHaveProperty('genre');
   });
 
   it('keeps Pro session events immutable and idempotent', async () => {

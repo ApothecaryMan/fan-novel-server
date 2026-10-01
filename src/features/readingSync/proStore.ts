@@ -397,7 +397,6 @@ export async function loadProStats(
     novels: novelRows.map((row) => ({
       novelId: row.novelId,
       title: row.title,
-      genre: row.genre,
       sourceId: row.sourceId,
       totalChapters: row.totalChapters,
       updatedAt: Number(row.updatedAt),
@@ -493,7 +492,6 @@ export async function pullProData(
         words: Number(row.words),
         minuteOfDay: Number(row.minuteOfDay),
         readDay: row.readDay,
-        genre: row.genre,
         progressPercent: Number(row.progressPercent),
         completed: row.completed,
         ts: Number(row.ts),
