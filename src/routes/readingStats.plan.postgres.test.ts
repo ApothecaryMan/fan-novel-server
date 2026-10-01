@@ -495,7 +495,7 @@ describe.skipIf(!url)('Free reading plan sync (isolated PostgreSQL)', () => {
   it.skip('legacy Task 6 expectation: Pro-shaped push 501', async () => {
     const pro = await createUser('pro');
     const free = await createUser('free');
-    const proShapedSession = { ...session(), words: 120, minuteOfDay: 1380, readDay: '2026-09-25', genre: 'Fantasy' };
+    const proShapedSession = { ...session(), words: 120, minuteOfDay: 1380, readDay: '2026-09-25' };
     const proShaped = { sessions: [proShapedSession], library: [{ novelId: '42' }] };
 
     const res = await request('/sync/push', { syncVersion: 2, user: { externalId: pro.externalId }, ...proShaped }, pro.token);
@@ -792,7 +792,7 @@ describe.skipIf(!url)('Free reading plan sync (isolated PostgreSQL)', () => {
       sessions: [{
         clientSessionId: 'pro-session-1', novelId: '42', chapterId: 1,
         seconds: 600, words: 1000, minuteOfDay: 600, readDay: '2026-09-25',
-        genre: 'Fantasy', progressPercent: 100, completed: true, ts: 1782470400000,
+        progressPercent: 100, completed: true, ts: 1782470400000,
       }],
       library: [{ novelId: '42', categoryIds: ['currently_reading'], updatedAt: 1782470400000 }],
       history: [{
@@ -833,7 +833,7 @@ describe.skipIf(!url)('Free reading plan sync (isolated PostgreSQL)', () => {
     const event = {
       clientSessionId: 'pro-immutable', novelId: '42', chapterId: 1,
       seconds: 60, words: 100, minuteOfDay: 60, readDay: '2026-09-25',
-      genre: 'Fantasy', progressPercent: 90, completed: true, ts: 1782470400000,
+      progressPercent: 90, completed: true, ts: 1782470400000,
     };
     const envelope = (session: Record<string, unknown>) => ({ syncVersion: 2, user: { externalId }, sessions: [session] });
     expect((await request('/sync/push', envelope(event), token)).status).toBe(200);

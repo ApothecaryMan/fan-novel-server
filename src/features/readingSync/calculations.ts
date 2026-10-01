@@ -1,6 +1,5 @@
 import {
   COMPLETION_THRESHOLD,
-  MAX_WPM,
   type FreeStats,
   type ProCompletedNovel,
   type ProMostReadNovel,
@@ -31,7 +30,6 @@ interface ProCalculationDimensions {
   words: number;
   minuteOfDay: number;
   readDay: string;
-  genre: string | null;
 }
 
 interface ProDimensionsPresent extends FreeCalculationSession {
@@ -39,7 +37,6 @@ interface ProDimensionsPresent extends FreeCalculationSession {
   words: number;
   minuteOfDay: number;
   readDay: string;
-  genre: string | null;
 }
 
 interface ProDimensionsAbsent extends FreeCalculationSession {
@@ -48,7 +45,6 @@ interface ProDimensionsAbsent extends FreeCalculationSession {
   words?: number;
   minuteOfDay?: number;
   readDay?: string;
-  genre?: string | null;
 }
 
 /**
@@ -71,7 +67,6 @@ export interface ProCalculationNovel {
   title?: string | null;
   /** `novelTitle` is accepted as a harmless compatibility alias. */
   novelTitle?: string | null;
-  genre?: string | null;
   totalChapters?: number | null;
   updatedAt?: number;
   sourceId?: string | null;
@@ -395,14 +390,13 @@ function hasValidProDimensions(value: unknown): value is ProCalculationDimension
     && candidate.minuteOfDay >= 0
     && candidate.minuteOfDay <= 1439
     && typeof candidate.readDay === 'string'
-    && parseDay(candidate.readDay) !== null
-    && (candidate.genre === null || typeof candidate.genre === 'string');
+    && parseDay(candidate.readDay) !== null;
 }
 
 function assertValidProDimensions(session: ProDimensionsPresent): void {
   if (!hasValidProDimensions(session)) {
     throw new TypeError(
-      'Malformed Pro calculation session: proFieldsPresent=true requires valid words, minuteOfDay, readDay, and genre',
+      'Malformed Pro calculation session: proFieldsPresent=true requires valid words, minuteOfDay, and readDay',
     );
   }
 }
@@ -434,13 +428,6 @@ function creditedWords(session: ProCalculationSession): number {
 
 function sumWords(sessions: readonly ProCalculationSession[]): number {
   return sessions.reduce((total, session) => addNonNegative(total, creditedWords(session)), 0);
-}
-
-function averageWpm(totalWords: number, totalSeconds: number): number {
-  if (totalWords <= 0 || totalSeconds <= 0) return 0;
-  const minutes = totalSeconds / 60;
-  if (!Number.isFinite(minutes) || minutes <= 0) return 0;
-  return Math.min(MAX_WPM, Math.max(1, Math.round(totalWords / minutes)));
 }
 
 function calculateStreaks(days: Set<number>, asOfDay: number): {
@@ -517,7 +504,6 @@ function latestChapterStates(
 interface NormalizedNovelMetadata {
   novelId: string;
   title?: string | null;
-  genre?: string | null;
   sourceId?: string | null;
   totalChapters: number | null;
   updatedAt: number | null;
@@ -525,12 +511,6 @@ interface NormalizedNovelMetadata {
 
 function normalizeTitle(value: unknown): string | null | undefined {
   if (value === null) return null;
-  if (typeof value !== 'string') return undefined;
-  const normalized = value.trim();
-  return normalized.length > 0 ? normalized : undefined;
-}
-
-function normalizeGenre(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined;
   const normalized = value.trim();
   return normalized.length > 0 ? normalized : undefined;
@@ -571,7 +551,6 @@ function mergeEqualTimestampMetadata(
   return {
     novelId: candidate.novelId,
     title: preferNonEmptyString(candidate.title, previous.title),
-    genre: preferNonEmptyString(candidate.genre, previous.genre),
     sourceId: preferNonEmptyString(candidate.sourceId, previous.sourceId),
     totalChapters: candidate.totalChapters ?? previous.totalChapters,
     updatedAt: candidate.updatedAt,
@@ -590,7 +569,6 @@ function normalizeNovelMetadata(
     const candidate: NormalizedNovelMetadata = {
       novelId,
       title: normalizeTitle(novel.title) ?? normalizeTitle(novel.novelTitle),
-      genre: normalizeGenre(novel.genre),
       sourceId: normalizeSourceId(novel.sourceId),
       totalChapters: normalizeTotalChapters(novel.totalChapters),
       updatedAt: typeof novel.updatedAt === 'number' && Number.isFinite(novel.updatedAt)
@@ -623,32 +601,6 @@ function normalizeNovelMetadata(
   });
 
   return normalized;
-}
-
-function genreDistribution(
-  sessions: readonly ProCalculationSession[],
-  metadata: Map<string, NormalizedNovelMetadata>,
-): Record<string, number> {
-  const counts = new Map<string, number>();
-  let total = 0;
-
-  for (const session of sessions) {
-    if (!hasAcceptedProDimensions(session)) continue;
-    const novelId = normalizeNovelId(session.novelId);
-    const genre = normalizeGenre(session.genre)
-      ?? (novelId === null ? undefined : normalizeGenre(metadata.get(novelId)?.genre));
-    if (genre === undefined) continue;
-    counts.set(genre, (counts.get(genre) ?? 0) + 1);
-    total += 1;
-  }
-
-  if (total === 0) return {};
-  return Object.fromEntries(
-    [...counts.keys()].sort().map((genre) => [
-      genre,
-      Math.round((counts.get(genre)! / total) * 100),
-    ]),
-  );
 }
 
 function mostReadNovels(
@@ -871,13 +823,11 @@ export function calculateProStats(
     currentStreakDays: streak.current,
     longestStreakDays: streak.longest,
     totalWords,
-    averageWPM: averageWpm(totalWords, totalSecondsRead),
     uniqueInAppCompletedChapters: inAppPairs.size,
     combinedTotalChaptersCompleted: combinedPairs.size,
     last7DaysActivity,
     yearlyActivity,
     hourlyDistribution,
-    genreDistribution: genreDistribution(sessions, metadata),
     mostReadNovels: mostRead.rows,
     mostReadNovelsTruncated: mostRead.truncated,
     completedNovels: completed,

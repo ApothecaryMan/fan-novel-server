@@ -54,7 +54,6 @@ function sameProSession(a: ProSession, b: ProSession): boolean {
     && a.words === b.words
     && a.minuteOfDay === b.minuteOfDay
     && a.readDay === b.readDay
-    && a.genre === b.genre
     && Math.abs(a.progressPercent - b.progressPercent) <= PROGRESS_EPSILON
     && a.completed === b.completed
     && a.ts === b.ts;
@@ -99,7 +98,6 @@ export async function storeProSessions(
       && Number(row.words) === session.words
       && Number(row.minuteOfDay) === session.minuteOfDay
       && row.readDay === session.readDay
-      && row.genre === session.genre
       && Math.abs(Number(row.progressPercent) - session.progressPercent) <= PROGRESS_EPSILON
       && row.completed === session.completed
       && Number(row.ts) === session.ts;
@@ -123,7 +121,6 @@ export async function storeProSessions(
       words: session.words,
       minuteOfDay: session.minuteOfDay,
       readDay: session.readDay,
-      genre: session.genre,
       ts: session.ts,
     })))
     .onConflictDoNothing({ target: [readingSessions.userId, readingSessions.clientSessionId] })
@@ -142,7 +139,6 @@ export async function storeProSessions(
         && Number(row.words) === pushed.words
         && Number(row.minuteOfDay) === pushed.minuteOfDay
         && row.readDay === pushed.readDay
-        && row.genre === pushed.genre
         && Math.abs(Number(row.progressPercent) - pushed.progressPercent) <= PROGRESS_EPSILON
         && row.completed === pushed.completed
         && Number(row.ts) === pushed.ts;
@@ -386,7 +382,6 @@ export async function loadProStats(
       words: Number(row.words),
       minuteOfDay: Number(row.minuteOfDay),
       readDay: row.readDay,
-      genre: row.genre,
       ts: Number(row.ts),
       progressPercent: Number(row.progressPercent),
       completed: row.completed,

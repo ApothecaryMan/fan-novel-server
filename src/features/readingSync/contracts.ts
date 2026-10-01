@@ -194,13 +194,11 @@ const proStatsShape = {
   currentStreakDays: nonNegativeInteger(),
   longestStreakDays: nonNegativeInteger(),
   totalWords: nonNegativeInteger(),
-  averageWPM: z.number().finite().int().min(0).max(MAX_WPM),
   uniqueInAppCompletedChapters: nonNegativeInteger(),
   combinedTotalChaptersCompleted: nonNegativeInteger(),
   last7DaysActivity: z.array(activityDaySchema).length(7),
   yearlyActivity: z.record(readDaySchema, nonNegativeInteger()),
   hourlyDistribution: z.array(nonNegativeInteger()).length(24),
-  genreDistribution: z.record(z.string().trim().min(1).max(100), percentage().int()),
   mostReadNovels: z.array(mostReadNovelSchema).max(100),
   mostReadNovelsTruncated: z.boolean(),
   completedNovels: z.array(completedNovelSchema),
@@ -249,6 +247,7 @@ const FREE_SESSION_FORBIDDEN_KEYS = [
   'last7DaysActivity',
   'yearlyActivity',
   'hourlyDistribution',
+  'averageWPM',
   'genreDistribution',
   'mostReadNovels',
   'mostReadNovelsTruncated',
@@ -289,7 +288,6 @@ const proSessionShape = {
   words: wordsSchema,
   minuteOfDay: minuteOfDaySchema,
   readDay: readDaySchema,
-  genre: z.string().trim().max(100),
 };
 
 export const FREE_SESSION_KEYS = keysOfShape(freeSessionShape);
@@ -705,7 +703,6 @@ export function proProjection(input: ProStats): ProStats {
     currentStreakDays: input.currentStreakDays,
     longestStreakDays: input.longestStreakDays,
     totalWords: input.totalWords,
-    averageWPM: input.averageWPM,
     uniqueInAppCompletedChapters: input.uniqueInAppCompletedChapters,
     combinedTotalChaptersCompleted: input.combinedTotalChaptersCompleted,
     last7DaysActivity: input.last7DaysActivity.map((day) => ({
@@ -716,9 +713,6 @@ export function proProjection(input: ProStats): ProStats {
       Object.entries(input.yearlyActivity).map(([date, activeSeconds]) => [date, activeSeconds]),
     ),
     hourlyDistribution: [...input.hourlyDistribution],
-    genreDistribution: Object.fromEntries(
-      Object.entries(input.genreDistribution).map(([genre, percentageValue]) => [genre, percentageValue]),
-    ),
     mostReadNovels: input.mostReadNovels.map((novel) => {
       const projected = {
         novelId: novel.novelId,

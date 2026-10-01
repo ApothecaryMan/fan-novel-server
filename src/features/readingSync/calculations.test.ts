@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
   COMPLETION_THRESHOLD,
-  MAX_WPM,
   FREE_SESSION_KEYS,
   FREE_STATS_KEYS,
   MAX_COLLECTION_ROWS,
@@ -78,7 +77,6 @@ const validProSession = {
   words: 168,
   minuteOfDay: 1380,
   readDay: '2026-09-25',
-  genre: 'Fantasy',
 };
 
 const validFreeStats = {
@@ -98,7 +96,6 @@ const validProStats = {
   currentStreakDays: 1,
   longestStreakDays: 1,
   totalWords: 15120,
-  averageWPM: 120,
   uniqueInAppCompletedChapters: 12,
   combinedTotalChaptersCompleted: 14,
   last7DaysActivity: Array.from({ length: 7 }, (_, index) => ({
@@ -107,7 +104,6 @@ const validProStats = {
   })),
   yearlyActivity: { '2026-09-25': 7545 },
   hourlyDistribution: Array.from({ length: 24 }, (_, index) => (index === 23 ? 7545 : 0)),
-  genreDistribution: { Fantasy: 100 },
   mostReadNovels: [{
     novelId: '42',
     title: 'Example Novel',
@@ -243,7 +239,6 @@ describe('reading sync v2 contracts', () => {
       'words',
       'minuteOfDay',
       'readDay',
-      'genre',
     ]);
     expect(FREE_STATS_KEYS).toEqual([
       'level',
@@ -261,13 +256,11 @@ describe('reading sync v2 contracts', () => {
       'currentStreakDays',
       'longestStreakDays',
       'totalWords',
-      'averageWPM',
       'uniqueInAppCompletedChapters',
       'combinedTotalChaptersCompleted',
       'last7DaysActivity',
       'yearlyActivity',
       'hourlyDistribution',
-      'genreDistribution',
       'mostReadNovels',
       'mostReadNovelsTruncated',
       'completedNovels',
@@ -404,7 +397,6 @@ describe('reading sync v2 contracts', () => {
         { minuteOfDay: 1440 },
         { minuteOfDay: 1.5 },
         { readDay: '2026-02-30' },
-        { genre: 'x'.repeat(101) },
       ];
 
       for (const override of invalidSessions) {
@@ -474,10 +466,6 @@ describe('reading sync v2 contracts', () => {
     it('accepts the complete Pro statistics shape with integer aggregate percentages', () => {
       expect(proStatsSchema.parse(validProStats)).toEqual(validProStats);
       expect(proStatsSchema.safeParse({ ...validProStats, yearlyActivity: { invalid: 1 } }).success).toBe(false);
-      expect(proStatsSchema.safeParse({ ...validProStats, averageWPM: 120.5 }).success).toBe(false);
-      expect(proStatsSchema.safeParse({ ...validProStats, averageWPM: 1001 }).success).toBe(false);
-      expect(proStatsSchema.safeParse({ ...validProStats, genreDistribution: { Fantasy: 99.5 } }).success).toBe(false);
-      expect(proStatsSchema.safeParse({ ...validProStats, genreDistribution: { Fantasy: 101 } }).success).toBe(false);
     });
 
     it('requires both remaining-time values to be null only at level 50', () => {
@@ -721,7 +709,6 @@ describe('pure reading statistics calculations', () => {
     completionSignalPresent: true,
     minuteOfDay: 600,
     readDay: '2026-09-25',
-    genre: '',
     proFieldsPresent: true,
     ...overrides,
   });
@@ -829,7 +816,6 @@ describe('pure reading statistics calculations', () => {
       currentStreakDays: 0,
       longestStreakDays: 0,
       totalWords: 0,
-      averageWPM: 0,
       uniqueInAppCompletedChapters: 0,
       combinedTotalChaptersCompleted: 0,
       last7DaysActivity: [
@@ -843,7 +829,6 @@ describe('pure reading statistics calculations', () => {
       ],
       yearlyActivity: {},
       hourlyDistribution: Array.from({ length: 24 }, () => 0),
-      genreDistribution: {},
       mostReadNovels: [],
       mostReadNovelsTruncated: false,
       completedNovels: [],
@@ -863,7 +848,7 @@ describe('pure reading statistics calculations', () => {
     expect(proStatsSchema.parse(stats)).toEqual(stats);
   });
 
-  it('derives Pro totals, WPM, streaks, activity, hours, genres, and novel aggregates', () => {
+  it('derives Pro totals, streaks, activity, hours, and novel aggregates', () => {
     const stats = calculateProStats({
       sessions: [
         proSession({
@@ -875,7 +860,6 @@ describe('pure reading statistics calculations', () => {
           completed: true,
           readDay: '2026-09-23',
           minuteOfDay: 60,
-          genre: 'Fantasy',
         }),
         proSession({
           seconds: 60,
@@ -886,7 +870,6 @@ describe('pure reading statistics calculations', () => {
           completed: true,
           readDay: '2026-09-24',
           minuteOfDay: 120,
-          genre: 'Fantasy',
         }),
         proSession({
           seconds: 120,
@@ -897,7 +880,6 @@ describe('pure reading statistics calculations', () => {
           completed: true,
           readDay: '2026-09-25',
           minuteOfDay: 600,
-          genre: '',
         }),
         proSession({
           seconds: 120,
@@ -907,7 +889,6 @@ describe('pure reading statistics calculations', () => {
           progressPercent: 40,
           readDay: '2026-09-25',
           minuteOfDay: 1200,
-          genre: 'Action',
         }),
         proSession({
           seconds: 0,
@@ -918,7 +899,6 @@ describe('pure reading statistics calculations', () => {
           completed: true,
           readDay: '2026-09-25',
           minuteOfDay: 1439,
-          genre: '',
         }),
         // Legacy rows still contribute Pro time/words, but never completion.
         proSession({
@@ -932,7 +912,6 @@ describe('pure reading statistics calculations', () => {
           proFieldsPresent: false,
           readDay: '2026-09-25',
           minuteOfDay: 0,
-          genre: '',
         }),
       ],
       chapterStates: [
@@ -940,9 +919,9 @@ describe('pure reading statistics calculations', () => {
         { novelId: 'novel-2', chapterId: 2, isRead: true, origin: 'snapshot', updatedAt: 10 },
       ],
       novels: [
-        { novelId: 'novel-1', title: 'First Novel', genre: 'Fantasy', totalChapters: 2, updatedAt: 10 },
-        { novelId: 'novel-2', genre: 'Action', totalChapters: 5, updatedAt: 10 },
-        { novelId: 'novel-3', title: 'Mystery Novel', genre: 'Mystery', totalChapters: 1, updatedAt: 10 },
+        { novelId: 'novel-1', title: 'First Novel', totalChapters: 2, updatedAt: 10 },
+        { novelId: 'novel-2', totalChapters: 5, updatedAt: 10 },
+        { novelId: 'novel-3', title: 'Mystery Novel', totalChapters: 1, updatedAt: 10 },
         { novelId: 'unknown-total', totalChapters: null, updatedAt: 10 },
       ],
       year: 2026,
@@ -954,7 +933,6 @@ describe('pure reading statistics calculations', () => {
     expect(stats.remainingTime).toEqual({ seconds: 6600, minutes: 110 });
     expect(stats.totalSecondsRead).toBe(4200);
     expect(stats.totalWords).toBe(1050);
-    expect(stats.averageWPM).toBe(15);
     expect(stats.currentStreakDays).toBe(3);
     expect(stats.longestStreakDays).toBe(3);
     expect(stats.uniqueInAppCompletedChapters).toBe(3);
@@ -979,7 +957,6 @@ describe('pure reading statistics calculations', () => {
     expect(stats.hourlyDistribution[10]).toBe(120);
     expect(stats.hourlyDistribution[20]).toBe(120);
     expect(stats.hourlyDistribution[23]).toBe(0);
-    expect(stats.genreDistribution).toEqual({ Action: 20, Fantasy: 60, Mystery: 20 });
     expect(stats.mostReadNovels).toEqual([
       { novelId: 'novel-1', activeSeconds: 3780, words: 900, chapters: 2, title: 'First Novel' },
       { novelId: 'legacy-novel', activeSeconds: 300, words: 50, chapters: 0 },
@@ -991,16 +968,6 @@ describe('pure reading statistics calculations', () => {
       { novelId: 'novel-1', title: 'First Novel' },
       { novelId: 'novel-3', title: 'Mystery Novel' },
     ]);
-    expect(proStatsSchema.parse(stats)).toEqual(stats);
-  });
-
-  it('caps aggregate WPM at the contract maximum', () => {
-    const stats = calculateProStats({
-      sessions: [proSession({ seconds: 60, words: 2000 })],
-      asOfDay: '2026-09-25',
-    });
-
-    expect(stats.averageWPM).toBe(MAX_WPM);
     expect(proStatsSchema.parse(stats)).toEqual(stats);
   });
 
@@ -1033,7 +1000,7 @@ describe('pure reading statistics calculations', () => {
     expect(stats.longestStreakDays).toBe(2);
   });
 
-  it('keeps zero-second completion days for streaks but never creates WPM', () => {
+  it('keeps zero-second completion days for streaks', () => {
     const stats = calculateProStats({
       sessions: [proSession({
         seconds: 0,
@@ -1045,7 +1012,6 @@ describe('pure reading statistics calculations', () => {
       asOfDay: '2026-09-25',
     });
     expect(stats.uniqueInAppCompletedChapters).toBe(1);
-    expect(stats.averageWPM).toBe(0);
     expect(stats.currentStreakDays).toBe(1);
     expect(stats.last7DaysActivity.at(-1)).toEqual({ date: '2026-09-25', activeSeconds: 0 });
   });
@@ -1063,19 +1029,16 @@ describe('pure reading statistics calculations', () => {
         proFieldsPresent: false,
         readDay: '2026-09-25',
         minuteOfDay: 600,
-        genre: 'Fantasy',
       }],
-      novels: [{ novelId: 'free-origin', genre: 'Fantasy' }],
+      novels: [{ novelId: 'free-origin' }],
       asOfDay: '2026-09-25',
     });
 
     expect(stats.totalSecondsRead).toBe(60);
     expect(stats.totalWords).toBe(0);
-    expect(stats.averageWPM).toBe(0);
     expect(stats.currentStreakDays).toBe(0);
     expect(stats.yearlyActivity).toEqual({});
     expect(stats.hourlyDistribution).toEqual(Array.from({ length: 24 }, () => 0));
-    expect(stats.genreDistribution).toEqual({});
   });
 
   it('keeps calendar labels stable across month boundaries and filters the requested year', () => {
@@ -1170,7 +1133,6 @@ describe('pure reading statistics calculations', () => {
         },
         {
           novelId: 'merged-novel',
-          genre: 'Fantasy',
           totalChapters: 1,
           sourceId: null,
           updatedAt: 10,
@@ -1182,7 +1144,6 @@ describe('pure reading statistics calculations', () => {
     expect(stats.mostReadNovels).toEqual([
       { novelId: 'merged-novel', title: 'Merged Title', activeSeconds: 60, words: 60, chapters: 0 },
     ]);
-    expect(stats.genreDistribution).toEqual({ Fantasy: 100 });
     expect(stats.completedNovels).toEqual([{ novelId: 'merged-novel', title: 'Merged Title' }]);
   });
 

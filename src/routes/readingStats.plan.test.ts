@@ -51,7 +51,6 @@ const proShapedSession = () => ({
   words: 120,
   minuteOfDay: 1380,
   readDay: '2026-09-25',
-  genre: 'Fantasy',
 });
 
 // Plan-scoped bodies are privacy-checked as a WHOLE: a Pro aggregate must not
