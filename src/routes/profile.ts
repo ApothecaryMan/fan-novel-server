@@ -140,6 +140,53 @@ function requestedReadingStatsVersion(c: {
   return { requested: true, version: null };
 }
 
+// Opt-in scope for the versioned body. `plan` answers with the entitlement
+// alone: the plan columns are already on the users row this route selects, so
+// the frequent foreground plan refresh runs NO aggregate query. Absent keeps
+// the full v2 body; an unrecognised value is an explicit 400 for the same
+// reason an unrecognised version is — a client must never be quietly handed a
+// body shape it did not ask for.
+export const READING_STATS_SCOPE_PARAM = 'readingStatsScope';
+const PLAN_ONLY_SCOPE = 'plan';
+
+type ReadingStatsScopeRequest = { planOnly: boolean; invalid: boolean };
+
+function requestedReadingStatsScope(c: {
+  req: { query: (key: string) => string | undefined };
+}): ReadingStatsScopeRequest {
+  const raw = c.req.query(READING_STATS_SCOPE_PARAM);
+  if (raw === undefined) return { planOnly: false, invalid: false };
+  if (raw === PLAN_ONLY_SCOPE) return { planOnly: true, invalid: false };
+  return { planOnly: false, invalid: true };
+}
+
+// Natural-expiry audit: best-effort, never fails the request, never trips the
+// breaker. Null/corrupt expiries skip (fail-closed already).
+async function auditNaturalExpiry(row: {
+  id: string;
+  readingStatsPlan: string;
+  readingStatsPlanExpiresAt: number | null;
+}): Promise<void> {
+  if (row.readingStatsPlan !== 'pro') return;
+  const expiresAt = row.readingStatsPlanExpiresAt;
+  if (typeof expiresAt !== 'number' || !Number.isSafeInteger(expiresAt)) return;
+  if (Date.now() < expiresAt) return;
+  try {
+    await db.insert(subscriptionEvents).values({
+      userId: row.id,
+      type: 'expired',
+      actorId: null,
+      previousExpiresAt: expiresAt,
+      newExpiresAt: null,
+      durationDays: null,
+      reason: 'system: natural expiry',
+      occurredAt: Date.now(),
+    }).onConflictDoNothing();
+  } catch {
+    console.warn(JSON.stringify({ event: 'profile.plan_expired_log', outcome: 'unavailable' }));
+  }
+}
+
 // GET /api/v1/users/me/profile — single-request account screen payload.
 // Level uses the exact app table (active minutes); full lists stay in sync/pull.
 // The cache header is set BEFORE requireAuth so even the unauthenticated 401 is
@@ -155,6 +202,10 @@ profileRouter.get('/me/profile', async (c, next) => {
   const version = requestedReadingStatsVersion(c);
   if (version.requested && version.version === null) {
     return c.json({ error: 'unsupported readingStatsVersion', supported: [2] }, 400);
+  }
+  const scope = requestedReadingStatsScope(c);
+  if (scope.invalid) {
+    return c.json({ error: 'unsupported readingStatsScope', supported: [PLAN_ONLY_SCOPE] }, 400);
   }
   try {
     const [row] = await db.select(PROFILE_USER_COLUMNS).from(users).where(eq(users.externalId, sub)).limit(1);
@@ -176,6 +227,23 @@ profileRouter.get('/me/profile', async (c, next) => {
       // is free, so it can only revoke — never grant — and it is derived from
       // the same call as `plan`, so the two can never disagree.
       const planExpiresAt = effectivePlanExpiry(row, now);
+
+      // Plan-only scope: the frequent foreground read. Every field it answers
+      // with is already on the `row` selected above, so the reading aggregate
+      // never runs — it belongs to the screen that displays it, which asks for
+      // the full body instead.
+      if (scope.planOnly) {
+        await auditNaturalExpiry(row);
+        return c.json({
+          success: true,
+          user: projectAccount(row),
+          plan,
+          planExpiresAt,
+          readingStatsVersion: version.version,
+          readingStatsScope: PLAN_ONLY_SCOPE,
+        });
+      }
+
       if (plan === 'pro') {
         const yearRaw = Number(c.req.query('readingStatsYear'));
         const asOfDay = c.req.query('readingStatsAsOf');
@@ -192,27 +260,7 @@ profileRouter.get('/me/profile', async (c, next) => {
         });
       }
       const freeStats = await loadFreeStatsForUser(row.id);
-      // Natural-expiry audit: best-effort, never fails the request, never
-      // trips the breaker. Null/corrupt expiries skip (fail-closed already).
-      if (row.readingStatsPlan === 'pro'
-        && typeof row.readingStatsPlanExpiresAt === 'number'
-        && Number.isSafeInteger(row.readingStatsPlanExpiresAt)
-        && Date.now() >= row.readingStatsPlanExpiresAt) {
-        try {
-          await db.insert(subscriptionEvents).values({
-            userId: row.id,
-            type: 'expired',
-            actorId: null,
-            previousExpiresAt: row.readingStatsPlanExpiresAt,
-            newExpiresAt: null,
-            durationDays: null,
-            reason: 'system: natural expiry',
-            occurredAt: Date.now(),
-          }).onConflictDoNothing();
-        } catch {
-          console.warn(JSON.stringify({ event: 'profile.plan_expired_log', outcome: 'unavailable' }));
-        }
-      }
+      await auditNaturalExpiry(row);
       return c.json({
         success: true,
         user: projectAccount(row),

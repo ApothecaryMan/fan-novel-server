@@ -650,6 +650,94 @@ describe('GET /users/me/profile?readingStatsVersion=2', () => {
     expect((await app.request('/users/me/profile?readingStatsVersion=2')).status).toBe(401);
   });
 
+  // The frequent foreground read asks for the plan alone. Its whole value is
+  // that NO reading aggregate runs, so this counts the queries the route
+  // actually issues: a body check alone would still pass if the aggregate were
+  // computed and then dropped.
+  describe('readingStatsScope=plan', () => {
+    const planOnly = (extra = '') =>
+      app.request(`/users/me/profile?readingStatsVersion=2&readingStatsScope=plan${extra}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+    const selectCalls = () => vi.mocked(fake().db.select).mock.calls.length;
+
+    async function seedPro() {
+      const proExpiry = Date.now() + 30 * 86_400_000;
+      await seedUser(SUBJECT, {
+        readingStatsPlan: 'pro',
+        readingStatsPlanStartedAt: Date.now(),
+        readingStatsPlanExpiresAt: proExpiry,
+      });
+      fake().seedSessions([{ userId: SUBJECT, seconds: 3600, readDay: '2026-09-25' }]);
+      return proExpiry;
+    }
+
+    it('answers the plan from a single point read and runs no aggregate', async () => {
+      const proExpiry = await seedPro();
+
+      vi.mocked(fake().db.select).mockClear();
+      await app.request('/users/me/profile?readingStatsVersion=2', {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const fullReads = selectCalls();
+
+      vi.mocked(fake().db.select).mockClear();
+      const res = await planOnly();
+      const planReads = selectCalls();
+
+      expect(res.status).toBe(200);
+      expect(planReads).toBe(1);
+      expect(planReads).toBeLessThan(fullReads);
+
+      const body: any = await res.json();
+      expect(body).not.toHaveProperty('readingStats');
+      expect(Object.keys(body).sort()).toEqual([
+        'plan', 'planExpiresAt', 'readingStatsScope', 'readingStatsVersion', 'success', 'user',
+      ]);
+      expect(body.plan).toBe('pro');
+      expect(body.planExpiresAt).toBe(proExpiry);
+      expect(body.readingStatsScope).toBe('plan');
+    });
+
+    it('answers a Free plan with the same shape and no aggregate', async () => {
+      await seedUser(SUBJECT, { readingStatsPlan: 'free' });
+      const res = await planOnly();
+      expect(res.status).toBe(200);
+      const body: any = await res.json();
+      expect(body).not.toHaveProperty('readingStats');
+      expect(body.plan).toBe('free');
+      expect(body.planExpiresAt).toBeNull();
+    });
+
+    it('keeps the entitlement clock fail-closed exactly as the full read does', async () => {
+      const past = Date.now() - 86_400_000;
+      await seedUser(SUBJECT, {
+        readingStatsPlan: 'pro',
+        readingStatsPlanStartedAt: past - 30 * 86_400_000,
+        readingStatsPlanExpiresAt: past,
+      });
+      const body: any = await (await planOnly()).json();
+      expect(body.plan).toBe('free');
+      expect(body.planExpiresAt).toBeNull();
+    });
+
+    it('rejects an unsupported scope with 400 before any query', async () => {
+      await seedUser();
+      const res = await app.request('/users/me/profile?readingStatsVersion=2&readingStatsScope=full', {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error: 'unsupported readingStatsScope', supported: ['plan'] });
+      expect(fake().db.select).not.toHaveBeenCalled();
+    });
+
+    it('still requires a token and stays private, no-store', async () => {
+      await seedUser();
+      expect((await app.request('/users/me/profile?readingStatsVersion=2&readingStatsScope=plan')).status).toBe(401);
+      expect((await planOnly()).headers.get('Cache-Control')).toBe('private, no-store');
+    });
+  });
+
   // The body carries the caller's own email, so it must never be stored by a
   // shared cache — the public sibling route on the same path prefix is public.
   it.each(['', '?readingStatsVersion=2'])('marks the authenticated body %o private, no-store', async (query) => {
