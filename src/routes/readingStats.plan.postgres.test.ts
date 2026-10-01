@@ -842,4 +842,124 @@ describe.skipIf(!url)('Free reading plan sync (isolated PostgreSQL)', () => {
     expect(conflict.status).toBe(409);
     expect((await conflict.json()).code).toBe('session_conflict');
   });
+  // The collection writers were rewritten from read-modify-write to a batched
+  // conditional upsert. These pin the merge rules that rewrite had to preserve:
+  // a lost LWW rule silently overwrites newer data with older.
+  describe('collection merge rules', () => {
+    const proCollectionPush = (externalId: string, token: string, body: Record<string, unknown>) =>
+      request('/sync/push', {
+        syncVersion: 2,
+        user: { externalId },
+        deviceId: 'device-merge',
+        // Required by the Pro shape; these tests are about the collections.
+        sessions: [],
+        ...body,
+      }, token);
+
+    const readLibrary = (userId: string) =>
+      database.select().from(schema.userLibrary).where(eq(schema.userLibrary.userId, userId));
+    const readHistory = (userId: string) =>
+      database.select().from(schema.readingHistory).where(eq(schema.readingHistory.userId, userId));
+    const readStates = (userId: string) =>
+      database.select().from(schema.readingChapterState).where(eq(schema.readingChapterState.userId, userId));
+    const readNovels = (userId: string) =>
+      database.select().from(schema.readingNovels).where(eq(schema.readingNovels.userId, userId));
+
+    it('never lets an older write overwrite a newer one', async () => {
+      const { row, externalId, token } = await createUser('pro');
+      await proCollectionPush(externalId, token, {
+        library: [{ novelId: '42', progressPercent: 80, updatedAt: 1782000000002 }],
+        history: [{ novelId: '42', chapterId: 1, progressPercent: 80, readAt: 1782000000002, updatedAt: 1782000000002 }],
+        chapterStates: [{ novelId: '42', chapterId: 1, isRead: true, origin: 'snapshot', updatedAt: 1782000000002 }],
+        novels: [{ novelId: '42', title: 'New', genre: 'Fantasy', totalChapters: 10, updatedAt: 1782000000002 }],
+      });
+
+      const older = await proCollectionPush(externalId, token, {
+        library: [{ novelId: '42', progressPercent: 10, updatedAt: 1782000000001 }],
+        history: [{ novelId: '42', chapterId: 1, progressPercent: 10, readAt: 1782000000001, updatedAt: 1782000000001 }],
+        chapterStates: [{ novelId: '42', chapterId: 1, isRead: false, origin: 'snapshot', updatedAt: 1782000000001 }],
+        novels: [{ novelId: '42', title: 'Old', genre: 'Fantasy', totalChapters: 1, updatedAt: 1782000000001 }],
+      });
+      expect(await older.json()).toMatchObject({ applied: { library: 0, history: 0, chapterStates: 0, novels: 0 } });
+
+      expect((await readLibrary(row.id))[0].progressPercent).toBe(80);
+      expect(Number((await readHistory(row.id))[0].readAt)).toBe(1782000000002);
+      expect((await readStates(row.id))[0].isRead).toBe(true);
+      expect((await readNovels(row.id))[0].title).toBe('New');
+    });
+
+    it('breaks a history tie on the edit clock, not the read clock', async () => {
+      const { row, externalId, token } = await createUser('pro');
+      await proCollectionPush(externalId, token, {
+        history: [{ novelId: '42', chapterId: 1, progressPercent: 70, readAt: 1782000000005, updatedAt: 1782000000005 }],
+      });
+
+      // Same readAt, OLDER edit: the tie-break must reject it.
+      const olderEdit = await proCollectionPush(externalId, token, {
+        history: [{ novelId: '42', chapterId: 1, progressPercent: 20, readAt: 1782000000005, updatedAt: 1782000000004 }],
+      });
+      expect(await olderEdit.json()).toMatchObject({ applied: { history: 0 } });
+      expect((await readHistory(row.id))[0].progressPercent).toBe(70);
+
+      // Same readAt, NEWER edit: applies.
+      const newerEdit = await proCollectionPush(externalId, token, {
+        history: [{ novelId: '42', chapterId: 1, progressPercent: 90, readAt: 1782000000005, updatedAt: 1782000000006 }],
+      });
+      expect(await newerEdit.json()).toMatchObject({ applied: { history: 1 } });
+      expect((await readHistory(row.id))[0].progressPercent).toBe(90);
+    });
+
+    it('keeps a library tombstone final against a newer live write', async () => {
+      const { row, externalId, token } = await createUser('pro');
+      await proCollectionPush(externalId, token, {
+        library: [{ novelId: '42', updatedAt: 1782000000001 }],
+      });
+      const removed = await proCollectionPush(externalId, token, {
+        library: [{ novelId: '42', deletedAt: 1782000000000, updatedAt: 1782000000000 }],
+      });
+      expect(await removed.json()).toMatchObject({ applied: { library: 1 } });
+      expect((await readLibrary(row.id))[0].deletedAt).not.toBeNull();
+
+      const resurrect = await proCollectionPush(externalId, token, {
+        library: [{ novelId: '42', updatedAt: 1782000000009 }],
+      });
+      expect(await resurrect.json()).toMatchObject({ applied: { library: 0 } });
+      expect((await readLibrary(row.id))[0].deletedAt).not.toBeNull();
+    });
+
+    it('keeps a manual chapter mark sticky and never lets the read flag fall', async () => {
+      const { row, externalId, token } = await createUser('pro');
+      await proCollectionPush(externalId, token, {
+        chapterStates: [{ novelId: '42', chapterId: 1, isRead: true, origin: 'snapshot', updatedAt: 1782000000001 }],
+      });
+      const fall = await proCollectionPush(externalId, token, {
+        chapterStates: [{ novelId: '42', chapterId: 1, isRead: false, origin: 'snapshot', updatedAt: 1782000000001 }],
+      });
+      expect(await fall.json()).toMatchObject({ applied: { chapterStates: 0 } });
+      expect((await readStates(row.id))[0].isRead).toBe(true);
+
+      await proCollectionPush(externalId, token, {
+        chapterStates: [{ novelId: '42', chapterId: 1, isRead: true, origin: 'manual', updatedAt: 1782000000002 }],
+      });
+      await proCollectionPush(externalId, token, {
+        chapterStates: [{ novelId: '42', chapterId: 1, isRead: true, origin: 'snapshot', updatedAt: 1782000000003 }],
+      });
+      expect((await readStates(row.id))[0].origin).toBe('manual');
+    });
+
+    it('applies a same-clock novel update and never blanks a known label', async () => {
+      const { row, externalId, token } = await createUser('pro');
+      await proCollectionPush(externalId, token, {
+        novels: [{ novelId: '42', title: 'Titled', genre: 'Fantasy', totalChapters: 10, updatedAt: 1782000000001 }],
+      });
+      const sameClock = await proCollectionPush(externalId, token, {
+        novels: [{ novelId: '42', title: '', genre: '', totalChapters: null, updatedAt: 1782000000001 }],
+      });
+      expect(await sameClock.json()).toMatchObject({ applied: { novels: 1 } });
+      const [novel] = await readNovels(row.id);
+      expect(novel.title).toBe('Titled');
+      expect(novel.genre).toBe('Fantasy');
+      expect(novel.totalChapters).toBe(10);
+    });
+  });
 });

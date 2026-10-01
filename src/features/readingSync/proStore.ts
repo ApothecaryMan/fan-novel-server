@@ -162,22 +162,34 @@ export async function storeProSessions(
   };
 }
 
+/**
+ * Dedupe a batch by its conflict key.
+ *
+ * Postgres refuses to affect the same row twice in one `ON CONFLICT DO UPDATE`
+ * statement, so a repeated key would abort the whole push. Last write wins,
+ * matching the coalesced outbox that produced the batch.
+ */
+function dedupeBy<T>(rows: readonly T[], key: (row: T) => string): T[] {
+  const byKey = new Map<string, T>();
+  for (const row of rows) byKey.set(key(row), row);
+  return [...byKey.values()];
+}
+
 async function storeLibrary(
   userId: string,
   rows: readonly ReadingSyncLibraryItem[],
   now: number,
   skewMs: number,
 ): Promise<number> {
-  let applied = 0;
-  for (const row of rows) {
+  const unique = dedupeBy(rows, (row) => row.novelId);
+  if (unique.length === 0) return 0;
+
+  const values = unique.map((row) => {
     const updatedAt = clampTs(row.updatedAt ?? now, now, skewMs);
     const deletedAt = row.deletedAt == null ? null : clampTs(row.deletedAt, now, skewMs);
-    const [existing] = await db
-      .select()
-      .from(userLibrary)
-      .where(and(eq(userLibrary.userId, userId), eq(userLibrary.novelId, row.novelId)))
-      .limit(1);
-    const values = {
+    return {
+      userId,
+      novelId: row.novelId,
       sourceId: row.sourceId ?? null,
       categoryIds: row.categoryIds ?? [],
       lastReadChapterId: row.lastReadChapterId ?? null,
@@ -189,20 +201,33 @@ async function storeLibrary(
       updatedAt,
       deletedAt,
     };
-    if (!existing) {
-      await db.insert(userLibrary).values({ userId, novelId: row.novelId, ...values });
-      applied++;
-    } else if (existing.deletedAt == null && deletedAt != null) {
-      await db.update(userLibrary).set(values).where(eq(userLibrary.id, existing.id));
-      applied++;
-    } else if (existing.deletedAt != null && deletedAt == null) {
-      // Tombstone wins regardless of clock.
-    } else if (updatedAt > Number(existing.updatedAt ?? 0)) {
-      await db.update(userLibrary).set(values).where(eq(userLibrary.id, existing.id));
-      applied++;
-    }
-  }
-  return applied;
+  });
+
+  // A tombstone beats a live row whatever the clock says; otherwise the newer
+  // write wins. One statement for the whole batch, and RETURNING reports only
+  // the rows actually inserted or updated.
+  const result = await db
+    .insert(userLibrary)
+    .values(values)
+    .onConflictDoUpdate({
+      target: [userLibrary.userId, userLibrary.novelId],
+      set: {
+        sourceId: sql`excluded.source_id`,
+        categoryIds: sql`excluded.category_ids`,
+        lastReadChapterId: sql`excluded.last_read_chapter_id`,
+        lastReadChapterNumber: sql`excluded.last_read_chapter_number`,
+        lastReadChapterTitle: sql`excluded.last_read_chapter_title`,
+        progressPercent: sql`excluded.progress_percent`,
+        lastReadAt: sql`excluded.last_read_at`,
+        addedAt: sql`excluded.added_at`,
+        updatedAt: sql`excluded.updated_at`,
+        deletedAt: sql`excluded.deleted_at`,
+      },
+      setWhere: sql`(excluded.deleted_at IS NOT NULL AND ${userLibrary.deletedAt} IS NULL)
+        OR (excluded.updated_at > ${userLibrary.updatedAt}
+            AND (excluded.deleted_at IS NOT NULL OR ${userLibrary.deletedAt} IS NULL))`,
+    });
+  return result.rowCount ?? 0;
 }
 
 async function storeHistory(
@@ -211,20 +236,16 @@ async function storeHistory(
   now: number,
   skewMs: number,
 ): Promise<number> {
-  let applied = 0;
-  for (const row of rows) {
+  const unique = dedupeBy(rows, (row) => `${row.novelId}\u0000${row.chapterId}`);
+  if (unique.length === 0) return 0;
+
+  const values = unique.map((row) => {
     const readAt = clampTs(row.readAt ?? now, now, skewMs);
     const updatedAt = clampTs(row.updatedAt ?? readAt, now, skewMs);
-    const [existing] = await db
-      .select()
-      .from(readingHistory)
-      .where(and(
-        eq(readingHistory.userId, userId),
-        eq(readingHistory.novelId, row.novelId),
-        eq(readingHistory.chapterId, row.chapterId),
-      ))
-      .limit(1);
-    const values = {
+    return {
+      userId,
+      novelId: row.novelId,
+      chapterId: row.chapterId,
       novelTitle: nonEmpty(row.novelTitle),
       novelCover: '',
       novelAuthor: nonEmpty(row.novelAuthor),
@@ -237,90 +258,96 @@ async function storeHistory(
       readAt,
       updatedAt,
     };
-    if (!existing) {
-      await db.insert(readingHistory).values({ userId, novelId: row.novelId, chapterId: row.chapterId, ...values });
-      applied++;
-    } else if (readAt > Number(existing.readAt)
-      || (readAt === Number(existing.readAt) && updatedAt > Number(existing.updatedAt))) {
-      await db.update(readingHistory).set(values).where(eq(readingHistory.id, existing.id));
-      applied++;
-    }
-  }
-  return applied;
+  });
+
+  const result = await db
+    .insert(readingHistory)
+    .values(values)
+    .onConflictDoUpdate({
+      target: [readingHistory.userId, readingHistory.novelId, readingHistory.chapterId],
+      set: {
+        novelTitle: sql`excluded.novel_title`,
+        novelCover: sql`excluded.novel_cover`,
+        novelAuthor: sql`excluded.novel_author`,
+        category: sql`excluded.category`,
+        sourceId: sql`excluded.source_id`,
+        chapterNumber: sql`excluded.chapter_number`,
+        chapterTitle: sql`excluded.chapter_title`,
+        progressPercent: sql`excluded.progress_percent`,
+        readDay: sql`excluded.read_day`,
+        readAt: sql`excluded.read_at`,
+        updatedAt: sql`excluded.updated_at`,
+      },
+      // Later read wins; a tie falls back to the edit clock.
+      setWhere: sql`excluded.read_at > ${readingHistory.readAt}
+        OR (excluded.read_at = ${readingHistory.readAt}
+            AND excluded.updated_at > ${readingHistory.updatedAt})`,
+    });
+  return result.rowCount ?? 0;
 }
 
 async function storeChapterStates(
   userId: string,
   rows: readonly ReadingSyncChapterState[],
 ): Promise<number> {
-  let applied = 0;
-  for (const row of rows) {
-    const [existing] = await db
-      .select()
-      .from(readingChapterState)
-      .where(and(
-        eq(readingChapterState.userId, userId),
-        eq(readingChapterState.novelId, row.novelId),
-        eq(readingChapterState.chapterId, row.chapterId),
-      ))
-      .limit(1);
-    if (!existing) {
-      await db.insert(readingChapterState).values({ userId, ...row });
-      applied++;
-      continue;
-    }
-    const incomingManual = row.origin === 'manual';
-    const existingManual = existing.origin === 'manual';
-    if (row.updatedAt < Number(existing.updatedAt)) continue;
-    const origin = incomingManual || existingManual ? 'manual' : row.origin;
-    if (row.updatedAt === Number(existing.updatedAt) && !row.isRead && existing.isRead) continue;
-    await db
-      .update(readingChapterState)
-      .set({ isRead: row.isRead, origin, updatedAt: row.updatedAt })
-      .where(eq(readingChapterState.id, existing.id));
-    applied++;
-  }
-  return applied;
+  const unique = dedupeBy(rows, (row) => `${row.novelId}\u0000${row.chapterId}`);
+  if (unique.length === 0) return 0;
+
+  const result = await db
+    .insert(readingChapterState)
+    .values(unique.map((row) => ({ userId, ...row })))
+    .onConflictDoUpdate({
+      target: [
+        readingChapterState.userId,
+        readingChapterState.novelId,
+        readingChapterState.chapterId,
+      ],
+      set: {
+        isRead: sql`excluded.is_read`,
+        // A manual mark is sticky: once manual, always manual.
+        origin: sql`CASE WHEN excluded.origin = 'manual' OR ${readingChapterState.origin} = 'manual'
+          THEN 'manual' ELSE excluded.origin END`,
+        updatedAt: sql`excluded.updated_at`,
+      },
+      // Newer wins. On an exact tie the read flag may only rise, never fall.
+      setWhere: sql`excluded.updated_at > ${readingChapterState.updatedAt}
+        OR (excluded.updated_at = ${readingChapterState.updatedAt}
+            AND (excluded.is_read OR NOT ${readingChapterState.isRead}))`,
+    });
+  return result.rowCount ?? 0;
 }
 
 async function storeNovels(
   userId: string,
   rows: readonly ReadingSyncNovelMetadata[],
 ): Promise<number> {
-  let applied = 0;
-  for (const row of rows) {
-    const [existing] = await db
-      .select()
-      .from(readingNovels)
-      .where(and(eq(readingNovels.userId, userId), eq(readingNovels.novelId, row.novelId)))
-      .limit(1);
-    if (!existing) {
-      await db.insert(readingNovels).values({
-        userId,
-        novelId: row.novelId,
-        title: row.title,
-        genre: row.genre,
-        sourceId: row.sourceId ?? null,
-        totalChapters: row.totalChapters ?? null,
-        updatedAt: row.updatedAt,
-      });
-      applied++;
-      continue;
-    }
-    if (row.updatedAt < Number(existing.updatedAt)) continue;
-    await db
-      .update(readingNovels)
-      .set({
-        title: row.title || existing.title,
-        genre: row.genre || existing.genre,
-        sourceId: row.sourceId ?? existing.sourceId,
-        totalChapters: row.totalChapters ?? existing.totalChapters ?? null,
-        updatedAt: row.updatedAt,
-      })
-      .where(eq(readingNovels.id, existing.id));
-    applied++;
-  }
-  return applied;
+  const unique = dedupeBy(rows, (row) => row.novelId);
+  if (unique.length === 0) return 0;
+
+  const result = await db
+    .insert(readingNovels)
+    .values(unique.map((row) => ({
+      userId,
+      novelId: row.novelId,
+      title: row.title,
+      genre: row.genre,
+      sourceId: row.sourceId ?? null,
+      totalChapters: row.totalChapters ?? null,
+      updatedAt: row.updatedAt,
+    })))
+    .onConflictDoUpdate({
+      target: [readingNovels.userId, readingNovels.novelId],
+      set: {
+        // An empty incoming label never blanks a known one.
+        title: sql`COALESCE(NULLIF(excluded.title, ''), ${readingNovels.title})`,
+        genre: sql`COALESCE(NULLIF(excluded.genre, ''), ${readingNovels.genre})`,
+        sourceId: sql`COALESCE(excluded.source_id, ${readingNovels.sourceId})`,
+        totalChapters: sql`COALESCE(excluded.total_chapters, ${readingNovels.totalChapters})`,
+        updatedAt: sql`excluded.updated_at`,
+      },
+      setWhere: sql`excluded.updated_at >= ${readingNovels.updatedAt}`,
+    });
+  return result.rowCount ?? 0;
 }
 
 export async function storeProPush(
