@@ -67,6 +67,7 @@ describe('toApiAuthor', () => {
     username: 'lith',
     bannerUrl: 'https://cdn.test/b.jpg',
     createdAt: '2024-03-05T00:00:00.000Z',
+    decorations: { avatarFrameKey: 'fan_avatar/gold_avatar_frame_512.png' },
   };
 
   it('carries the card fields the sheet needs for its first frame', () => {
@@ -77,6 +78,7 @@ describe('toApiAuthor', () => {
       username: 'lith',
       bannerUrl: 'https://cdn.test/b.jpg',
       createdAt: '2024-03-05T00:00:00.000Z',
+      decorations: { avatarFrameKey: 'fan_avatar/gold_avatar_frame_512.png' },
     });
   });
 
@@ -87,6 +89,7 @@ describe('toApiAuthor', () => {
     expect(Object.keys(out).sort()).toEqual(['id', 'name']);
     expect('username' in out).toBe(false);
     expect('bannerUrl' in out).toBe(false);
+    expect('decorations' in out).toBe(false);
   });
 
   it('falls back to the generic label for an unknown commenter', () => {

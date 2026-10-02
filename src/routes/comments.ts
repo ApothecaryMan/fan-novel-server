@@ -8,6 +8,7 @@ import { requireAuth, optionalAuth } from '../middleware/auth.js';
 import { getCaller } from '../middleware/ownership.js';
 import { rateLimit } from '../middleware/rateLimit.js';
 import { getEnv } from '../config/env.js';
+import { parseProfileDecorations, type ProfileDecorations } from '../domain/profileDecorations.js';
 
 // Native comments for app-native novels only (sourceId 'internal:published').
 // Site sources (site:*) keep the extension path; see docs/COMMENTS_NATIVE_PLAN.md.
@@ -155,6 +156,13 @@ export interface ApiAuthor {
   bannerUrl?: string;
   /** ISO join date, the raw `users.created_at`. */
   createdAt?: string;
+  /**
+   * The author's chosen decorations. The thread draws the avatar frame from
+   * this; the commenter-profile sheet already had them from its own fetch, but
+   * the comment row did not, so a frame was invisible until the card opened.
+   * Omitted when the author chose none.
+   */
+  decorations?: ProfileDecorations;
 }
 
 /** What the batched author lookup caches per commenter. */
@@ -164,6 +172,7 @@ export type AuthorCard = {
   username?: string;
   bannerUrl?: string;
   createdAt?: string;
+  decorations?: ProfileDecorations;
 };
 
 export function toApi(row: CommentRow, author: ApiAuthor, myVote: 1 | -1 | 0) {
@@ -206,7 +215,7 @@ function toIsoStamp(value: unknown): string | undefined {
  */
 export function toApiAuthor(id: string, card: AuthorCard | undefined): ApiAuthor {
   if (!card) return { id, name: 'مستخدم' };
-  const { name, avatarUrl, username, bannerUrl, createdAt } = card;
+  const { name, avatarUrl, username, bannerUrl, createdAt, decorations } = card;
   return {
     id,
     name,
@@ -214,6 +223,7 @@ export function toApiAuthor(id: string, card: AuthorCard | undefined): ApiAuthor
     ...(username ? { username } : {}),
     ...(bannerUrl ? { bannerUrl } : {}),
     ...(createdAt ? { createdAt } : {}),
+    ...(decorations ? { decorations } : {}),
   };
 }
 
@@ -243,6 +253,7 @@ export async function buildAuthorLookup(userIds: string[]): Promise<Map<string, 
       username: u.username ?? undefined,
       bannerUrl: u.bannerUrl ?? undefined,
       createdAt: toIsoStamp(u.createdAt),
+      decorations: parseProfileDecorations(u.profileDecorations) ?? undefined,
     });
   }
   return lookup;
