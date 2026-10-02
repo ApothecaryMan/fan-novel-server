@@ -200,7 +200,6 @@ describe.skipIf(!url)('Free reading plan sync (isolated PostgreSQL)', () => {
         words: 0,
         minuteOfDay: 0,
         readDay: '',
-        genre: '',
       });
     }
     expect(rows[0]).toMatchObject({
@@ -306,8 +305,8 @@ describe.skipIf(!url)('Free reading plan sync (isolated PostgreSQL)', () => {
       await winner.query(
         `INSERT INTO reading_sessions
            (user_id, client_session_id, novel_id, chapter_id, progress_percent, completed,
-            completion_signal_present, pro_fields_present, seconds, words, minute_of_day, read_day, genre, ts)
-         VALUES ($1, 'm-race', '42', 7, 100, true, true, false, 10, 0, 0, '', '', 1782470400000)`,
+            completion_signal_present, pro_fields_present, seconds, words, minute_of_day, read_day, ts)
+         VALUES ($1, 'm-race', '42', 7, 100, true, true, false, 10, 0, 0, '', 1782470400000)`,
         [row.id],
       );
 
@@ -751,7 +750,6 @@ describe.skipIf(!url)('Free reading plan sync (isolated PostgreSQL)', () => {
       words: 0,
       minuteOfDay: 0,
       readDay: '',
-      genre: '',
       ts: 1782000000000,
     } as const;
     await database.insert(readingSessions).values([

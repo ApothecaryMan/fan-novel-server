@@ -185,7 +185,6 @@ export const readingSessions = pgTable('reading_sessions', {
   words: integer('words').notNull(),
   minuteOfDay: integer('minute_of_day').notNull(),
   readDay: varchar('read_day', { length: 10 }).notNull(),
-  genre: varchar('genre', { length: 100 }).default('').notNull(),
   ts: bigint('ts', { mode: 'number' }).notNull(),
   receivedAt: timestamp('received_at').defaultNow().notNull()
 }, (table) => ({

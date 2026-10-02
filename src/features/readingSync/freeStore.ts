@@ -36,7 +36,6 @@ export const FREE_SESSION_SAFE_DEFAULTS = {
   words: 0,
   minuteOfDay: 0,
   readDay: '',
-  genre: '',
 } as const;
 
 /**

@@ -91,7 +91,6 @@ const sessionRowSchema = z.object({
   words: z.number().optional(),
   minuteOfDay: z.number().optional(),
   readDay: z.string().max(10).optional(),
-  genre: z.string().max(100).optional(),
   ts: z.number().optional()
 });
 const pushSchema = z.object({
@@ -526,8 +525,8 @@ syncRouter.post('/push', async (c) => {
 
   // ---- PLAN GATE (legacy v1 sessions) -------------------------------------
   // Derived above: a Free-derived caller stores FREE_SESSION_SAFE_DEFAULTS
-  // for the four Pro dimensions (words, minuteOfDay, readDay, genre), matching
-  // what features/readingSync/freeStore.ts writes on the v2 Free channel.
+  // for the Pro dimensions (words, minuteOfDay, readDay), matching what
+  // features/readingSync/freeStore.ts writes on the v2 Free channel.
   let appliedSessions = 0;
   for (const e of legacyBody.sessions ?? []) {
     const key = typeof e.clientSessionId === 'string' ? e.clientSessionId : '';
@@ -544,7 +543,6 @@ syncRouter.post('/push', async (c) => {
           words: num(e.words),
           minuteOfDay: num(e.minuteOfDay),
           readDay: strDef(e.readDay),
-          genre: strDef(e.genre),
         }),
         ts: num(e.ts, now)
       })
@@ -646,7 +644,6 @@ syncRouter.post('/pull', async (c) => {
         words: r.words,
         minuteOfDay: r.minuteOfDay,
         readDay: r.readDay,
-        genre: r.genre,
       }),
       ts: r.ts
     }))

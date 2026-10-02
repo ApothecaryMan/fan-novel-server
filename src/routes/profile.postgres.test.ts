@@ -87,7 +87,6 @@ describe.skipIf(!url)('Profile aggregates (isolated PostgreSQL)', () => {
       words: 300,
       minuteOfDay: 600,
       readDay: '2026-09-01',
-      genre: '',
       ts: Date.now(),
       ...overrides,
     } as typeof readingSessions.$inferInsert;

@@ -231,7 +231,6 @@ describe('reading statistics database schema', () => {
       words: column('integer', true),
       minute_of_day: column('integer', true),
       read_day: column('varchar(10)', true),
-      genre: column('varchar(100)', true, { hasDefault: true, default: '' }),
       ts: column('bigint', true),
       received_at: column('timestamp', true, { hasDefault: true }),
     });
