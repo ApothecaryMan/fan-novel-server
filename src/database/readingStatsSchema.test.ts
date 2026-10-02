@@ -420,13 +420,13 @@ describe('reading statistics database schema', () => {
   });
 
   it('keeps additive SQL assertions independent of whitespace and statement order', () => {
-    const commentsToggle = normalizedMigration('0010_novel_comments_toggle.sql');
+    const commentsToggle = normalizedMigration('0009_novel_comments_toggle.sql');
     expect(commentsToggle).toMatch(
       /ALTER TABLE "novels" ADD COLUMN "comments_enabled" boolean DEFAULT true NOT NULL;/,
     );
     expect(commentsToggle).not.toMatch(/DROP\s+(?:INDEX|COLUMN|CONSTRAINT)/i);
 
-    const planMigration = normalizedMigration('0011_reading_stats_sync.sql');
+    const planMigration = normalizedMigration('0010_reading_stats_sync.sql');
     expect(planMigration).toContain(
       'ALTER TABLE "users" ADD COLUMN "reading_stats_plan" varchar(10) DEFAULT \'free\' NOT NULL;',
     );
@@ -450,7 +450,7 @@ describe('reading statistics database schema', () => {
     expect(planMigration).not.toMatch(/CREATE\s+INDEX\s+CONCURRENTLY/i);
     expect(planMigration).not.toMatch(/DROP\s+(?:INDEX|COLUMN|CONSTRAINT)/i);
 
-    const proMigration = normalizedMigration('0012_pro_reading_data.sql');
+    const proMigration = normalizedMigration('0011_pro_reading_data.sql');
     expect(proMigration).toMatch(/CREATE TABLE "reading_chapter_state"/);
     expect(proMigration).toMatch(/CREATE TABLE "reading_novels"/);
     expect(proMigration).toContain('reading_chapter_state_origin_check');

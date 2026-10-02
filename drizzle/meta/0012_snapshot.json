@@ -1,6 +1,6 @@
 {
-  "id": "8523417d-4758-4555-8fad-599feeb02c09",
-  "prevId": "dcd0d421-8a61-4201-ba30-8ea45be442ce",
+  "id": "b40e48aa-2133-4ef8-a33e-bef4e888ccb4",
+  "prevId": "8523417d-4758-4555-8fad-599feeb02c09",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -1749,6 +1749,173 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
+    "public.subscription_events": {
+      "name": "subscription_events",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "integer",
+          "primaryKey": true,
+          "notNull": true,
+          "identity": {
+            "type": "always",
+            "name": "subscription_events_id_seq",
+            "schema": "public",
+            "increment": "1",
+            "startWith": "1",
+            "minValue": "1",
+            "maxValue": "2147483647",
+            "cache": "1",
+            "cycle": false
+          }
+        },
+        "user_id": {
+          "name": "user_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "type": {
+          "name": "type",
+          "type": "varchar(16)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "actor_id": {
+          "name": "actor_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "previous_expires_at": {
+          "name": "previous_expires_at",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "new_expires_at": {
+          "name": "new_expires_at",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "duration_days": {
+          "name": "duration_days",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "reason": {
+          "name": "reason",
+          "type": "varchar(500)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "occurred_at": {
+          "name": "occurred_at",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "received_at": {
+          "name": "received_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "subscription_events_user_occurred_idx": {
+          "name": "subscription_events_user_occurred_idx",
+          "columns": [
+            {
+              "expression": "user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "occurred_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "subscription_events_expired_unique_idx": {
+          "name": "subscription_events_expired_unique_idx",
+          "columns": [
+            {
+              "expression": "user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "previous_expires_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"subscription_events\".\"type\" = 'expired'",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "subscription_events_user_id_users_id_fk": {
+          "name": "subscription_events_user_id_users_id_fk",
+          "tableFrom": "subscription_events",
+          "tableTo": "users",
+          "columnsFrom": [
+            "user_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "subscription_events_actor_id_users_id_fk": {
+          "name": "subscription_events_actor_id_users_id_fk",
+          "tableFrom": "subscription_events",
+          "tableTo": "users",
+          "columnsFrom": [
+            "actor_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "subscription_events_type_check": {
+          "name": "subscription_events_type_check",
+          "value": "\"subscription_events\".\"type\" in ('grant', 'renew', 'revoke', 'expired')"
+        }
+      },
+      "isRLSEnabled": false
+    },
     "public.user_categories": {
       "name": "user_categories",
       "schema": "",
@@ -2080,6 +2247,70 @@
           "notNull": true,
           "default": "'free'"
         },
+        "reading_stats_plan_started_at": {
+          "name": "reading_stats_plan_started_at",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "reading_stats_plan_expires_at": {
+          "name": "reading_stats_plan_expires_at",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "reading_stats_trial_started_at": {
+          "name": "reading_stats_trial_started_at",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "reading_stats_trial_ends_at": {
+          "name": "reading_stats_trial_ends_at",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "reading_stats_last_renewed_at": {
+          "name": "reading_stats_last_renewed_at",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "reading_stats_grace_until": {
+          "name": "reading_stats_grace_until",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "reading_stats_plan_duration_days": {
+          "name": "reading_stats_plan_duration_days",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 30
+        },
+        "reading_stats_plan_status": {
+          "name": "reading_stats_plan_status",
+          "type": "varchar(20)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'free'"
+        },
+        "reading_stats_renewal_count": {
+          "name": "reading_stats_renewal_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "reading_stats_total_subscribed_ms": {
+          "name": "reading_stats_total_subscribed_ms",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
         "is_author": {
           "name": "is_author",
           "type": "boolean",
@@ -2147,6 +2378,10 @@
         "users_reading_stats_plan_check": {
           "name": "users_reading_stats_plan_check",
           "value": "\"users\".\"reading_stats_plan\" in ('free', 'pro')"
+        },
+        "users_reading_stats_plan_status_check": {
+          "name": "users_reading_stats_plan_status_check",
+          "value": "\"users\".\"reading_stats_plan_status\" in ('free', 'active', 'expired', 'cancelled')"
         }
       },
       "isRLSEnabled": false

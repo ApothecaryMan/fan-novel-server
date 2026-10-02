@@ -62,56 +62,56 @@
       "idx": 8,
       "version": "7",
       "when": 1790102873232,
-      "tag": "0009_add_content_hash",
+      "tag": "0008_add_content_hash",
       "breakpoints": true
     },
     {
       "idx": 9,
       "version": "7",
       "when": 1790102873233,
-      "tag": "0010_novel_comments_toggle",
+      "tag": "0009_novel_comments_toggle",
       "breakpoints": true
     },
     {
       "idx": 10,
       "version": "7",
       "when": 1790318388997,
-      "tag": "0011_reading_stats_sync",
+      "tag": "0010_reading_stats_sync",
       "breakpoints": true
     },
     {
       "idx": 11,
       "version": "7",
       "when": 1790318388998,
-      "tag": "0012_pro_reading_data",
+      "tag": "0011_pro_reading_data",
       "breakpoints": true
     },
     {
       "idx": 12,
       "version": "7",
       "when": 1790410977826,
-      "tag": "0013_pro_subscription_entitlement",
+      "tag": "0012_pro_subscription_entitlement",
       "breakpoints": true
     },
     {
       "idx": 13,
       "version": "7",
       "when": 1790410978826,
-      "tag": "0014_translation_rank",
+      "tag": "0013_translation_rank",
       "breakpoints": true
     },
     {
       "idx": 14,
       "version": "7",
       "when": 1790410979826,
-      "tag": "0015_profile_decorations",
+      "tag": "0014_profile_decorations",
       "breakpoints": true
     },
     {
       "idx": 15,
       "version": "7",
       "when": 1790938193271,
-      "tag": "0016_drop_genre",
+      "tag": "0015_drop_genre",
       "breakpoints": true
     }
   ]

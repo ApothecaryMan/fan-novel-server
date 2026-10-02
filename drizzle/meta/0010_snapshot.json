@@ -1,6 +1,6 @@
 {
-  "id": "19981e1d-37b0-4373-be9e-c9b017af5c67",
-  "prevId": "aec64cb5-1d1b-447a-bc3f-20fb17791317",
+  "id": "dcd0d421-8a61-4201-ba30-8ea45be442ce",
+  "prevId": "19981e1d-37b0-4373-be9e-c9b017af5c67",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -1096,6 +1096,33 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
+        },
+        "history_user_read_at_id_idx": {
+          "name": "history_user_read_at_id_idx",
+          "columns": [
+            {
+              "expression": "user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "read_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {
@@ -1164,6 +1191,34 @@
           "primaryKey": false,
           "notNull": true
         },
+        "progress_percent": {
+          "name": "progress_percent",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "completed": {
+          "name": "completed",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "completion_signal_present": {
+          "name": "completion_signal_present",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "pro_fields_present": {
+          "name": "pro_fields_present",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
         "seconds": {
           "name": "seconds",
           "type": "integer",
@@ -1227,6 +1282,81 @@
             }
           ],
           "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "sessions_user_novel_chapter_idx": {
+          "name": "sessions_user_novel_chapter_idx",
+          "columns": [
+            {
+              "expression": "user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "novel_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "chapter_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "sessions_user_read_day_idx": {
+          "name": "sessions_user_read_day_idx",
+          "columns": [
+            {
+              "expression": "user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "read_day",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "sessions_user_ts_id_idx": {
+          "name": "sessions_user_ts_id_idx",
+          "columns": [
+            {
+              "expression": "user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "ts",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
           "concurrently": false,
           "method": "btree",
           "with": {}
@@ -1584,6 +1714,33 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
+        },
+        "library_user_updated_id_idx": {
+          "name": "library_user_updated_id_idx",
+          "columns": [
+            {
+              "expression": "user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "updated_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {
@@ -1679,6 +1836,13 @@
           "notNull": true,
           "default": "'reader'"
         },
+        "reading_stats_plan": {
+          "name": "reading_stats_plan",
+          "type": "varchar(10)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'free'"
+        },
         "is_author": {
           "name": "is_author",
           "type": "boolean",
@@ -1742,7 +1906,12 @@
         }
       },
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "users_reading_stats_plan_check": {
+          "name": "users_reading_stats_plan_check",
+          "value": "\"users\".\"reading_stats_plan\" in ('free', 'pro')"
+        }
+      },
       "isRLSEnabled": false
     }
   },

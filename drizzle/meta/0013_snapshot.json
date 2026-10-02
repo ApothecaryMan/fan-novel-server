@@ -1,6 +1,6 @@
 {
-  "id": "b40e48aa-2133-4ef8-a33e-bef4e888ccb4",
-  "prevId": "8523417d-4758-4555-8fad-599feeb02c09",
+  "id": "7b3d469d-77b8-4203-91ec-a67bf2161dc3",
+  "prevId": "b40e48aa-2133-4ef8-a33e-bef4e888ccb4",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -827,7 +827,7 @@
           "type": "varchar(50)",
           "primaryKey": false,
           "notNull": true,
-          "default": "'مستمرة'"
+          "default": "'\u0645\u0633\u062a\u0645\u0631\u0629'"
         },
         "category": {
           "name": "category",
@@ -878,6 +878,12 @@
         "featured_rank": {
           "name": "featured_rank",
           "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "translation_rank": {
+          "name": "translation_rank",
+          "type": "varchar(2)",
           "primaryKey": false,
           "notNull": false
         },

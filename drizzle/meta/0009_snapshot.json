@@ -1,6 +1,6 @@
 {
-  "id": "aec64cb5-1d1b-447a-bc3f-20fb17791317",
-  "prevId": "9075ddc5-9e28-4000-8bac-af219fa9c54f",
+  "id": "19981e1d-37b0-4373-be9e-c9b017af5c67",
+  "prevId": "aec64cb5-1d1b-447a-bc3f-20fb17791317",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -880,6 +880,13 @@
           "type": "integer",
           "primaryKey": false,
           "notNull": false
+        },
+        "comments_enabled": {
+          "name": "comments_enabled",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": true
         },
         "author_user_id": {
           "name": "author_user_id",

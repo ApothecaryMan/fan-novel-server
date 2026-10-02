@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { cpSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync } from 'node:fs';
+import { cpSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -37,17 +37,17 @@ describe('Drizzle migration ledger', () => {
 
     const tags = journal.entries.map(({ tag }) => tag);
     expect(tags).toEqual(expect.arrayContaining([
-      '0009_add_content_hash',
-      '0010_novel_comments_toggle',
-      '0011_reading_stats_sync',
-      '0012_pro_reading_data',
+      '0008_add_content_hash',
+      '0009_novel_comments_toggle',
+      '0010_reading_stats_sync',
+      '0011_pro_reading_data',
     ]));
 
-    // 0007 is the recovered bio snapshot, 0009 is the preserved content-hash
-    // state, and 0010 must contain only the comments-toggle delta.
+    // 0007 is the recovered bio snapshot, 0008 is the preserved content-hash
+    // state, and 0009 must contain only the comments-toggle delta.
     const bio = snapshot('0007');
-    const contentHash = snapshot('0009');
-    const commentsToggle = snapshot('0010');
+    const contentHash = snapshot('0008');
+    const commentsToggle = snapshot('0009');
     expect(contentHash.prevId).toBe(bio.id);
     expect(bio.tables['public.users'].columns).toHaveProperty('bio');
     expect(bio.tables['public.chapters'].columns).not.toHaveProperty('content_hash');
@@ -55,8 +55,8 @@ describe('Drizzle migration ledger', () => {
     expect(commentsToggle.tables['public.novels'].columns).toHaveProperty('comments_enabled');
     expect(commentsToggle.tables['public.reading_sessions'].columns).not.toHaveProperty('progress_percent');
 
-    const stats = snapshot('0011');
-    const pro = snapshot('0012');
+    const stats = snapshot('0010');
+    const pro = snapshot('0011');
     expect(stats.prevId).toBe(commentsToggle.id);
     expect(stats.tables['public.reading_sessions'].columns).toHaveProperty('progress_percent');
     expect(stats.tables['public.users'].columns).toHaveProperty('reading_stats_plan');
@@ -65,7 +65,9 @@ describe('Drizzle migration ledger', () => {
       reading_chapter_state_user_novel_chapter_idx: expect.any(Object),
     });
     expect(pro.tables['public.reading_chapter_state'].indexes).not.toHaveProperty('reading_chapter_state_user_novel_idx');
-  });
+    // Spawns `check-migrations.mjs`; under a parallel run that can exceed the
+    // 5s default and fail as a TIMEOUT rather than an integrity error.
+  }, 60_000);
 
   it('does not generate a new migration from the checked-in schema', () => {
     const temp = mkdtempSync(join(tmpdir(), 'fan-novel-drizzle-check-'));
@@ -85,15 +87,18 @@ describe('Drizzle migration ledger', () => {
         encoding: 'utf8',
       });
       expect(output).toMatch(/No schema changes/i);
-      expect(existsSync(join(temp, 'drizzle', '0012_drift-check.sql'))).toBe(false);
-      expect(existsSync(join(temp, 'drizzle', 'meta', '0012_snapshot.json'))).toBe(true);
+      // A generated migration would be named `<entries.length>_drift-check.sql`.
+      // Any such file means the checked-in snapshot disagrees with schema.ts.
+      expect(readdirSync(join(temp, 'drizzle')).some((n) => n.endsWith('_drift-check.sql'))).toBe(false);
     } finally {
       rmSync(temp, { recursive: true, force: true });
     }
-  });
+    // Spawns drizzle-kit, which loads its whole module graph per run. Under
+    // parallel CPU load this blows the 5s default and reports a timeout.
+  }, 60_000);
 
   it('documents the transaction-safe index rollout and tests the concurrent preflight', () => {
-    const migration = readFileSync(join(root, 'drizzle', '0011_reading_stats_sync.sql'), 'utf8');
+    const migration = readFileSync(join(root, 'drizzle', '0010_reading_stats_sync.sql'), 'utf8');
     const statements = migration.replace(/--[^\n]*/g, '');
     const helper = readFileSync(join(root, 'scripts', 'apply-reading-indexes-concurrently.mjs'), 'utf8');
     const runbook = readFileSync(join(root, 'docs', 'DATABASE_MIGRATIONS.md'), 'utf8');

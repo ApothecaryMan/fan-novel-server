@@ -1,6 +1,6 @@
 {
-  "id": "6d86fb40-4b61-4f97-8ee2-e6feb3ee43c8",
-  "prevId": "7b3d469d-77b8-4203-91ec-a67bf2161dc3",
+  "id": "432b8c4f-84b8-483a-96bd-22ca9ee1cdb3",
+  "prevId": "6d86fb40-4b61-4f97-8ee2-e6feb3ee43c8",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -827,7 +827,7 @@
           "type": "varchar(50)",
           "primaryKey": false,
           "notNull": true,
-          "default": "'\u0645\u0633\u062a\u0645\u0631\u0629'"
+          "default": "'مستمرة'"
         },
         "category": {
           "name": "category",
@@ -1312,13 +1312,6 @@
           "notNull": true,
           "default": "''"
         },
-        "genre": {
-          "name": "genre",
-          "type": "varchar(100)",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "''"
-        },
         "source_id": {
           "name": "source_id",
           "type": "varchar(100)",
@@ -1343,6 +1336,13 @@
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
+        },
+        "genre": {
+          "name": "genre",
+          "type": "varchar(100)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "''"
         }
       },
       "indexes": {
@@ -1485,13 +1485,6 @@
           "type": "varchar(10)",
           "primaryKey": false,
           "notNull": true
-        },
-        "genre": {
-          "name": "genre",
-          "type": "varchar(100)",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "''"
         },
         "ts": {
           "name": "ts",

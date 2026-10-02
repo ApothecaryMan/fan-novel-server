@@ -1,6 +1,6 @@
 {
-  "id": "7b3d469d-77b8-4203-91ec-a67bf2161dc3",
-  "prevId": "b40e48aa-2133-4ef8-a33e-bef4e888ccb4",
+  "id": "6d86fb40-4b61-4f97-8ee2-e6feb3ee43c8",
+  "prevId": "7b3d469d-77b8-4203-91ec-a67bf2161dc3",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -2344,6 +2344,12 @@
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
+        },
+        "profile_decorations": {
+          "name": "profile_decorations",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
         }
       },
       "indexes": {},

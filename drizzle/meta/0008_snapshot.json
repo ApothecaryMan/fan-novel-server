@@ -1,6 +1,6 @@
 {
-  "id": "432b8c4f-84b8-483a-96bd-22ca9ee1cdb3",
-  "prevId": "6d86fb40-4b61-4f97-8ee2-e6feb3ee43c8",
+  "id": "aec64cb5-1d1b-447a-bc3f-20fb17791317",
+  "prevId": "9075ddc5-9e28-4000-8bac-af219fa9c54f",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -881,19 +881,6 @@
           "primaryKey": false,
           "notNull": false
         },
-        "translation_rank": {
-          "name": "translation_rank",
-          "type": "varchar(2)",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "comments_enabled": {
-          "name": "comments_enabled",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true,
-          "default": true
-        },
         "author_user_id": {
           "name": "author_user_id",
           "type": "uuid",
@@ -954,126 +941,6 @@
       "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.reading_chapter_state": {
-      "name": "reading_chapter_state",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "integer",
-          "primaryKey": true,
-          "notNull": true,
-          "identity": {
-            "type": "always",
-            "name": "reading_chapter_state_id_seq",
-            "schema": "public",
-            "increment": "1",
-            "startWith": "1",
-            "minValue": "1",
-            "maxValue": "2147483647",
-            "cache": "1",
-            "cycle": false
-          }
-        },
-        "user_id": {
-          "name": "user_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "novel_id": {
-          "name": "novel_id",
-          "type": "varchar(100)",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "chapter_id": {
-          "name": "chapter_id",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "is_read": {
-          "name": "is_read",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "origin": {
-          "name": "origin",
-          "type": "varchar(16)",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "updated_at": {
-          "name": "updated_at",
-          "type": "bigint",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "received_at": {
-          "name": "received_at",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {
-        "reading_chapter_state_user_novel_chapter_idx": {
-          "name": "reading_chapter_state_user_novel_chapter_idx",
-          "columns": [
-            {
-              "expression": "user_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "novel_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "chapter_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "reading_chapter_state_user_id_users_id_fk": {
-          "name": "reading_chapter_state_user_id_users_id_fk",
-          "tableFrom": "reading_chapter_state",
-          "tableTo": "users",
-          "columnsFrom": [
-            "user_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {
-        "reading_chapter_state_origin_check": {
-          "name": "reading_chapter_state_origin_check",
-          "value": "\"reading_chapter_state\".\"origin\" in ('manual', 'snapshot')"
-        }
-      },
       "isRLSEnabled": false
     },
     "public.reading_history": {
@@ -1222,156 +1089,12 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
-        },
-        "history_user_read_at_id_idx": {
-          "name": "history_user_read_at_id_idx",
-          "columns": [
-            {
-              "expression": "user_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "read_at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
         }
       },
       "foreignKeys": {
         "reading_history_user_id_users_id_fk": {
           "name": "reading_history_user_id_users_id_fk",
           "tableFrom": "reading_history",
-          "tableTo": "users",
-          "columnsFrom": [
-            "user_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.reading_novels": {
-      "name": "reading_novels",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "integer",
-          "primaryKey": true,
-          "notNull": true,
-          "identity": {
-            "type": "always",
-            "name": "reading_novels_id_seq",
-            "schema": "public",
-            "increment": "1",
-            "startWith": "1",
-            "minValue": "1",
-            "maxValue": "2147483647",
-            "cache": "1",
-            "cycle": false
-          }
-        },
-        "user_id": {
-          "name": "user_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "novel_id": {
-          "name": "novel_id",
-          "type": "varchar(100)",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "title": {
-          "name": "title",
-          "type": "varchar(255)",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "''"
-        },
-        "source_id": {
-          "name": "source_id",
-          "type": "varchar(100)",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "total_chapters": {
-          "name": "total_chapters",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "updated_at": {
-          "name": "updated_at",
-          "type": "bigint",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "received_at": {
-          "name": "received_at",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        },
-        "genre": {
-          "name": "genre",
-          "type": "varchar(100)",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "''"
-        }
-      },
-      "indexes": {
-        "reading_novels_user_novel_idx": {
-          "name": "reading_novels_user_novel_idx",
-          "columns": [
-            {
-              "expression": "user_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "novel_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "reading_novels_user_id_users_id_fk": {
-          "name": "reading_novels_user_id_users_id_fk",
-          "tableFrom": "reading_novels",
           "tableTo": "users",
           "columnsFrom": [
             "user_id"
@@ -1434,34 +1157,6 @@
           "primaryKey": false,
           "notNull": true
         },
-        "progress_percent": {
-          "name": "progress_percent",
-          "type": "real",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 0
-        },
-        "completed": {
-          "name": "completed",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true,
-          "default": false
-        },
-        "completion_signal_present": {
-          "name": "completion_signal_present",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true,
-          "default": false
-        },
-        "pro_fields_present": {
-          "name": "pro_fields_present",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true,
-          "default": false
-        },
         "seconds": {
           "name": "seconds",
           "type": "integer",
@@ -1485,6 +1180,13 @@
           "type": "varchar(10)",
           "primaryKey": false,
           "notNull": true
+        },
+        "genre": {
+          "name": "genre",
+          "type": "varchar(100)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "''"
         },
         "ts": {
           "name": "ts",
@@ -1518,81 +1220,6 @@
             }
           ],
           "isUnique": true,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "sessions_user_novel_chapter_idx": {
-          "name": "sessions_user_novel_chapter_idx",
-          "columns": [
-            {
-              "expression": "user_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "novel_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "chapter_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "sessions_user_read_day_idx": {
-          "name": "sessions_user_read_day_idx",
-          "columns": [
-            {
-              "expression": "user_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "read_day",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "sessions_user_ts_id_idx": {
-          "name": "sessions_user_ts_id_idx",
-          "columns": [
-            {
-              "expression": "user_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "ts",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
           "concurrently": false,
           "method": "btree",
           "with": {}
@@ -1746,173 +1373,6 @@
       "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.subscription_events": {
-      "name": "subscription_events",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "integer",
-          "primaryKey": true,
-          "notNull": true,
-          "identity": {
-            "type": "always",
-            "name": "subscription_events_id_seq",
-            "schema": "public",
-            "increment": "1",
-            "startWith": "1",
-            "minValue": "1",
-            "maxValue": "2147483647",
-            "cache": "1",
-            "cycle": false
-          }
-        },
-        "user_id": {
-          "name": "user_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "type": {
-          "name": "type",
-          "type": "varchar(16)",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "actor_id": {
-          "name": "actor_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "previous_expires_at": {
-          "name": "previous_expires_at",
-          "type": "bigint",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "new_expires_at": {
-          "name": "new_expires_at",
-          "type": "bigint",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "duration_days": {
-          "name": "duration_days",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "reason": {
-          "name": "reason",
-          "type": "varchar(500)",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "occurred_at": {
-          "name": "occurred_at",
-          "type": "bigint",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "received_at": {
-          "name": "received_at",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {
-        "subscription_events_user_occurred_idx": {
-          "name": "subscription_events_user_occurred_idx",
-          "columns": [
-            {
-              "expression": "user_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "occurred_at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "subscription_events_expired_unique_idx": {
-          "name": "subscription_events_expired_unique_idx",
-          "columns": [
-            {
-              "expression": "user_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "previous_expires_at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "where": "\"subscription_events\".\"type\" = 'expired'",
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "subscription_events_user_id_users_id_fk": {
-          "name": "subscription_events_user_id_users_id_fk",
-          "tableFrom": "subscription_events",
-          "tableTo": "users",
-          "columnsFrom": [
-            "user_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "subscription_events_actor_id_users_id_fk": {
-          "name": "subscription_events_actor_id_users_id_fk",
-          "tableFrom": "subscription_events",
-          "tableTo": "users",
-          "columnsFrom": [
-            "actor_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {
-        "subscription_events_type_check": {
-          "name": "subscription_events_type_check",
-          "value": "\"subscription_events\".\"type\" in ('grant', 'renew', 'revoke', 'expired')"
-        }
-      },
       "isRLSEnabled": false
     },
     "public.user_categories": {
@@ -2117,33 +1577,6 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
-        },
-        "library_user_updated_id_idx": {
-          "name": "library_user_updated_id_idx",
-          "columns": [
-            {
-              "expression": "user_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "updated_at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
         }
       },
       "foreignKeys": {
@@ -2239,77 +1672,6 @@
           "notNull": true,
           "default": "'reader'"
         },
-        "reading_stats_plan": {
-          "name": "reading_stats_plan",
-          "type": "varchar(10)",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'free'"
-        },
-        "reading_stats_plan_started_at": {
-          "name": "reading_stats_plan_started_at",
-          "type": "bigint",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "reading_stats_plan_expires_at": {
-          "name": "reading_stats_plan_expires_at",
-          "type": "bigint",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "reading_stats_trial_started_at": {
-          "name": "reading_stats_trial_started_at",
-          "type": "bigint",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "reading_stats_trial_ends_at": {
-          "name": "reading_stats_trial_ends_at",
-          "type": "bigint",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "reading_stats_last_renewed_at": {
-          "name": "reading_stats_last_renewed_at",
-          "type": "bigint",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "reading_stats_grace_until": {
-          "name": "reading_stats_grace_until",
-          "type": "bigint",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "reading_stats_plan_duration_days": {
-          "name": "reading_stats_plan_duration_days",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 30
-        },
-        "reading_stats_plan_status": {
-          "name": "reading_stats_plan_status",
-          "type": "varchar(20)",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'free'"
-        },
-        "reading_stats_renewal_count": {
-          "name": "reading_stats_renewal_count",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 0
-        },
-        "reading_stats_total_subscribed_ms": {
-          "name": "reading_stats_total_subscribed_ms",
-          "type": "bigint",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 0
-        },
         "is_author": {
           "name": "is_author",
           "type": "boolean",
@@ -2337,12 +1699,6 @@
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
-        },
-        "profile_decorations": {
-          "name": "profile_decorations",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": false
         }
       },
       "indexes": {},
@@ -2379,16 +1735,7 @@
         }
       },
       "policies": {},
-      "checkConstraints": {
-        "users_reading_stats_plan_check": {
-          "name": "users_reading_stats_plan_check",
-          "value": "\"users\".\"reading_stats_plan\" in ('free', 'pro')"
-        },
-        "users_reading_stats_plan_status_check": {
-          "name": "users_reading_stats_plan_status_check",
-          "value": "\"users\".\"reading_stats_plan_status\" in ('free', 'active', 'expired', 'cancelled')"
-        }
-      },
+      "checkConstraints": {},
       "isRLSEnabled": false
     }
   },
