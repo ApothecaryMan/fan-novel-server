@@ -18,6 +18,14 @@ const envSchema = z.object({
   ADMIN_EMAILS: z.string().default(''),
   GOOGLE_WEB_CLIENT_ID: z.string().optional(),
   GOOGLE_ANDROID_CLIENT_ID: z.string().optional(),
+  // In-app update prompt (GET /api/v1/app/version). Set these in wrangler [vars]
+  // and deploy to announce a new APK; an empty APP_LATEST_VERSION disables it.
+  APP_LATEST_VERSION: z.string().default(''),
+  APP_MIN_VERSION: z.string().default(''),
+  APP_UPDATE_URL: z.string().default(''),
+  APP_UPDATE_NOTES: z.string().default(''),
+  APP_UPDATE_FORCE: z.enum(['true', 'false']).default('false'),
+  APP_APK_SHA256: z.string().default(''),
 }).superRefine((value, ctx) => {
   if (value.NODE_ENV !== 'production') return;
   const invalid = (field: string) => ctx.addIssue({ code: z.ZodIssueCode.custom, path: [field], message: 'invalid configuration' });

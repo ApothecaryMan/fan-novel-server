@@ -19,6 +19,16 @@ GOOGLE_ANDROID_CLIENT_ID = "195474249564-2fo5557utpnh2hhoncvg6aj2hf2q51hf.apps.g
 # npm run admin:promote). Demoting works now: seed never re-promotes.
 ADMIN_EMAILS = "mohamedrezk.mar@gmail.com"
 
+# In-app update prompt (GET /api/v1/app/version). Edit these + `wrangler deploy`
+# to announce a new APK. An empty APP_LATEST_VERSION disables the prompt.
+# APP_UPDATE_NOTES is a "|"-separated list of short lines.
+APP_LATEST_VERSION = ""
+APP_MIN_VERSION = ""
+APP_UPDATE_URL = ""
+APP_UPDATE_NOTES = ""
+APP_UPDATE_FORCE = "false"
+APP_APK_SHA256 = ""
+
 # Required secrets (wrangler secret put):
 #   DATABASE_URL  — Neon pooled connection string (https, no Hyperdrive needed; neon-http driver)
 #   JWT_SECRET    — long random string

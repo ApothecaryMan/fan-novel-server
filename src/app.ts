@@ -15,6 +15,7 @@ import { authorKeysRouter } from './routes/authorKeys.js';
 import { syncRouter } from './routes/sync.js';
 import { authorRouter } from './routes/author.js';
 import { adminRouter } from './routes/admin.js';
+import { appUpdateRouter } from './routes/appUpdate.js';
 import { rateLimit } from './middleware/rateLimit.js';
 import { edgeCacheComments } from './middleware/edgeCache.js';
 import { checkDb, db, initDb, isDbAvailable, noteDbFailure } from './database/db.js';
@@ -141,6 +142,7 @@ export function createApp() {
   app.route('/api/v1/chapters', chaptersTimelineRouter);
   app.route('/api/v1/upload', uploadRouter);
   app.route('/api/v1/image', imageResizeRouter);
+  app.route('/api/v1/app', appUpdateRouter);
 
   app.get('/api/v1', (c) => {
     return c.json({
