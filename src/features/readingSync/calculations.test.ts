@@ -57,7 +57,7 @@ type AppSyncEnvelope = {
 type AppFreeReadingSyncPush = AppSyncEnvelope & Pick<FreeReadingSyncPush, 'sessions'>;
 type AppProReadingSyncPush = AppSyncEnvelope & Pick<
   ProReadingSyncPush,
-  'sessions' | 'library' | 'history' | 'chapterStates' | 'novels'
+  'sessions' | 'library' | 'novels'
 >;
 type AppFreeReadingSyncPull = AppSyncEnvelope;
 type AppProReadingSyncPull = AppSyncEnvelope & Pick<ProReadingSyncPull, 'readingStats'>;
@@ -97,7 +97,6 @@ const validProStats = {
   longestStreakDays: 1,
   totalWords: 15120,
   uniqueInAppCompletedChapters: 12,
-  combinedTotalChaptersCompleted: 14,
   last7DaysActivity: Array.from({ length: 7 }, (_, index) => ({
     date: `2026-09-${String(19 + index).padStart(2, '0')}`,
     activeSeconds: index === 6 ? 7545 : 0,
@@ -126,8 +125,6 @@ const validProPush = {
   user: { externalId: 'subject-1' },
   sessions: [validProSession],
   library: [],
-  history: [],
-  chapterStates: [],
   novels: [],
 } satisfies AppProReadingSyncPush & ProReadingSyncPush;
 
@@ -141,7 +138,6 @@ const validProPull = {
   user: { externalId: 'subject-1' },
   readingStats: {
     libraryCursor: null,
-    historyCursor: null,
     sessionCursor: null,
     year: 2026,
   },
@@ -161,21 +157,6 @@ const validLibraryRow = {
   deletedAt: null,
 };
 
-const validHistoryRow = {
-  novelId: '42',
-  novelTitle: 'Example Novel',
-  novelAuthor: 'Author',
-  category: 'Fantasy',
-  sourceId: 'site:example',
-  chapterId: 7,
-  chapterNumber: 7,
-  chapterTitle: 'The Road',
-  progressPercent: 91,
-  readDay: '2026-09-25',
-  readAt: 1782470400000,
-  updatedAt: 1782470400000,
-};
-
 const validFreePushResponse = {
   success: true as const,
   plan: 'free' as const,
@@ -191,8 +172,6 @@ const validProPushResponse = {
   applied: {
     sessions: 1,
     library: 1,
-    history: 1,
-    chapterStates: 1,
     novels: 1,
   },
   acceptedSessionIds: [validProSession.clientSessionId],
@@ -208,7 +187,6 @@ const validProPullResponse = {
   success: true as const,
   plan: 'pro' as const,
   library: { rows: [validLibraryRow], nextCursor: null },
-  history: { rows: [validHistoryRow], nextCursor: 'history-cursor' },
   sessions: { rows: [validProSession], nextCursor: null },
   stats: validProStats,
 };
@@ -257,7 +235,6 @@ describe('reading sync v2 contracts', () => {
       'longestStreakDays',
       'totalWords',
       'uniqueInAppCompletedChapters',
-      'combinedTotalChaptersCompleted',
       'last7DaysActivity',
       'yearlyActivity',
       'hourlyDistribution',
@@ -432,14 +409,6 @@ describe('reading sync v2 contracts', () => {
     it('accepts 500 and rejects 501 rows in every Pro collection', () => {
       const collectionRows = {
         library: validLibraryRow,
-        history: validHistoryRow,
-        chapterStates: {
-          novelId: '42',
-          chapterId: 7,
-          isRead: true,
-          origin: 'manual' as const,
-          updatedAt: 1782470400000,
-        },
         novels: {
           novelId: '42',
           title: 'Example Novel',
@@ -546,7 +515,7 @@ describe('reading sync v2 contracts', () => {
     });
 
     it('rejects Free top-level Pro collections and client-supplied plans', () => {
-      for (const collection of ['library', 'history', 'chapterStates', 'novels']) {
+      for (const collection of ['library', 'novels']) {
         const result = freeReadingSyncPushSchema.safeParse({ ...validFreePush, [collection]: [] });
         expect(result.success).toBe(false);
         if (!result.success) expect(result.error.issues[0]?.message).toBe('pro_fields_not_allowed');
@@ -580,8 +549,6 @@ describe('reading sync v2 contracts', () => {
       expectExactKeys(validProPushResponse.applied, [
         'sessions',
         'library',
-        'history',
-        'chapterStates',
         'novels',
       ]);
     });
@@ -613,7 +580,7 @@ describe('reading sync v2 contracts', () => {
       }).success).toBe(false);
       expect(proReadingSyncPushResponseSchema.safeParse({
         ...validProPushResponse,
-        applied: { sessions: 1, library: 0, history: 0, chapterStates: 0 },
+        applied: { sessions: 1, library: 0 },
       }).success).toBe(false);
       expect(freeReadingSyncPushResponseSchema.safeParse({
         ...validFreePushResponse,
@@ -631,8 +598,8 @@ describe('reading sync v2 contracts', () => {
       expect(readingSyncPullResponseSchema.parse(validFreePullResponse)).toEqual(validFreePullResponse);
       expect(readingSyncPullResponseSchema.parse(validProPullResponse)).toEqual(validProPullResponse);
       expectExactKeys(validFreePullResponse, ['success', 'plan', 'stats']);
-      expectExactKeys(validProPullResponse, ['success', 'plan', 'library', 'history', 'sessions', 'stats']);
-      for (const page of [validProPullResponse.library, validProPullResponse.history, validProPullResponse.sessions]) {
+      expectExactKeys(validProPullResponse, ['success', 'plan', 'library', 'sessions', 'stats']);
+      for (const page of [validProPullResponse.library, validProPullResponse.sessions]) {
         expectExactKeys(page, ['rows', 'nextCursor']);
       }
     });
@@ -646,9 +613,7 @@ describe('reading sync v2 contracts', () => {
         ...validProPullResponse,
         stats: validFreeStats,
       }).success).toBe(false);
-      const { history: omittedHistory, ...proWithoutHistory } = validProPullResponse;
-      expect(proReadingSyncPullResponseSchema.safeParse(proWithoutHistory).success).toBe(false);
-      for (const key of ['library', 'history', 'sessions', 'chapterStates']) {
+      for (const key of ['library', 'sessions']) {
         expect(freeReadingSyncPullResponseSchema.safeParse({
           ...validFreePullResponse,
           [key]: { rows: [], nextCursor: null },
@@ -801,7 +766,6 @@ describe('pure reading statistics calculations', () => {
   it('returns every empty Pro field with seven zero days and 24 zero hours', () => {
     const stats = calculateProStats({
       sessions: [],
-      chapterStates: [],
       novels: [],
       asOfDay: '2026-09-25',
     });
@@ -817,7 +781,6 @@ describe('pure reading statistics calculations', () => {
       longestStreakDays: 0,
       totalWords: 0,
       uniqueInAppCompletedChapters: 0,
-      combinedTotalChaptersCompleted: 0,
       last7DaysActivity: [
         { date: '2026-09-19', activeSeconds: 0 },
         { date: '2026-09-20', activeSeconds: 0 },
@@ -914,10 +877,6 @@ describe('pure reading statistics calculations', () => {
           minuteOfDay: 0,
         }),
       ],
-      chapterStates: [
-        { novelId: 'novel-1', chapterId: 2, isRead: true, origin: 'manual', updatedAt: 10 },
-        { novelId: 'novel-2', chapterId: 2, isRead: true, origin: 'snapshot', updatedAt: 10 },
-      ],
       novels: [
         { novelId: 'novel-1', title: 'First Novel', totalChapters: 2, updatedAt: 10 },
         { novelId: 'novel-2', totalChapters: 5, updatedAt: 10 },
@@ -936,7 +895,6 @@ describe('pure reading statistics calculations', () => {
     expect(stats.currentStreakDays).toBe(3);
     expect(stats.longestStreakDays).toBe(3);
     expect(stats.uniqueInAppCompletedChapters).toBe(3);
-    expect(stats.combinedTotalChaptersCompleted).toBe(4);
     expect(stats.last7DaysActivity).toEqual([
       { date: '2026-09-19', activeSeconds: 0 },
       { date: '2026-09-20', activeSeconds: 0 },
@@ -1116,14 +1074,9 @@ describe('pure reading statistics calculations', () => {
 
   it('merges complementary equal-timestamp novel metadata without losing fields', () => {
     const stats = calculateProStats({
-      sessions: [proSession({ novelId: 'merged-novel', seconds: 60, words: 60 })],
-      chapterStates: [{
-        novelId: 'merged-novel',
-        chapterId: 2,
-        isRead: true,
-        origin: 'manual',
-        updatedAt: 10,
-      }],
+      // Completion now comes from the session alone: chapter-state marks are
+      // device-local, so the server never sees them.
+      sessions: [proSession({ novelId: 'merged-novel', seconds: 60, words: 60, progressPercent: 100, completed: true })],
       novels: [
         {
           novelId: 'merged-novel',
@@ -1142,7 +1095,7 @@ describe('pure reading statistics calculations', () => {
     });
 
     expect(stats.mostReadNovels).toEqual([
-      { novelId: 'merged-novel', title: 'Merged Title', activeSeconds: 60, words: 60, chapters: 0 },
+      { novelId: 'merged-novel', title: 'Merged Title', activeSeconds: 60, words: 60, chapters: 1 },
     ]);
     expect(stats.completedNovels).toEqual([{ novelId: 'merged-novel', title: 'Merged Title' }]);
   });
@@ -1171,17 +1124,10 @@ describe('pure reading statistics calculations', () => {
     }));
     const stats = calculateProStats({
       sessions,
-      chapterStates: [
-        { novelId: 'novel-000', chapterId: 1, isRead: true, updatedAt: 2 },
-        { novelId: 'novel-000', chapterId: 1, isRead: false, updatedAt: 1 },
-        { novelId: 'novel-001', chapterId: 2, isRead: true, updatedAt: 2 },
-        { novelId: 'novel-002', chapterId: 2, isRead: false, updatedAt: 2 },
-      ],
       novels: [{ novelId: 'novel-100', title: 'Finished', totalChapters: 1 }],
       asOfDay: '2026-09-25',
     });
 
-    expect(stats.combinedTotalChaptersCompleted).toBe(3);
     expect(stats.mostReadNovels).toHaveLength(100);
     expect(stats.mostReadNovels[0]).toEqual({
       novelId: 'novel-100',

@@ -22,8 +22,6 @@ export function buildProPushResponse(input: {
   applied: {
     sessions: number;
     library: number;
-    history: number;
-    chapterStates: number;
     novels: number;
   };
   acceptedSessionIds: readonly string[];

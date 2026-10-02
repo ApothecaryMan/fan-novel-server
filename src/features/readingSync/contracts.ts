@@ -195,7 +195,6 @@ const proStatsShape = {
   longestStreakDays: nonNegativeInteger(),
   totalWords: nonNegativeInteger(),
   uniqueInAppCompletedChapters: nonNegativeInteger(),
-  combinedTotalChaptersCompleted: nonNegativeInteger(),
   last7DaysActivity: z.array(activityDaySchema).length(7),
   yearlyActivity: z.record(readDaySchema, nonNegativeInteger()),
   hourlyDistribution: z.array(nonNegativeInteger()).length(24),
@@ -362,32 +361,6 @@ export const readingSyncLibraryItemSchema = strictObject({
   forbiddenCode: 'forbidden_field',
 });
 
-export const readingSyncHistoryItemSchema = strictObject({
-  novelId: novelIdSchema,
-  novelTitle: z.string().trim().max(255).optional(),
-  novelAuthor: z.string().trim().max(150).optional(),
-  category: z.string().trim().max(100).optional(),
-  sourceId: z.string().trim().max(100).nullable().optional(),
-  chapterId: chapterIdSchema,
-  chapterNumber: nonNegativeInteger().optional(),
-  chapterTitle: z.string().trim().max(255).optional(),
-  progressPercent: percentage().optional(),
-  readDay: readDaySchema.optional(),
-  readAt: epochMilliseconds().optional(),
-  updatedAt: epochMilliseconds().optional(),
-}, {
-  forbiddenKeys: ['novelCover', 'cover', 'coverUrl', 'content', 'filePath', 'scrollY'],
-  forbiddenCode: 'forbidden_field',
-});
-
-export const readingSyncChapterStateSchema = strictObject({
-  novelId: novelIdSchema,
-  chapterId: chapterIdSchema,
-  isRead: z.boolean(),
-  origin: z.enum(['manual', 'snapshot']),
-  updatedAt: epochMilliseconds(),
-});
-
 export const readingSyncNovelMetadataSchema = strictObject({
   novelId: novelIdSchema,
   title: z.string().trim().max(255),
@@ -417,8 +390,6 @@ const proReadingSyncPushShape = {
   deviceId: deviceIdSchema,
   sessions: z.array(proSessionSchema).max(MAX_SESSIONS_PER_PUSH),
   library: z.array(readingSyncLibraryItemSchema).max(MAX_COLLECTION_ROWS).optional(),
-  history: z.array(readingSyncHistoryItemSchema).max(MAX_COLLECTION_ROWS).optional(),
-  chapterStates: z.array(readingSyncChapterStateSchema).max(MAX_COLLECTION_ROWS).optional(),
   novels: z.array(readingSyncNovelMetadataSchema).max(MAX_COLLECTION_ROWS).optional(),
 };
 export const proReadingSyncPushSchema = strictObject(proReadingSyncPushShape, {
@@ -438,7 +409,6 @@ export const freeReadingSyncPullSchema = strictObject(freeReadingSyncPullShape, 
 
 export const readingStatsQuerySchema = strictObject({
   libraryCursor: cursorSchema,
-  historyCursor: cursorSchema,
   sessionCursor: cursorSchema,
   year: z.number().finite().int().min(1).max(9999),
 });
@@ -471,8 +441,6 @@ export const freeReadingSyncAppliedCountsSchema = strictObject({
 export const proReadingSyncAppliedCountsSchema = strictObject({
   sessions: nonNegativeInteger(),
   library: nonNegativeInteger(),
-  history: nonNegativeInteger(),
-  chapterStates: nonNegativeInteger(),
   novels: nonNegativeInteger(),
 });
 
@@ -514,10 +482,6 @@ export const readingSyncLibraryPageSchema = strictObject({
   rows: z.array(readingSyncLibraryItemSchema).max(MAX_COLLECTION_ROWS),
   nextCursor: cursorSchema,
 });
-export const readingSyncHistoryPageSchema = strictObject({
-  rows: z.array(readingSyncHistoryItemSchema).max(MAX_COLLECTION_ROWS),
-  nextCursor: cursorSchema,
-});
 export const readingSyncSessionPageSchema = strictObject({
   rows: z.array(proSessionSchema).max(MAX_COLLECTION_ROWS),
   nextCursor: cursorSchema,
@@ -527,7 +491,6 @@ export const proReadingSyncPullResponseSchema = strictObject({
   success: successSchema,
   plan: z.literal('pro'),
   library: readingSyncLibraryPageSchema,
-  history: readingSyncHistoryPageSchema,
   sessions: readingSyncSessionPageSchema,
   stats: proStatsSchema,
 });
@@ -584,12 +547,9 @@ export type ReadingSyncPage<T> = {
   nextCursor: string | null;
 };
 export type ReadingSyncLibraryPage = z.infer<typeof readingSyncLibraryPageSchema>;
-export type ReadingSyncHistoryPage = z.infer<typeof readingSyncHistoryPageSchema>;
 export type ReadingSyncSessionPage = z.infer<typeof readingSyncSessionPageSchema>;
 export type ReadingStatsQuery = z.infer<typeof readingStatsQuerySchema>;
 export type ReadingSyncLibraryItem = z.infer<typeof readingSyncLibraryItemSchema>;
-export type ReadingSyncHistoryItem = z.infer<typeof readingSyncHistoryItemSchema>;
-export type ReadingSyncChapterState = z.infer<typeof readingSyncChapterStateSchema>;
 export type ReadingSyncNovelMetadata = z.infer<typeof readingSyncNovelMetadataSchema>;
 
 export type ReadingSyncErrorCode =
@@ -704,7 +664,6 @@ export function proProjection(input: ProStats): ProStats {
     longestStreakDays: input.longestStreakDays,
     totalWords: input.totalWords,
     uniqueInAppCompletedChapters: input.uniqueInAppCompletedChapters,
-    combinedTotalChaptersCompleted: input.combinedTotalChaptersCompleted,
     last7DaysActivity: input.last7DaysActivity.map((day) => ({
       date: day.date,
       activeSeconds: day.activeSeconds,

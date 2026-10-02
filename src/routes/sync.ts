@@ -2,7 +2,7 @@ import { Hono, type Context } from 'hono';
 import { and, eq, gt } from 'drizzle-orm';
 import { z } from 'zod';
 import { db, isDbAvailable, noteDbFailure } from '../database/db.js';
-import { users, userLibrary, readingHistory, readingSessions, subscriptionEvents } from '../database/schema.js';
+import { users, userLibrary, readingSessions, subscriptionEvents } from '../database/schema.js';
 import { verifySubject } from '../middleware/auth.js';
 import { getEnv } from '../config/env.js';
 import {
@@ -68,21 +68,6 @@ const libraryRowSchema = z.object({
   updatedAt: z.number().optional(),
   deletedAt: z.number().nullable().optional()
 });
-const historyRowSchema = z.object({
-  novelId: z.union([z.string(), z.number()]),
-  novelTitle: z.string().max(255).optional(),
-  novelCover: z.string().optional(),
-  novelAuthor: z.string().max(150).optional(),
-  category: z.string().max(100).optional(),
-  sourceId: z.string().max(100).nullable().optional(),
-  chapterId: z.number(),
-  chapterNumber: z.number().optional(),
-  chapterTitle: z.string().max(255).optional(),
-  progressPercent: z.number().optional(),
-  readDay: z.string().max(10).optional(),
-  readAt: z.number().optional(),
-  updatedAt: z.number().optional()
-});
 const sessionRowSchema = z.object({
   clientSessionId: z.string().min(1).max(64),
   novelId: z.union([z.string(), z.number()]).optional(),
@@ -97,7 +82,6 @@ const pushSchema = z.object({
   user: userSchema,
   deviceId: z.string().max(100).optional(),
   library: z.array(libraryRowSchema).max(5000).optional(),
-  history: z.array(historyRowSchema).max(5000).optional(),
   sessions: z.array(sessionRowSchema).max(5000).optional()
 });
 const pullSchema = z.object({
@@ -482,47 +466,6 @@ syncRouter.post('/push', async (c) => {
     }
   }
 
-  let appliedHistory = 0;
-  for (const e of legacyBody.history ?? []) {
-    const novelId = String(e.novelId ?? '');
-    const chapterId = num(e.chapterId, -1);
-    if (!novelId || chapterId < 0) continue;
-    const readAt = clampTs(num(e.readAt, now), now);
-    const updatedAt = clampTs(num(e.updatedAt, readAt), now);
-    const existing = await db
-      .select()
-      .from(readingHistory)
-      .where(
-        and(
-          eq(readingHistory.userId, user.id),
-          eq(readingHistory.novelId, novelId),
-          eq(readingHistory.chapterId, chapterId)
-        )
-      )
-      .then((r) => r[0]);
-    if (!existing || readAt > (existing.readAt ?? 0) || (readAt === (existing.readAt ?? 0) && updatedAt > (existing.updatedAt ?? 0))) {
-      const values = {
-        userId: user.id,
-        novelId,
-        novelTitle: strDef(e.novelTitle),
-        novelCover: strDef(e.novelCover),
-        novelAuthor: strDef(e.novelAuthor),
-        category: strDef(e.category),
-        sourceId: str(e.sourceId),
-        chapterId,
-        chapterNumber: num(e.chapterNumber),
-        chapterTitle: strDef(e.chapterTitle),
-        progressPercent: num(e.progressPercent),
-        readDay: legacyFree ? '' : strDef(e.readDay),
-        readAt,
-        updatedAt
-      };
-      if (!existing) await db.insert(readingHistory).values(values);
-      else await db.update(readingHistory).set(values).where(eq(readingHistory.id, existing.id));
-      appliedHistory++;
-    }
-  }
-
   // ---- PLAN GATE (legacy v1 sessions) -------------------------------------
   // Derived above: a Free-derived caller stores FREE_SESSION_SAFE_DEFAULTS
   // for the Pro dimensions (words, minuteOfDay, readDay), matching what
@@ -552,7 +495,7 @@ syncRouter.post('/push', async (c) => {
   }
 
   if (legacyFree) await logExpiredObservation(user);
-  return c.json({ success: true, applied: { library: appliedLibrary, history: appliedHistory, sessions: appliedSessions }, serverNow: now });
+  return c.json({ success: true, applied: { library: appliedLibrary, sessions: appliedSessions }, serverNow: now });
 });
 
 // POST /api/v1/sync/pull
@@ -589,12 +532,6 @@ syncRouter.post('/pull', async (c) => {
     .where(and(eq(userLibrary.userId, user.id), gt(userLibrary.updatedAt, since)))
     .orderBy(userLibrary.updatedAt)
     .limit(5000);
-  const history = await db
-    .select()
-    .from(readingHistory)
-    .where(and(eq(readingHistory.userId, user.id), gt(readingHistory.updatedAt, since)))
-    .orderBy(readingHistory.updatedAt)
-    .limit(5000);
   const sessions = await db
     .select()
     .from(readingSessions)
@@ -619,21 +556,6 @@ syncRouter.post('/pull', async (c) => {
       addedAt: r.addedAt?.toISOString() ?? null,
       updatedAt: r.updatedAt,
       deletedAt: r.deletedAt
-    })),
-    history: history.map((r) => ({
-      novelId: r.novelId,
-      novelTitle: r.novelTitle,
-      novelCover: r.novelCover,
-      novelAuthor: r.novelAuthor,
-      category: r.category,
-      sourceId: r.sourceId,
-      chapterId: r.chapterId,
-      chapterNumber: r.chapterNumber,
-      chapterTitle: r.chapterTitle,
-      progressPercent: r.progressPercent,
-      readDay: pullFree ? '' : r.readDay,
-      readAt: r.readAt,
-      updatedAt: r.updatedAt
     })),
     sessions: sessions.map((r) => ({
       clientSessionId: r.clientSessionId,
@@ -662,9 +584,8 @@ syncRouter.post('/stats', async (c) => {
   const user = await resolveLegacySyncUser(c, externalId);
   if (user instanceof Response) return user;
   const lib = await db.select({ id: userLibrary.id }).from(userLibrary).where(eq(userLibrary.userId, user.id));
-  const hist = await db.select({ id: readingHistory.id }).from(readingHistory).where(eq(readingHistory.userId, user.id));
   const sess = await db.select({ id: readingSessions.id }).from(readingSessions).where(eq(readingSessions.userId, user.id));
-  return c.json({ success: true, library: lib.length, history: hist.length, sessions: sess.length, serverNow: Date.now() });
+  return c.json({ success: true, library: lib.length, sessions: sess.length, serverNow: Date.now() });
 });
 
 // Subject of the caller's token when one is presented (null = anonymous).

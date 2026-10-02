@@ -290,7 +290,6 @@ profileRouter.get('/me/profile', async (c, next) => {
     // loudly here instead of returning wrong numbers.
     const [agg] = await db.select({
       library: sql<number>`(SELECT COUNT(*) FROM "user_library" WHERE "user_library"."user_id" = "users"."id" AND "user_library"."deleted_at" IS NULL)`,
-      history: sql<number>`(SELECT COUNT(*) FROM "reading_history" WHERE "reading_history"."user_id" = "users"."id")`,
       sessions: sql<number>`(SELECT COUNT(*) FROM "reading_sessions" WHERE "reading_sessions"."user_id" = "users"."id")`,
       // GREATEST mirrors the per-row clamp the canonical engine applies
       // (calculations.ts sumSeconds/sumWords both use addNonNegative): a
@@ -304,7 +303,6 @@ profileRouter.get('/me/profile', async (c, next) => {
     }).from(users).where(eq(users.id, row.id));
 
     const library = Number(agg?.library ?? 0);
-    const history = Number(agg?.history ?? 0);
     const sessions = Number(agg?.sessions ?? 0);
     const totalSeconds = Number(agg?.seconds ?? 0);
     const totalWords = Number(agg?.words ?? 0);
@@ -323,7 +321,9 @@ profileRouter.get('/me/profile', async (c, next) => {
       user: projectAccount(row),
       stats: {
         library,
-        history,
+        // Reading history is device-local now, so the server holds none. The key
+        // stays in this documented byte-identical legacy payload; 0 is the truth.
+        history: 0,
         sessions,
         totalSeconds,
         totalWords: legacyFree ? 0 : totalWords,

@@ -4,8 +4,6 @@ import { describe, expect, it } from 'vitest';
 import {
   chapters,
   novels,
-  readingChapterState,
-  readingHistory,
   readingNovels,
   readingSessions,
   subscriptionEvents,
@@ -198,25 +196,6 @@ describe('reading statistics database schema', () => {
       received_at: column('timestamp', true, { hasDefault: true }),
     });
 
-    expectColumns(readingHistory, {
-      id: column('integer', true, { primary: true, hasDefault: true, identity: 'always' }),
-      user_id: column('uuid', true),
-      novel_id: column('varchar(100)', true),
-      novel_title: column('varchar(255)', true, { hasDefault: true, default: '' }),
-      novel_cover: column('text', true, { hasDefault: true, default: '' }),
-      novel_author: column('varchar(150)', true, { hasDefault: true, default: '' }),
-      category: column('varchar(100)', true, { hasDefault: true, default: '' }),
-      source_id: column('varchar(100)', false),
-      chapter_id: column('integer', true),
-      chapter_number: column('integer', true),
-      chapter_title: column('varchar(255)', true, { hasDefault: true, default: '' }),
-      progress_percent: column('real', true, { hasDefault: true, default: 0 }),
-      read_day: column('varchar(10)', true),
-      read_at: column('bigint', true),
-      updated_at: column('bigint', true),
-      received_at: column('timestamp', true, { hasDefault: true }),
-    });
-
     expectColumns(readingSessions, {
       id: column('integer', true, { primary: true, hasDefault: true, identity: 'always' }),
       user_id: column('uuid', true),
@@ -232,17 +211,6 @@ describe('reading statistics database schema', () => {
       minute_of_day: column('integer', true),
       read_day: column('varchar(10)', true),
       ts: column('bigint', true),
-      received_at: column('timestamp', true, { hasDefault: true }),
-    });
-
-    expectColumns(readingChapterState, {
-      id: column('integer', true, { primary: true, hasDefault: true, identity: 'always' }),
-      user_id: column('uuid', true),
-      novel_id: column('varchar(100)', true),
-      chapter_id: column('integer', true),
-      is_read: column('boolean', true),
-      origin: column('varchar(16)', true),
-      updated_at: column('bigint', true),
       received_at: column('timestamp', true, { hasDefault: true }),
     });
 
@@ -275,9 +243,7 @@ describe('reading statistics database schema', () => {
   it('keeps column uniqueness, check constraints, and foreign-key actions explicit', () => {
     expect(uniqueColumns(users)).toEqual(['email', 'external_id', 'google_subject', 'username']);
     expect(uniqueColumns(userLibrary)).toEqual([]);
-    expect(uniqueColumns(readingHistory)).toEqual([]);
     expect(uniqueColumns(readingSessions)).toEqual([]);
-    expect(uniqueColumns(readingChapterState)).toEqual([]);
     expect(uniqueColumns(readingNovels)).toEqual([]);
 
     const userChecks = checksByName(users);
@@ -287,11 +253,6 @@ describe('reading statistics database schema', () => {
     );
     expect(userChecks.users_reading_stats_plan_status_check).toMatch(
       /"reading_stats_plan_status" in \('free', 'active', 'expired', 'cancelled'\)/,
-    );
-    const chapterStateChecks = checksByName(readingChapterState);
-    expect(Object.keys(chapterStateChecks)).toEqual(['reading_chapter_state_origin_check']);
-    expect(chapterStateChecks.reading_chapter_state_origin_check).toMatch(
-      /"origin" in \('manual', 'snapshot'\)/,
     );
     expect(checksByName(readingNovels)).toEqual({});
     const eventChecks = checksByName(subscriptionEvents);
@@ -310,26 +271,8 @@ describe('reading statistics database schema', () => {
         onUpdate: 'no action',
       },
     });
-    expect(foreignKeysByName(readingHistory)).toEqual({
-      reading_history_user_id_users_id_fk: {
-        columns: ['user_id'],
-        foreignTable: 'users',
-        foreignColumns: ['id'],
-        onDelete: 'cascade',
-        onUpdate: 'no action',
-      },
-    });
     expect(foreignKeysByName(readingSessions)).toEqual({
       reading_sessions_user_id_users_id_fk: {
-        columns: ['user_id'],
-        foreignTable: 'users',
-        foreignColumns: ['id'],
-        onDelete: 'cascade',
-        onUpdate: 'no action',
-      },
-    });
-    expect(foreignKeysByName(readingChapterState)).toEqual({
-      reading_chapter_state_user_id_users_id_fk: {
         columns: ['user_id'],
         foreignTable: 'users',
         foreignColumns: ['id'],
@@ -389,26 +332,16 @@ describe('reading statistics database schema', () => {
     });
   });
 
-  it('defines the exact index set, including the unique chapter-state prefix index', () => {
+  it('defines the exact index set', () => {
     expect(indexesByName(userLibrary)).toEqual({
       user_library_idx: { unique: true, columns: ['user_id', 'novel_id'] },
       library_user_updated_id_idx: { unique: false, columns: ['user_id', 'updated_at', 'id'] },
-    });
-    expect(indexesByName(readingHistory)).toEqual({
-      history_user_novel_chapter_idx: { unique: true, columns: ['user_id', 'novel_id', 'chapter_id'] },
-      history_user_read_at_id_idx: { unique: false, columns: ['user_id', 'read_at', 'id'] },
     });
     expect(indexesByName(readingSessions)).toEqual({
       sessions_user_client_idx: { unique: true, columns: ['user_id', 'client_session_id'] },
       sessions_user_novel_chapter_idx: { unique: false, columns: ['user_id', 'novel_id', 'chapter_id'] },
       sessions_user_read_day_idx: { unique: false, columns: ['user_id', 'read_day'] },
       sessions_user_ts_id_idx: { unique: false, columns: ['user_id', 'ts', 'id'] },
-    });
-    expect(indexesByName(readingChapterState)).toEqual({
-      reading_chapter_state_user_novel_chapter_idx: {
-        unique: true,
-        columns: ['user_id', 'novel_id', 'chapter_id'],
-      },
     });
     expect(indexesByName(readingNovels)).toEqual({
       reading_novels_user_novel_idx: { unique: true, columns: ['user_id', 'novel_id'] },

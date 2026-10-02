@@ -54,14 +54,6 @@ interface ProDimensionsAbsent extends FreeCalculationSession {
  */
 export type ProCalculationSession = ProDimensionsPresent | ProDimensionsAbsent;
 
-export interface ProCalculationChapterState {
-  novelId: string | number;
-  chapterId: number;
-  isRead: boolean;
-  origin?: 'manual' | 'snapshot';
-  updatedAt?: number;
-}
-
 export interface ProCalculationNovel {
   novelId: string | number;
   title?: string | null;
@@ -79,7 +71,6 @@ export interface ProCalculationOptions {
 
 export interface ProCalculationInput {
   sessions: readonly ProCalculationSession[];
-  chapterStates?: readonly ProCalculationChapterState[];
   novels?: readonly ProCalculationNovel[];
   asOfDay?: string;
   year?: number;
@@ -89,7 +80,6 @@ export interface ProCalculationInput {
 // introducing a second set of runtime shapes.
 export type NormalizedFreeSession = FreeCalculationSession;
 export type NormalizedProSession = ProCalculationSession;
-export type NormalizedChapterState = ProCalculationChapterState;
 export type NormalizedNovel = ProCalculationNovel;
 
 export const MAX_LEVEL = 50;
@@ -456,51 +446,6 @@ function calculateStreaks(days: Set<number>, asOfDay: number): {
   return { current, longest };
 }
 
-interface LatestChapterStateValue {
-  novelId: string;
-  chapterId: number;
-  isRead: boolean;
-  updatedAt: number | null;
-}
-
-function latestChapterStates(
-  states: readonly ProCalculationChapterState[],
-): Map<string, LatestChapterStateValue> {
-  const latest = new Map<string, LatestChapterStateValue>();
-
-  states.forEach((state) => {
-    const novelId = normalizeNovelId(state.novelId);
-    const chapterId = normalizeChapterId(state.chapterId);
-    if (novelId === null || chapterId === null) return;
-
-    const key = pairKey(novelId, chapterId);
-    const candidate: LatestChapterStateValue = {
-      novelId,
-      chapterId,
-      isRead: state.isRead === true,
-      updatedAt: typeof state.updatedAt === 'number' && Number.isFinite(state.updatedAt)
-        ? state.updatedAt
-        : null,
-    };
-    const previous = latest.get(key);
-    if (!previous) {
-      latest.set(key, candidate);
-      return;
-    }
-
-    if (candidate.updatedAt === null && previous.updatedAt !== null) return;
-    if (previous.updatedAt !== null && candidate.updatedAt !== null) {
-      if (candidate.updatedAt < previous.updatedAt) return;
-      if (candidate.updatedAt === previous.updatedAt && !candidate.isRead && previous.isRead) {
-        return;
-      }
-    }
-    latest.set(key, candidate);
-  });
-
-  return latest;
-}
-
 interface NormalizedNovelMetadata {
   novelId: string;
   title?: string | null;
@@ -648,7 +593,7 @@ function mostReadNovels(
 
 function completedNovels(
   metadata: Map<string, NormalizedNovelMetadata>,
-  combinedByNovel: Map<string, Set<number>>,
+  completedByNovel: Map<string, Set<number>>,
 ): ProCompletedNovel[] {
   const rows: ProCompletedNovel[] = [];
   const orderedMetadata = [...metadata.values()].sort((left, right) => {
@@ -656,7 +601,7 @@ function completedNovels(
   });
   for (const novel of orderedMetadata) {
     if (novel.totalChapters === null) continue;
-    if ((combinedByNovel.get(novel.novelId)?.size ?? 0) < novel.totalChapters) continue;
+    if ((completedByNovel.get(novel.novelId)?.size ?? 0) < novel.totalChapters) continue;
 
     const row: ProCompletedNovel = { novelId: novel.novelId };
     if (novel.title !== undefined) row.title = novel.title;
@@ -725,7 +670,6 @@ export function calculateProStats(
 ): ProStats {
   const sessions = input.sessions;
   assertValidProSessions(sessions);
-  const chapterStates = input.chapterStates ?? [];
   const novels = input.novels ?? [];
   const optionObject = typeof options === 'string' ? { asOfDay: options } : options;
   const asOfDay = asOfDayFrom(input.asOfDay, optionObject?.asOfDay);
@@ -769,19 +713,6 @@ export function calculateProStats(
     }
   }
 
-  const activeStates = latestChapterStates(chapterStates);
-  const combinedPairs = new Set(inAppPairs);
-  const combinedByNovel = new Map<string, Set<number>>(
-    [...inAppByNovel.entries()].map(([novelId, chapters]) => [novelId, new Set(chapters)]),
-  );
-  for (const [key, state] of activeStates) {
-    if (!state.isRead) continue;
-    combinedPairs.add(key);
-    const chapters = combinedByNovel.get(state.novelId) ?? new Set<number>();
-    chapters.add(state.chapterId);
-    combinedByNovel.set(state.novelId, chapters);
-  }
-
   const streak = calculateStreaks(readDayNumbers, asOfDay.dayNumber);
   const last7DaysActivity = Array.from({ length: 7 }, (_, index) => {
     const requestedDay = asOfDay.dayNumber - (6 - index);
@@ -801,7 +732,7 @@ export function calculateProStats(
   }
 
   const mostRead = mostReadNovels(sessions, inAppByNovel, metadata);
-  const completed = completedNovels(metadata, combinedByNovel);
+  const completed = completedNovels(metadata, inAppByNovel);
   const nextThresholdSeconds = level.nextRequiredMinutes === null
     ? null
     : level.nextRequiredMinutes * 60;
@@ -824,7 +755,6 @@ export function calculateProStats(
     longestStreakDays: streak.longest,
     totalWords,
     uniqueInAppCompletedChapters: inAppPairs.size,
-    combinedTotalChaptersCompleted: combinedPairs.size,
     last7DaysActivity,
     yearlyActivity,
     hourlyDistribution,

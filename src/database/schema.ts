@@ -146,30 +146,6 @@ export const userLibrary = pgTable('user_library', {
   libraryCursorIdx: index('library_user_updated_id_idx').on(table.userId, table.updatedAt, table.id)
 }));
 
-// 6. لقطات القراءة للمزامنة (Sync mirror of mobile reading_history).
-// One "last read" row per (user, novel, chapter); merge keeps max read_at.
-export const readingHistory = pgTable('reading_history', {
-  id: serial('id').primaryKey(),
-  userId: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
-  novelId: varchar('novel_id', { length: 100 }).notNull(),
-  novelTitle: varchar('novel_title', { length: 255 }).default('').notNull(),
-  novelCover: text('novel_cover').default('').notNull(),
-  novelAuthor: varchar('novel_author', { length: 150 }).default('').notNull(),
-  category: varchar('category', { length: 100 }).default('').notNull(),
-  sourceId: varchar('source_id', { length: 100 }),
-  chapterId: integer('chapter_id').notNull(),
-  chapterNumber: integer('chapter_number').notNull(),
-  chapterTitle: varchar('chapter_title', { length: 255 }).default('').notNull(),
-  progressPercent: real('progress_percent').default(0).notNull(),
-  readDay: varchar('read_day', { length: 10 }).notNull(),
-  readAt: bigint('read_at', { mode: 'number' }).notNull(),
-  updatedAt: bigint('updated_at', { mode: 'number' }).notNull(),
-  receivedAt: timestamp('received_at').defaultNow().notNull()
-}, (table) => ({
-  historyUserNovelChapterIdx: uniqueIndex('history_user_novel_chapter_idx').on(table.userId, table.novelId, table.chapterId),
-  historyCursorIdx: index('history_user_read_at_id_idx').on(table.userId, table.readAt, table.id)
-}));
-
 // 7. جلسات القراءة (append-only; idempotent via client_session_id).
 export const readingSessions = pgTable('reading_sessions', {
   id: serial('id').primaryKey(),
@@ -192,27 +168,6 @@ export const readingSessions = pgTable('reading_sessions', {
   sessionsUserNovelChapterIdx: index('sessions_user_novel_chapter_idx').on(table.userId, table.novelId, table.chapterId),
   sessionsUserReadDayIdx: index('sessions_user_read_day_idx').on(table.userId, table.readDay),
   sessionsUserTsIdIdx: index('sessions_user_ts_id_idx').on(table.userId, table.ts, table.id)
-}));
-
-// Pro read-state snapshots/manual marks. novel_id intentionally has no catalog FK.
-export const readingChapterState = pgTable('reading_chapter_state', {
-  id: serial('id').primaryKey(),
-  userId: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
-  novelId: varchar('novel_id', { length: 100 }).notNull(),
-  chapterId: integer('chapter_id').notNull(),
-  isRead: boolean('is_read').notNull(),
-  origin: varchar('origin', { length: 16 }).notNull(),
-  updatedAt: bigint('updated_at', { mode: 'number' }).notNull(),
-  receivedAt: timestamp('received_at').defaultNow().notNull()
-}, (table) => ({
-  // The unique prefix index also serves (user_id, novel_id) lookups; a second
-  // standalone index would duplicate its leading columns without a new query shape.
-  chapterStateUserNovelChapterIdx: uniqueIndex('reading_chapter_state_user_novel_chapter_idx')
-    .on(table.userId, table.novelId, table.chapterId),
-  chapterStateOriginCheck: check(
-    'reading_chapter_state_origin_check',
-    sql`${table.origin} in ('manual', 'snapshot')`
-  )
 }));
 
 // Small per-user metadata cache for local/extension novels and Pro aggregates.

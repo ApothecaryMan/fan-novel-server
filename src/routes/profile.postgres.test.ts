@@ -137,7 +137,6 @@ describe.skipIf(!url)('Profile aggregates (isolated PostgreSQL)', () => {
       await database.delete(comments).where(eq(comments.userId, id));
       await database.delete(readingSessions).where(eq(readingSessions.userId, id));
       await database.delete(schema.userLibrary).where(eq(schema.userLibrary.userId, id));
-      await database.delete(schema.readingHistory).where(eq(schema.readingHistory.userId, id));
     }
     await database.delete(comments).where(eq(comments.novelId, novelId));
     if (owned.length > 0) {
@@ -167,19 +166,6 @@ describe.skipIf(!url)('Profile aggregates (isolated PostgreSQL)', () => {
     ]);
     const { body } = await me(token);
     expect(body.stats.library).toBe(2);
-  });
-
-  it('sums reading history rows for the caller only', async () => {
-    const { row, token } = await createUser('pro');
-    const other = await createUser('pro');
-    const base = Date.now();
-    await database.insert(schema.readingHistory).values([
-      { userId: row.id, novelId: '1', chapterId: 1, chapterNumber: 1, readDay: '2026-09-01', readAt: base, updatedAt: base, receivedAt: new Date(base) },
-      { userId: row.id, novelId: '1', chapterId: 2, chapterNumber: 2, readDay: '2026-09-01', readAt: base, updatedAt: base, receivedAt: new Date(base) },
-      { userId: other.row.id, novelId: '1', chapterId: 1, chapterNumber: 1, readDay: '2026-09-01', readAt: base, updatedAt: base, receivedAt: new Date(base) },
-    ]);
-    const { body } = await me(token);
-    expect(body.stats.history).toBe(2);
   });
 
   it('sums session seconds and words, and reports the ladder level', async () => {

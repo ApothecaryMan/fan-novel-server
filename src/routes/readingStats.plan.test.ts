@@ -122,7 +122,7 @@ describe('reading sync version routing', () => {
       expect(res.status).toBe(200);
       const payload: any = await res.json();
       // Legacy response is unchanged: no plan, no stats projection.
-      expect(payload).toMatchObject({ success: true, applied: { library: 0, history: 0, sessions: 0 } });
+      expect(payload).toMatchObject({ success: true, applied: { library: 0, sessions: 0 } });
       expect(payload).not.toHaveProperty('plan');
       expect(payload).not.toHaveProperty('stats');
       expect(payload).not.toHaveProperty('readingStatsVersion');

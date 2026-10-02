@@ -166,10 +166,11 @@ describe('GET /users/me/profile', () => {
   // The four aggregates all arrive in ONE query keyed off the resolved users
   // row, so a hand-written identifier regression (a dropped `deleted_at IS
   // NULL`, a subquery bound to the wrong table) would otherwise be invisible:
-  // without fixtures for user_library / reading_history these read 0 either
-  // way. These cases pin the subqueries at NON-zero values, scoped to the
-  // caller, so a wrong correlation fails loudly.
-  it('reports the library/history/session/word aggregates scoped to the caller', async () => {
+  // without fixtures for user_library these read 0 either way. These cases pin
+  // the subqueries at NON-zero values, scoped to the caller, so a wrong
+  // correlation fails loudly. Reading history is device-local now, so the
+  // server always reports 0 for it.
+  it('reports the library/session/word aggregates scoped to the caller', async () => {
     const { token }: any = await (await loginAs('agg-7', 'agg7@test.com')).json();
     const me = fake().rows.find((r) => r.email === 'agg7@test.com');
     if (!me) throw new Error('test setup: login did not persist a user row');
@@ -187,21 +188,19 @@ describe('GET /users/me/profile', () => {
       { userId: me.id, deletedAt: 1_700_000_000_000 },
       { userId: me.id },
     ]);
-    fake().seedHistory([{ userId: me.id }, { userId: me.id }]);
     fake().seedSessions([
       { userId: me.id, seconds: 3600, words: 900 },
       { userId: me.id, seconds: 600, words: 150, readDay: '2026-09-28' },
     ]);
     // Another account's rows: any leak here is a correlation failure.
     fake().seedLibrary([{ userId: other.id }, { userId: other.id }, { userId: other.id }]);
-    fake().seedHistory([{ userId: other.id }]);
     fake().seedSessions([{ userId: other.id, seconds: 999_999, words: 999_999 }]);
     const body: any = await (await app.request('/users/me/profile', {
       headers: { Authorization: `Bearer ${token}` },
     })).json();
     expect(body.stats).toMatchObject({
       library: 2,
-      history: 2,
+      history: 0,
       sessions: 2,
       totalSeconds: 4200,
       totalWords: 1050,

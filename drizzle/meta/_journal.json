@@ -113,6 +113,13 @@
       "when": 1790938193271,
       "tag": "0015_drop_genre",
       "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1790945378199,
+      "tag": "0016_drop_history_and_read_state",
+      "breakpoints": true
     }
   ]
 }

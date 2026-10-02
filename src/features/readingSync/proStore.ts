@@ -1,8 +1,6 @@
 import { and, asc, eq, gt, inArray, or, sql } from 'drizzle-orm';
 import { db } from '../../database/db.js';
 import {
-  readingChapterState,
-  readingHistory,
   readingNovels,
   readingSessions,
   userLibrary,
@@ -16,8 +14,6 @@ import type {
 } from './contracts.js';
 import {
   MAX_COLLECTION_ROWS,
-  type ReadingSyncChapterState,
-  type ReadingSyncHistoryItem,
   type ReadingSyncLibraryItem,
   type ReadingSyncNovelMetadata,
 } from './contracts.js';
@@ -32,8 +28,6 @@ export interface ProSessionWriteResult {
 
 export interface ProCollectionCounts {
   library: number;
-  history: number;
-  chapterStates: number;
   novels: number;
 }
 
@@ -226,93 +220,6 @@ async function storeLibrary(
   return result.rowCount ?? 0;
 }
 
-async function storeHistory(
-  userId: string,
-  rows: readonly ReadingSyncHistoryItem[],
-  now: number,
-  skewMs: number,
-): Promise<number> {
-  const unique = dedupeBy(rows, (row) => `${row.novelId}\u0000${row.chapterId}`);
-  if (unique.length === 0) return 0;
-
-  const values = unique.map((row) => {
-    const readAt = clampTs(row.readAt ?? now, now, skewMs);
-    const updatedAt = clampTs(row.updatedAt ?? readAt, now, skewMs);
-    return {
-      userId,
-      novelId: row.novelId,
-      chapterId: row.chapterId,
-      novelTitle: nonEmpty(row.novelTitle),
-      novelCover: '',
-      novelAuthor: nonEmpty(row.novelAuthor),
-      category: nonEmpty(row.category),
-      sourceId: row.sourceId ?? null,
-      chapterNumber: row.chapterNumber ?? 0,
-      chapterTitle: nonEmpty(row.chapterTitle),
-      progressPercent: row.progressPercent ?? 0,
-      readDay: row.readDay ?? new Date(readAt).toISOString().slice(0, 10),
-      readAt,
-      updatedAt,
-    };
-  });
-
-  const result = await db
-    .insert(readingHistory)
-    .values(values)
-    .onConflictDoUpdate({
-      target: [readingHistory.userId, readingHistory.novelId, readingHistory.chapterId],
-      set: {
-        novelTitle: sql`excluded.novel_title`,
-        novelCover: sql`excluded.novel_cover`,
-        novelAuthor: sql`excluded.novel_author`,
-        category: sql`excluded.category`,
-        sourceId: sql`excluded.source_id`,
-        chapterNumber: sql`excluded.chapter_number`,
-        chapterTitle: sql`excluded.chapter_title`,
-        progressPercent: sql`excluded.progress_percent`,
-        readDay: sql`excluded.read_day`,
-        readAt: sql`excluded.read_at`,
-        updatedAt: sql`excluded.updated_at`,
-      },
-      // Later read wins; a tie falls back to the edit clock.
-      setWhere: sql`excluded.read_at > ${readingHistory.readAt}
-        OR (excluded.read_at = ${readingHistory.readAt}
-            AND excluded.updated_at > ${readingHistory.updatedAt})`,
-    });
-  return result.rowCount ?? 0;
-}
-
-async function storeChapterStates(
-  userId: string,
-  rows: readonly ReadingSyncChapterState[],
-): Promise<number> {
-  const unique = dedupeBy(rows, (row) => `${row.novelId}\u0000${row.chapterId}`);
-  if (unique.length === 0) return 0;
-
-  const result = await db
-    .insert(readingChapterState)
-    .values(unique.map((row) => ({ userId, ...row })))
-    .onConflictDoUpdate({
-      target: [
-        readingChapterState.userId,
-        readingChapterState.novelId,
-        readingChapterState.chapterId,
-      ],
-      set: {
-        isRead: sql`excluded.is_read`,
-        // A manual mark is sticky: once manual, always manual.
-        origin: sql`CASE WHEN excluded.origin = 'manual' OR ${readingChapterState.origin} = 'manual'
-          THEN 'manual' ELSE excluded.origin END`,
-        updatedAt: sql`excluded.updated_at`,
-      },
-      // Newer wins. On an exact tie the read flag may only rise, never fall.
-      setWhere: sql`excluded.updated_at > ${readingChapterState.updatedAt}
-        OR (excluded.updated_at = ${readingChapterState.updatedAt}
-            AND (excluded.is_read OR NOT ${readingChapterState.isRead}))`,
-    });
-  return result.rowCount ?? 0;
-}
-
 async function storeNovels(
   userId: string,
   rows: readonly ReadingSyncNovelMetadata[],
@@ -353,25 +260,22 @@ export async function storeProPush(
   skewMs: number,
 ): Promise<ProPushWriteResult> {
   const sessions = await storeProSessions(userId, payload.sessions);
-  if (sessions.conflictingSessionIds.length > 0) return { ...sessions, collections: { library: 0, history: 0, chapterStates: 0, novels: 0 } };
-  // The four collections are independent tables, so they overlap rather than
-  // queueing: four sequential HTTPS round trips to Neon become one.
-  const [library, history, chapterStates, novels] = await Promise.all([
+  if (sessions.conflictingSessionIds.length > 0) return { ...sessions, collections: { library: 0, novels: 0 } };
+  // The collections are independent tables, so they overlap rather than
+  // queueing: sequential HTTPS round trips to Neon become one.
+  const [library, novels] = await Promise.all([
     storeLibrary(userId, payload.library ?? [], now, skewMs),
-    storeHistory(userId, payload.history ?? [], now, skewMs),
-    storeChapterStates(userId, payload.chapterStates ?? []),
     storeNovels(userId, payload.novels ?? []),
   ]);
-  return { ...sessions, collections: { library, history, chapterStates, novels } };
+  return { ...sessions, collections: { library, novels } };
 }
 
 export async function loadProStats(
   userId: string,
   options?: { asOfDay?: string; year?: number },
 ): Promise<ProStats> {
-  const [sessionRows, stateRows, novelRows] = await Promise.all([
+  const [sessionRows, novelRows] = await Promise.all([
     db.select().from(readingSessions).where(eq(readingSessions.userId, userId)),
-    db.select().from(readingChapterState).where(eq(readingChapterState.userId, userId)),
     db.select().from(readingNovels).where(eq(readingNovels.userId, userId)),
   ]);
   return calculateProStats({
@@ -387,12 +291,6 @@ export async function loadProStats(
       completed: row.completed,
       completionSignalPresent: row.completionSignalPresent,
       proFieldsPresent: row.proFieldsPresent,
-    })),
-    chapterStates: stateRows.map((row) => ({
-      novelId: row.novelId,
-      chapterId: Number(row.chapterId),
-      isRead: row.isRead,
-      updatedAt: Number(row.updatedAt),
     })),
     novels: novelRows.map((row) => ({
       novelId: row.novelId,
@@ -421,22 +319,17 @@ function decodeCursor(value: string | null): Cursor | null {
 
 export async function pullProData(
   userId: string,
-  query: { libraryCursor: string | null; historyCursor: string | null; sessionCursor: string | null; year: number },
+  query: { libraryCursor: string | null; sessionCursor: string | null; year: number },
   asOfDay?: string,
 ): Promise<ProReadingSyncPullResponse> {
   const limit = MAX_COLLECTION_ROWS;
   const libraryCursor = decodeCursor(query.libraryCursor);
-  const historyCursor = decodeCursor(query.historyCursor);
   const sessionCursor = decodeCursor(query.sessionCursor);
-  const [libraryRows, historyRows, sessionRows] = await Promise.all([
+  const [libraryRows, sessionRows] = await Promise.all([
     db.select().from(userLibrary).where(and(
       eq(userLibrary.userId, userId),
       libraryCursor ? or(gt(userLibrary.updatedAt, libraryCursor.ts), sql`${userLibrary.updatedAt} = ${libraryCursor.ts} AND ${userLibrary.id} > ${libraryCursor.id}`) : undefined,
     )).orderBy(asc(userLibrary.updatedAt), asc(userLibrary.id)).limit(limit),
-    db.select().from(readingHistory).where(and(
-      eq(readingHistory.userId, userId),
-      historyCursor ? or(gt(readingHistory.readAt, historyCursor.ts), sql`${readingHistory.readAt} = ${historyCursor.ts} AND ${readingHistory.id} > ${historyCursor.id}`) : undefined,
-    )).orderBy(asc(readingHistory.readAt), asc(readingHistory.id)).limit(limit),
     db.select().from(readingSessions).where(and(
       eq(readingSessions.userId, userId),
       sessionCursor ? or(gt(readingSessions.ts, sessionCursor.ts), sql`${readingSessions.ts} = ${sessionCursor.ts} AND ${readingSessions.id} > ${sessionCursor.id}`) : undefined,
@@ -465,23 +358,6 @@ export async function pullProData(
         deletedAt: row.deletedAt == null ? null : Number(row.deletedAt),
       })),
       nextCursor: encodeCursor(last(libraryRows, (row) => Number(row.updatedAt))),
-    },
-    history: {
-      rows: historyRows.map((row) => ({
-        novelId: row.novelId,
-        novelTitle: row.novelTitle,
-        novelAuthor: row.novelAuthor,
-        category: row.category,
-        sourceId: row.sourceId,
-        chapterId: Number(row.chapterId),
-        chapterNumber: Number(row.chapterNumber),
-        chapterTitle: row.chapterTitle,
-        progressPercent: row.progressPercent,
-        readDay: row.readDay,
-        readAt: Number(row.readAt),
-        updatedAt: Number(row.updatedAt),
-      })),
-      nextCursor: encodeCursor(last(historyRows, (row) => Number(row.readAt))),
     },
     sessions: {
       rows: sessionRows.map((row) => ({
