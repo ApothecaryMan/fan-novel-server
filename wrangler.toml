@@ -48,3 +48,12 @@ bucket_name = "fan-novel-covers"
 [[r2_buckets]]
 binding = "RELEASES"
 bucket_name = "fan-novel-releases"
+
+# Workers rate limiting. The middleware prefers this binding and falls back to
+# an in-isolate map when it is absent, so adding it here is what makes the limit
+# count across every isolate rather than per instance.
+# `simple` needs no configuration; `period` must be 10 or 60 seconds.
+[[ratelimits]]
+name = "RATE_LIMITER"
+namespace_id = "1001"
+simple = { limit = 60, period = 60 }
