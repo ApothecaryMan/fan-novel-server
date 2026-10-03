@@ -66,17 +66,21 @@ export function createApp() {
     return c.json({ error: 'internal server error', requestId: c.get('requestId') ?? null }, 500);
   });
 
-  // Cover serving: R2 binding → Postgres blob → local disk (Node) → 404.
-  // One GET route on both runtimes; falls through with next() on miss.
-  app.get('/uploads/covers/:filename', async (c, next) => {
+  // Upload serving: covers/avatars/banners, one folder per kind in the same
+  // bucket. R2 binding → Postgres blob → local disk (Node) → 404. One GET route
+  // on both runtimes; falls through with next() on miss.
+  const uploadFolders = new Set(['covers', 'avatars', 'banners']);
+  app.get('/uploads/:folder/:filename', async (c, next) => {
+    const folder = c.req.param('folder');
     const name = c.req.param('filename');
+    if (!uploadFolders.has(folder)) return c.json({ error: 'not found' }, 404);
     if (!/^[\w.-]+\.(png|jpg|jpeg|webp|gif)$/i.test(name)) return c.json({ error: 'invalid filename' }, 400);
     // 1. R2 binding when present (Workers).
     const bucket = (globalThis as any).__WORKER_BINDINGS__?.COVERS as
       | { get: (k: string) => Promise<{ body: ReadableStream; httpMetadata?: { contentType?: string } } | null> }
       | undefined;
     if (bucket) {
-      const obj = await bucket.get(`covers/${name}`);
+      const obj = await bucket.get(`${folder}/${name}`);
       if (obj) {
         const type = obj.httpMetadata?.contentType ?? 'image/png';
         return new Response(obj.body, { headers: { 'Content-Type': type, 'Cache-Control': 'public, max-age=31536000, immutable' } });
