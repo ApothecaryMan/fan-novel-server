@@ -19,7 +19,7 @@ export function cleanMediaUrl(url?: string | null): string | undefined {
   const value = url.trim();
   if (!value) return undefined;
   if (/^https?:\/\//i.test(value)) return value.slice(0, 2000);
-  // Server-hosted uploads (POST /api/v1/upload/cover returns a relative
+  // Server-hosted uploads (POST /api/v1/upload/image returns a relative
   // /uploads/<folder>/<file> URL). Accept the safe subset so avatars/banners
   // uploaded here persist across reinstalls instead of being rejected.
   if (/^\/uploads\/(covers|avatars|banners)\/[\w.\-]+\.(png|jpg|jpeg|webp|gif)$/i.test(value)) return value.slice(0, 2000);

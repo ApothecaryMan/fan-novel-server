@@ -162,7 +162,7 @@ export function createApp() {
         chapterContent: '/api/v1/novels/:novelId/chapters/:chapterNumber',
         chapterTimeline: 'POST /api/v1/chapters/timeline',
         todayChapters: 'GET /api/v1/chapters/today',
-        uploadCover: 'POST /api/v1/upload/cover',
+        uploadImage: 'POST /api/v1/upload/image',
         commentsList: 'GET /api/v1/novels/:novelId/comments?chapter&cursor&limit&sort=new|top',
         commentsCount: 'GET /api/v1/novels/:novelId/comments/count',
         commentReplies: 'GET /api/v1/novels/:novelId/comments/:commentId/replies',

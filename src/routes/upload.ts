@@ -27,12 +27,12 @@ interface R2BucketLike {
   get: (key: string) => Promise<{ body: ReadableStream; httpMetadata?: { contentType?: string } } | null>;
 }
 
-function coversBucket(): R2BucketLike | null {
+function mediaBucket(): R2BucketLike | null {
   return getWorkerBinding<R2BucketLike>('COVERS');
 }
 
 async function uploadToBinding(buffer: Buffer, folder: string, filename: string, mime: string): Promise<string | null> {
-  const bucket = coversBucket();
+  const bucket = mediaBucket();
   if (!bucket) return null;
   await bucket.put(`${folder}/${filename}`, buffer, { httpMetadata: { contentType: mime } });
   // Served back through this same Worker (no public bucket needed).
@@ -58,8 +58,8 @@ async function uploadToR2(buffer: Buffer, folder: string, filename: string, mime
   }
 }
 
-// POST /api/v1/upload/cover (auth required when SYNC_OPEN=false, open LAN otherwise)
-uploadRouter.post('/cover', async (c, next) => {
+// POST /api/v1/upload/image (form field: kind=cover|avatar|banner; auth required when SYNC_OPEN=false, open LAN otherwise)
+uploadRouter.post('/image', async (c, next) => {
   if (!getEnv().syncOpen) return requireAuthOrPat(c, next);
   await next();
 }, async (c) => {
@@ -83,17 +83,17 @@ uploadRouter.post('/cover', async (c, next) => {
       console.error('[upload] binding failed', err);
       return null;
     });
-    if (bound) return c.json({ success: true, message: 'تم رفع صورة الغلاف بنجاح', url: bound, filename });
+    if (bound) return c.json({ success: true, message: 'تم رفع الصورة بنجاح', url: bound, filename });
 
     // 2. S3-compatible endpoint (R2 API token / any S3).
     const remote = await uploadToR2(buffer, folder, filename, file.type);
-    if (remote) return c.json({ success: true, message: 'تم رفع صورة الغلاف بنجاح', url: remote, filename });
+    if (remote) return c.json({ success: true, message: 'تم رفع الصورة بنجاح', url: remote, filename });
 
     // 3. Postgres blob (works everywhere including Workers; ~2500 covers per 0.5GB).
     if (isDbAvailable()) {
       try {
         await db.insert(coverBlobs).values({ filename, mime: file.type, dataBase64: buffer.toString('base64') });
-        return c.json({ success: true, message: 'تم رفع صورة الغلاف بنجاح', url: `/uploads/${folder}/${filename}`, filename });
+        return c.json({ success: true, message: 'تم رفع الصورة بنجاح', url: `/uploads/${folder}/${filename}`, filename });
       } catch (err) {
         console.error('[upload] db blob failed', err); noteDbFailure();
       }
@@ -107,7 +107,7 @@ uploadRouter.post('/cover', async (c, next) => {
     const dir = path.resolve(process.cwd(), 'uploads', folder);
     await fs.mkdir(dir, { recursive: true });
     await fs.writeFile(path.join(dir, filename), buffer);
-    return c.json({ success: true, message: 'تم رفع صورة الغلاف بنجاح', url: `/uploads/${folder}/${filename}`, filename });
+    return c.json({ success: true, message: 'تم رفع الصورة بنجاح', url: `/uploads/${folder}/${filename}`, filename });
   } catch (error: any) {
     console.error('Upload Error:', error);
     return c.json({ success: false, error: error.message || 'فشل في رفع الصورة' }, 500);
