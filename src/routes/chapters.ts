@@ -264,7 +264,7 @@ chaptersRouter.get('/:novelId/chapters', async (c) => {
       const [{ total }] = await db.select({ total: sql<number>`count(*)::int` }).from(chapters).where(where);
       const rows = await db.select().from(chapters).where(where).orderBy(order).limit(limit).offset((page - 1) * limit);
       const items = rows.map(rowToListItem);
-      c.header('Cache-Control', 'public, max-age=300, stale-while-revalidate=3600');
+      c.header('Cache-Control', 'public, max-age=3600, stale-while-revalidate=3600');
       return c.json({ success: true, total, data: items, pagination: { page, limit, total, totalPages: Math.max(1, Math.ceil(total / limit)) } });
     } catch (err) {
       console.error('[chapters] db list failed', err); noteDbFailure();
@@ -290,7 +290,7 @@ chaptersRouter.get('/:novelId/chapters/manifest', async (c) => {
         wordCount: chapters.wordCount,
       }).from(chapters).where(eq(chapters.novelId, novelId)).orderBy(asc(chapters.chapterNumber));
       const items = rows.map((r) => ({ n: r.chapterNumber, hash: r.contentHash ?? null, words: r.wordCount ?? 0 }));
-      c.header('Cache-Control', 'public, max-age=300, stale-while-revalidate=3600');
+      c.header('Cache-Control', 'public, max-age=3600, stale-while-revalidate=3600');
       return c.json({ success: true, total: items.length, data: items });
     } catch (err) {
       console.error('[chapters] db manifest failed', err); noteDbFailure();
@@ -300,6 +300,48 @@ chaptersRouter.get('/:novelId/chapters/manifest', async (c) => {
   return c.json({
     success: true, total: list.length,
     data: [...list].sort((a, b) => a.chapterNumber - b.chapterNumber).map((ch) => ({ n: ch.chapterNumber, hash: null, words: ch.wordCount ?? 0 })),
+  });
+});
+
+// GET /api/v1/novels/:novelId/chapters/watermark — cheap change-detection token.
+// Client polls this (~60 bytes) hourly and only fetches manifest/batch when it moves.
+chaptersRouter.get('/:novelId/chapters/watermark', async (c) => {
+  const novelId = c.req.param('novelId');
+  if (isDbAvailable()) {
+    try {
+      const [row] = await db.select({
+        total: sql<number>`count(*)::int`,
+        maxN: sql<number>`coalesce(max(${chapters.chapterNumber}), 0)::int`,
+        maxId: sql<number>`coalesce(max(${chapters.id}), 0)::int`,
+        maxCreated: sql<Date>`max(${chapters.createdAt})`,
+      }).from(chapters).where(eq(chapters.novelId, novelId));
+      const total = Number(row?.total ?? 0);
+      const maxN = Number(row?.maxN ?? 0);
+      const maxId = Number(row?.maxId ?? 0);
+      const watermark = total ? `${total}:${maxN}:${maxId}` : '0';
+      c.header('Cache-Control', 'public, max-age=60, stale-while-revalidate=60');
+      return c.json({
+        success: true,
+        data: {
+          watermark, total, maxChapterNumber: maxN, maxId,
+          lastCreatedAt: row?.maxCreated ? new Date(row.maxCreated as unknown as string).toISOString() : null,
+        },
+      });
+    } catch (err) {
+      console.error('[chapters] db watermark failed', err); noteDbFailure();
+    }
+  }
+  const mem = CHAPTERS_STORE.get(novelId) || [];
+  const maxN = mem.reduce((m, ch) => Math.max(m, ch.chapterNumber), 0);
+  const maxId = mem.reduce((m, ch) => Math.max(m, ch.id), 0);
+  c.header('Cache-Control', 'public, max-age=60, stale-while-revalidate=60');
+  return c.json({
+    success: true,
+    data: {
+      watermark: mem.length ? `${mem.length}:${maxN}:${maxId}` : '0',
+      total: mem.length, maxChapterNumber: maxN, maxId,
+      lastCreatedAt: mem.length ? [...mem].sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0].createdAt : null,
+    },
   });
 });
 

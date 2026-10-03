@@ -49,10 +49,10 @@ export function createApp() {
   app.use('/api/v1/novels/*/comments*', rateLimit(60));
   app.use('/api/v1/comments/*', rateLimit(60));
 
-  // Edge cache for anonymous comment reads. Must run BEFORE the routes so a
+  // Edge cache for anonymous reads. Must run BEFORE the routes so a
   // public read can be served without touching Neon at all. It self-disables
   // for any request carrying Authorization, a moderator `status` param, or in
-  // LAN mode, and never caches the watermark endpoint. No-ops on Node.
+  // LAN mode, and never caches the comments watermark endpoint. No-ops on Node.
   app.use(edgeCacheComments());
 
   // Ensure DB is initialized (pg Pool on Node, neon-http on Workers) before routes run.

@@ -17,9 +17,12 @@
  *     (the route marks those `no-store`).
  *   - Production only. In dev/LAN (`SYNC_OPEN=true`) everything is `local-dev`
  *     and the cache has no business being involved.
- *   - The watermark endpoint is deliberately NOT cached. It is the
+ *   - The comments watermark endpoint is deliberately NOT cached. It is the
  *     change-detection token the live-refresh poll depends on; a 60 s cached
  *     watermark would systematically delay every update it exists to deliver.
+ *     The chapters watermark IS cacheable (see below): chapters are polled
+ *     hourly, so 60 s staleness is invisible, and it collapses the thundering
+ *     herd to one Neon query per minute per novel.
  */
 import type { MiddlewareHandler } from 'hono';
 import { getEnv, isWorkersRuntime } from '../config/env.js';
@@ -41,9 +44,10 @@ function edgeCaches(): EdgeCache | null {
   return c?.default ? ({ default: c.default } as EdgeCache) : null;
 }
 
-/** Public, anonymous-safe comment reads. Anything else falls through untouched. */
+/** Public, anonymous-safe reads. Anything else falls through untouched. */
 function isCacheablePath(pathname: string): boolean {
-  return /^\/api\/v1\/novels\/[^/]+\/comments(?:\/[^/]+\/replies)?$/.test(pathname);
+  if (/^\/api\/v1\/novels\/[^/]+\/comments(?:\/[^/]+\/replies)?$/.test(pathname)) return true;
+  return /^\/api\/v1\/novels\/[^/]+\/chapters\/watermark$/.test(pathname);
 }
 
 export function edgeCacheComments(): MiddlewareHandler {
