@@ -101,7 +101,7 @@ uploadRouter.post('/image', async (c, next) => {
 
     // 4. Local disk (Node only).
     if (isWorkersRuntime()) {
-      return c.json({ success: false, error: 'cover storage unavailable (database unreachable)' }, 503);
+      return c.json({ success: false, error: 'image storage unavailable (database unreachable)' }, 503);
     }
     const { promises: fs } = await import('node:fs');
     const dir = path.resolve(process.cwd(), 'uploads', folder);

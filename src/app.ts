@@ -95,7 +95,7 @@ export function createApp() {
           return new Response(bin as unknown as BodyInit, { headers: { 'Content-Type': rows[0].mime, 'Cache-Control': 'public, max-age=86400' } });
         }
       } catch (err) {
-        console.error('[covers] db read failed', err); noteDbFailure();
+        console.error('[uploads] db read failed', err); noteDbFailure();
       }
     }
     await next();
