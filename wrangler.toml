@@ -24,7 +24,7 @@ ADMIN_EMAILS = "mohamedrezk.mar@gmail.com"
 # APP_UPDATE_NOTES is a "|"-separated list of short lines.
 APP_LATEST_VERSION = ""
 APP_MIN_VERSION = ""
-APP_UPDATE_URL = ""
+APP_UPDATE_URL = "https://fan-novel-server.mohamed1232003.workers.dev/api/v1/app/download"
 APP_UPDATE_NOTES = ""
 APP_UPDATE_FORCE = "false"
 APP_APK_SHA256 = ""
@@ -42,3 +42,9 @@ APP_APK_SHA256 = ""
 [[r2_buckets]]
 binding = "COVERS"
 bucket_name = "fan-novel-covers"
+
+# Private bucket holding the latest release APK, streamed by
+# GET /api/v1/app/download (key: releases/latest.apk).
+[[r2_buckets]]
+binding = "RELEASES"
+bucket_name = "fan-novel-releases"

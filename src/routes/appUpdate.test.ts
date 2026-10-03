@@ -52,4 +52,10 @@ describe('GET /api/v1/app/version', () => {
       apkSha256: 'abc123',
     });
   });
+
+  it('answers 404 for the download route when no release is stored', async () => {
+    const res = await app().request('/api/v1/app/download');
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ success: false, error: 'not found' });
+  });
 });
