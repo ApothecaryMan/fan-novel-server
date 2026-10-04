@@ -36,6 +36,8 @@ export interface ChapterTimelineItem {
 export interface NovelTimelineGroup {
   novelId: string;
   sourceId?: string;
+  /** Backend id repeated as url so clients can merge with local groups keyed by novelUrl. */
+  novelUrl?: string;
   novelTitle: string;
   novelCover: string;
   novelAuthor: string;
@@ -46,6 +48,13 @@ export interface NovelTimelineGroup {
   latestCreatedAt: string;
   chapters: Array<{ id: number; chapterNumber: number; title: string; createdAt: string }>;
 }
+
+// Every row in the novels table is a backend-published novel. The novels table
+// itself has no source column — source identity lives on the client — so the
+// timeline stamps the client-known id here. Without it a group opened from
+// "today's chapters" navigates without ?src= and the details screen cannot
+// resolve a backend string id, rendering an empty page with an add button.
+export const PUBLISHED_SOURCE_ID = 'internal:published';
 
 export const CHAPTERS_STORE: Map<string, ChapterData[]> = new Map();
 
@@ -147,7 +156,7 @@ function toTimelineItem(ch: { id: number; chapterNumber: number; title: string; 
     createdAt: ch.createdAt, timestamp: chTime, dayOfWeek: d.getDay(), dateStr: d.toISOString().slice(0, 10),
     novel: {
       id: novelId, title: novel?.title || 'رواية بدون عنوان', author: novel?.author || 'غير معروف',
-      coverUrl: novel?.coverUrl || '', category: novel?.category || 'عام', sourceId: novel?.sourceId,
+      coverUrl: novel?.coverUrl || '', category: novel?.category || 'عام', sourceId: novel?.sourceId ?? PUBLISHED_SOURCE_ID,
     },
   };
 }
@@ -155,26 +164,41 @@ function toTimelineItem(ch: { id: number; chapterNumber: number; title: string; 
 async function collectTimelineItems(novelIds: Set<string> | null, since: number, until?: number): Promise<ChapterTimelineItem[]> {
   if (isDbAvailable()) {
     try {
+      const ids = novelIds ? [...novelIds].slice(0, 100) : null;
       const chRows = await db
-        .select({ ch: chapters, novel: novels })
+        .select({
+          id: chapters.id,
+          novelId: chapters.novelId,
+          chapterNumber: chapters.chapterNumber,
+          title: chapters.title,
+          wordCount: chapters.wordCount,
+          createdAt: chapters.createdAt,
+          novelTitle: novels.title,
+          novelAuthor: novels.author,
+          novelCover: novels.coverUrl,
+          novelCategory: novels.category,
+        })
         .from(chapters)
         .leftJoin(novels, eq(chapters.novelId, novels.id))
-        .where(and(gte(chapters.createdAt, new Date(since)), until ? lte(chapters.createdAt, new Date(until)) : undefined))
+        .where(and(
+          gte(chapters.createdAt, new Date(since)),
+          until ? lte(chapters.createdAt, new Date(until)) : undefined,
+          ids ? inArray(chapters.novelId, ids) : undefined,
+        ))
         .orderBy(desc(chapters.createdAt))
         .limit(5000);
       const items: ChapterTimelineItem[] = [];
       for (const r of chRows) {
-        const novelId = r.ch.novelId;
-        if (novelIds && !novelIds.has(novelId)) continue;
-        const createdAt = r.ch.createdAt?.toISOString() ?? new Date().toISOString();
+        const novelId = r.novelId;
+        const createdAt = r.createdAt?.toISOString() ?? new Date().toISOString();
         const t = new Date(createdAt).getTime();
         const d = new Date(t);
         items.push({
-          id: r.ch.id, chapterNumber: r.ch.chapterNumber, title: r.ch.title, wordCount: r.ch.wordCount ?? 0,
+          id: r.id, chapterNumber: r.chapterNumber, title: r.title, wordCount: r.wordCount ?? 0,
           createdAt, timestamp: t, dayOfWeek: d.getDay(), dateStr: createdAt.slice(0, 10),
           novel: {
-            id: novelId, title: r.novel?.title ?? 'رواية بدون عنوان', author: r.novel?.author ?? 'غير معروف',
-            coverUrl: r.novel?.coverUrl ?? '', category: r.novel?.category ?? 'عام',
+            id: novelId, title: r.novelTitle ?? 'رواية بدون عنوان', author: r.novelAuthor ?? 'غير معروف',
+            coverUrl: r.novelCover ?? '', category: r.novelCategory ?? 'عام', sourceId: PUBLISHED_SOURCE_ID,
           },
         });
       }
@@ -216,7 +240,8 @@ chaptersTimelineRouter.post('/timeline', async (c) => {
       let g = map.get(item.novel.id);
       if (!g) {
         g = {
-          novelId: item.novel.id, sourceId: item.novel.sourceId, novelTitle: item.novel.title,
+          novelId: item.novel.id, sourceId: item.novel.sourceId ?? PUBLISHED_SOURCE_ID, novelUrl: item.novel.id,
+          novelTitle: item.novel.title,
           novelCover: item.novel.coverUrl, novelAuthor: item.novel.author, category: item.novel.category,
           chapterCount: 0, latestChapterNumber: item.chapterNumber, latestChapterTitle: item.title, latestCreatedAt: item.createdAt, chapters: [],
         };
@@ -420,6 +445,8 @@ chaptersRouter.post('/:novelId/chapters', prodGuard(requireAuthOrPat, ensureNove
 
   if (isDbAvailable()) {
     try {
+      const parent = await db.select({ id: novels.id }).from(novels).where(eq(novels.id, novelId)).limit(1);
+      if (!parent[0]) return c.json({ success: false, error: 'الرواية غير موجودة' }, 404);
       const existing = await db.select().from(chapters).where(eq(chapters.novelId, novelId));
       const chapterNumber = body.chapterNumber ?? existing.length + 1;
       if (existing.some((r) => r.chapterNumber === chapterNumber)) return c.json({ success: false, error: 'رقم الفصل موجود مسبقاً' }, 409);
