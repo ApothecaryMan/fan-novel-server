@@ -1,0 +1,1 @@
+ALTER TABLE "users" ADD COLUMN "weekly_reading_goal_hours" integer;

@@ -138,6 +138,9 @@ describe('reading statistics database schema', () => {
       // when 0015 adds it, whereas nullable+no-default is a catalog-only change.
       profile_decorations: column('jsonb', false),
       bio: column('varchar(500)', false),
+      // Owner-set weekly reading target in hours (0017). Nullable with NO
+      // default: unset is the "show the set-target placeholder" state.
+      weekly_reading_goal_hours: column('integer', false),
       role: column('varchar(20)', true, { hasDefault: true, default: 'reader' }),
       reading_stats_plan: column('varchar(10)', true, { hasDefault: true, default: 'free' }),
       reading_stats_plan_started_at: column('bigint', false),

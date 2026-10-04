@@ -47,9 +47,14 @@ export function toPublic(u: any, options: { includeEmail?: boolean } = {}) {
     createdAt: joined,
     memberSince: joined,
   };
+  // Private account data, present only in the owner's own bodies (the
+  // public `/profile` cache must not publish a reader's self-set target).
+  const privateFields = {
+    weeklyReadingGoalHours: u.weeklyReadingGoalHours ?? null,
+  };
   // `email` is a key that is PRESENT or ABSENT — never null — so a publicly
   // cacheable body cannot leak the address under a null either.
   return options.includeEmail === false
     ? base
-    : { email: u.email, ...base };
+    : { email: u.email, ...privateFields, ...base };
 }

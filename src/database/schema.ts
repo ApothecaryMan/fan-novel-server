@@ -24,6 +24,10 @@ export const users = pgTable('users', {
   // via parseProfileDecorations on the way out. See domain/profileDecorations.ts.
   profileDecorations: jsonb('profile_decorations').$type<ProfileDecorations | null>(),
   bio: varchar('bio', { length: 500 }),
+  // Owner-set weekly reading target, in hours (the "reading time this week"
+  // card's goal). NULL means unset: the card shows its set-target placeholder.
+  // Nullable + no DEFAULT keeps the migration a catalog-only change.
+  weeklyReadingGoalHours: integer('weekly_reading_goal_hours'),
   role: varchar('role', { length: 20 }).default('reader').notNull(), // 'reader' | 'admin'
   readingStatsPlan: varchar('reading_stats_plan', { length: 10 }).default('free').notNull(),
   readingStatsPlanStartedAt: bigint('reading_stats_plan_started_at', { mode: 'number' }),

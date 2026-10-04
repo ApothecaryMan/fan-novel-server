@@ -120,6 +120,13 @@
       "when": 1790945378199,
       "tag": "0016_drop_history_and_read_state",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1791112258321,
+      "tag": "0017_weekly_reading_goal_hours",
+      "breakpoints": true
     }
   ]
 }

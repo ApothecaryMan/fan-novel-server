@@ -185,6 +185,9 @@ const profilePatchSchema = z.object({
   // all, which is what the reset action means. The schema is the write gate, so
   // the column can never hold a shape no renderer can draw.
   decorations: profileDecorationsSchema.nullable().optional(),
+  // Owner-set weekly reading target in hours. `null` clears it (the card falls
+  // back to its set-target placeholder). Bounded to a real week.
+  weeklyReadingGoalHours: z.number().int().min(1).max(168).nullable().optional(),
 });
 
 authRouter.patch('/me', requireAuth, async (c) => {
@@ -192,10 +195,10 @@ authRouter.patch('/me', requireAuth, async (c) => {
   const sub = payload.sub ?? '';
   const parsed = profilePatchSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return c.json({ error: 'بيانات الملف الشخصي غير صالحة', issues: parsed.error.issues }, 400);
-  const { name, username, bio, status, avatarUrl, bannerUrl, decorations } = parsed.data;
+  const { name, username, bio, status, avatarUrl, bannerUrl, decorations, weeklyReadingGoalHours } = parsed.data;
   const bioInput = bio !== undefined ? bio : status;
   if (name === undefined && username === undefined && bioInput === undefined && avatarUrl === undefined
-    && bannerUrl === undefined && decorations === undefined) {
+    && bannerUrl === undefined && decorations === undefined && weeklyReadingGoalHours === undefined) {
     return c.json({ error: 'لا يوجد ما يتم تحديثه' }, 400);
   }
   for (const [label, url] of [['avatarUrl', avatarUrl], ['bannerUrl', bannerUrl]] as const) {
@@ -231,6 +234,7 @@ authRouter.patch('/me', requireAuth, async (c) => {
       if (decorations !== undefined) {
         patch.profileDecorations = isEmptyDecorations(decorations) ? null : decorations;
       }
+      if (weeklyReadingGoalHours !== undefined) patch.weeklyReadingGoalHours = weeklyReadingGoalHours;
       const [updated] = await db.update(users).set(patch).where(eq(users.id, row.id)).returning();
       if (!updated) return c.json({ error: 'account not found' }, 401);
       return c.json({ success: true, user: toPublic({ ...updated, externalId: row.externalId }) });
@@ -266,5 +270,6 @@ authRouter.patch('/me', requireAuth, async (c) => {
   if (bioInput !== undefined) user.bio = cleanBio(bioInput);
   if (avatarUrl !== undefined) user.avatarUrl = avatarUrl === null ? null : cleanMediaUrl(avatarUrl);
   if (bannerUrl !== undefined) user.bannerUrl = bannerUrl === null ? null : cleanMediaUrl(bannerUrl);
+  if (weeklyReadingGoalHours !== undefined) user.weeklyReadingGoalHours = weeklyReadingGoalHours;
   return c.json({ success: true, user: toPublic(user) });
 });

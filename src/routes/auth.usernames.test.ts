@@ -219,3 +219,35 @@ describe('PATCH /auth/me — profile decorations', () => {
     expect(body.user.decorations).toEqual({ avatarFrameKey: 'fan_avatar/gold_avatar_frame_512.png' });
   });
 });
+
+// The weekly reading target rides the same owner-only PATCH. It is a plain
+// integer of hours bounded to one week, and `null` clears it so the stats card
+// returns to its set-target placeholder.
+describe('PATCH /auth/me — weekly reading goal', () => {
+  it('stores the target and echoes it back on the user', async () => {
+    const { token }: any = await (await loginAs('goal-w1', 'goalw1@test.com')).json();
+    const res = await me(token, 'PATCH', { weeklyReadingGoalHours: 5 });
+    expect(res.status).toBe(200);
+    const body: any = await res.json();
+    expect(body.user.weeklyReadingGoalHours).toBe(5);
+    expect(fake().rows.find((r) => r.email === 'goalw1@test.com')?.weeklyReadingGoalHours).toBe(5);
+  });
+
+  it('clears the target with null so the card can show the placeholder', async () => {
+    const { token }: any = await (await loginAs('goal-w2', 'goalw2@test.com')).json();
+    await me(token, 'PATCH', { weeklyReadingGoalHours: 8 });
+    const res = await me(token, 'PATCH', { weeklyReadingGoalHours: null });
+    expect(res.status).toBe(200);
+    expect((await res.json()).user.weeklyReadingGoalHours).toBeNull();
+    expect(fake().rows.find((r) => r.email === 'goalw2@test.com')?.weeklyReadingGoalHours).toBeNull();
+  });
+
+  it('rejects an out-of-range or non-integer target with 400 and writes nothing', async () => {
+    const { token }: any = await (await loginAs('goal-w3', 'goalw3@test.com')).json();
+    for (const bad of [0, 169, 3.5, -2, '4', true]) {
+      const res = await me(token, 'PATCH', { weeklyReadingGoalHours: bad });
+      expect(res.status).toBe(400);
+    }
+    expect(fake().rows.find((r) => r.email === 'goalw3@test.com')?.weeklyReadingGoalHours).toBeFalsy();
+  });
+});
