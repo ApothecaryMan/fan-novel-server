@@ -47,7 +47,17 @@ describe('rate limiting of the sync surface', () => {
   it('leaves the unlimited surfaces alone', async () => {
     const server = app();
     expect((await server.request('/health')).status).toBe(200);
+    expect((await server.request('/health/live')).status).toBe(200);
     expect((await post(server, '/api/v1/auth/google')).status).toBe(400);
+  });
+
+  it('answers liveness without a database round trip', async () => {
+    const server = app();
+    const res = await server.request('/health/live');
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.status).toBe('ok');
+    expect(body).not.toHaveProperty('db');
   });
 
   it('prefers the Cloudflare binding when one is bound', async () => {
