@@ -153,6 +153,7 @@ export function createApp() {
         deleteNovel: 'DELETE /api/v1/novels/:id',
         chaptersList: '/api/v1/novels/:novelId/chapters?page&limit&order',
         chapterContent: '/api/v1/novels/:novelId/chapters/:chapterNumber',
+        chapterView: 'POST /api/v1/novels/:novelId/chapters/:chapterNumber/view {readSeconds?, progress?}',
         chapterTimeline: 'POST /api/v1/chapters/timeline',
         todayChapters: 'GET /api/v1/chapters/today',
         uploadImage: 'POST /api/v1/upload/image',

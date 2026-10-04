@@ -83,6 +83,9 @@ export const novels = pgTable('novels', {
   tags: jsonb('tags').$type<string[]>().default([]).notNull(),
   rating: integer('rating').default(50).notNull(),
   readersCount: varchar('readers_count', { length: 50 }).default('0').notNull(),
+  // Denormalized sum of chapters.views_count. Incremented atomically with the
+  // chapter counter on POST .../chapters/:n/view; never written by clients.
+  viewsCount: integer('views_count').default(0).notNull(),
   totalChapters: integer('total_chapters').default(0).notNull(),
   coverUrl: text('cover_url').notNull(),
   summary: text('summary').notNull(),
@@ -289,3 +292,19 @@ export const commentModLog = pgTable('comment_mod_log', {
   reason: varchar('reason', { length: 500 }),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
 });
+
+// 13. Global chapter-view dedup (powers public view counters).
+// One row per (novel, chapter, viewer). Counters live on chapters.views_count
+// and novels.views_count; this table only answers "did this viewer already
+// count this chapter inside the revisit window?" so a re-open within 30 min
+// does not inflate the public counter. viewer_key is `u:<userId>` for signed
+// requests, else `ip:<sha256(ip|ua)>` — no raw IP is stored.
+export const chapterViewDedup = pgTable('chapter_view_dedup', {
+  novelId: varchar('novel_id', { length: 100 }).references(() => novels.id, { onDelete: 'cascade' }).notNull(),
+  chapterNumber: integer('chapter_number').notNull(),
+  viewerKey: varchar('viewer_key', { length: 64 }).notNull(),
+  lastViewedAt: timestamp('last_viewed_at', { withTimezone: true }).defaultNow().notNull(),
+}, (t) => ({
+  chapterViewDedupPk: uniqueIndex('chapter_view_dedup_pk').on(t.novelId, t.chapterNumber, t.viewerKey),
+  chapterViewDedupRecentIdx: index('chapter_view_dedup_recent_idx').on(t.lastViewedAt),
+}));

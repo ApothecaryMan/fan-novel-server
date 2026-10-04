@@ -5,6 +5,8 @@ import { db, isDbAvailable, noteDbFailure } from '../database/db.js';
 import { chapters, novels } from '../database/schema.js';
 import { NOVELS_STORE, type NovelData } from './novels.js';
 import { requireAuthOrPat } from '../middleware/authorToken.js';
+import { verifySubject } from '../middleware/auth.js';
+import { rateLimit } from '../middleware/rateLimit.js';
 import { ensureNovelOwner } from '../middleware/ownership.js';
 import { getEnv } from '../config/env.js';
 
@@ -18,6 +20,7 @@ export interface ChapterData {
   title: string;
   content: string;
   wordCount?: number;
+  viewsCount?: number;
   createdAt: string;
 }
 
@@ -58,32 +61,12 @@ export const PUBLISHED_SOURCE_ID = 'internal:published';
 
 export const CHAPTERS_STORE: Map<string, ChapterData[]> = new Map();
 
-function ensureSeedData() {
-  if (CHAPTERS_STORE.size > 0) return;
-  const now = Date.now();
-  const twoHoursAgo = new Date(now - 2 * 60 * 60 * 1000).toISOString();
-  const twentyMinsAgo = new Date(now - 20 * 60 * 1000).toISOString();
-  if (!NOVELS_STORE.has('1')) {
-    NOVELS_STORE.set('1', {
-      id: '1', title: 'سيد الكينونة الأبدية', author: 'جينغ شو', category: 'فانتازيا',
-      status: 'مستمرة', rating: 4.8, readersCount: '12.4k', totalChapters: 46,
-      coverUrl: '', summary: 'في عالم تتصادم فيه قوى السحر والداو...',
-      tags: ['فانتازيا', 'مغامرات'], commentsEnabled: true, createdAt: twoHoursAgo, updatedAt: twentyMinsAgo,
-    });
-  }
-  CHAPTERS_STORE.set('1', [
-    { id: 101, novelId: '1', chapterNumber: 45, title: 'الفصل 45: استيقاظ التنين', content: 'محتوى الفصل التجريبي...', wordCount: 1540, createdAt: twoHoursAgo },
-    { id: 102, novelId: '1', chapterNumber: 46, title: 'الفصل 46: كسر القيود', content: 'محتوى الفصل الثاني التجريبي...', wordCount: 1820, createdAt: twentyMinsAgo },
-  ]);
-}
-ensureSeedData();
-
 type ChapterRow = typeof chapters.$inferSelect;
 
 function rowToListItem(r: ChapterRow) {
   return {
     id: r.id, novelId: r.novelId, chapterNumber: r.chapterNumber, title: r.title,
-    wordCount: r.wordCount ?? 0, hash: (r as { contentHash?: string | null }).contentHash ?? null,
+    wordCount: r.wordCount ?? 0, viewsCount: r.viewsCount ?? 0, hash: (r as { contentHash?: string | null }).contentHash ?? null,
     createdAt: r.createdAt?.toISOString() ?? new Date().toISOString(),
   };
 }
@@ -96,7 +79,7 @@ async function sha256Hex(s: string): Promise<string> {
 function rowToContent(r: ChapterRow) {
   return {
     id: r.id, novelId: r.novelId, chapterNumber: r.chapterNumber, title: r.title,
-    content: r.contentRaw ?? '', wordCount: r.wordCount ?? 0,
+    content: r.contentRaw ?? '', wordCount: r.wordCount ?? 0, viewsCount: r.viewsCount ?? 0,
     createdAt: r.createdAt?.toISOString() ?? new Date().toISOString(),
   };
 }
@@ -207,7 +190,6 @@ async function collectTimelineItems(novelIds: Set<string> | null, since: number,
       console.error('[chapters] db timeline failed, memory fallback', err); noteDbFailure();
     }
   }
-  ensureSeedData();
   const items: ChapterTimelineItem[] = [];
   for (const [novelId, chList] of CHAPTERS_STORE.entries()) {
     if (novelIds && !novelIds.has(novelId)) continue;
@@ -298,7 +280,7 @@ chaptersRouter.get('/:novelId/chapters', async (c) => {
   const all = [...(CHAPTERS_STORE.get(novelId) || [])].sort((a, b) => order === desc(chapters.chapterNumber) as any ? 0 : a.chapterNumber - b.chapterNumber);
   const sorted = c.req.query('order') === 'desc' ? [...all].reverse() : all;
   const total = sorted.length;
-  const items = sorted.slice((page - 1) * limit, page * limit).map((ch) => ({ id: ch.id, novelId: ch.novelId, chapterNumber: ch.chapterNumber, title: ch.title, wordCount: ch.wordCount, createdAt: ch.createdAt }));
+  const items = sorted.slice((page - 1) * limit, page * limit).map((ch) => ({ id: ch.id, novelId: ch.novelId, chapterNumber: ch.chapterNumber, title: ch.title, wordCount: ch.wordCount, viewsCount: ch.viewsCount ?? 0, createdAt: ch.createdAt }));
   return c.json({ success: true, total, data: items, pagination: { page, limit, total, totalPages: Math.max(1, Math.ceil(total / limit)) } });
 });
 
@@ -435,6 +417,110 @@ chaptersRouter.get('/:novelId/chapters/:chapterNumber', async (c) => {
   return c.json({ success: true, data: { ...chapter, nextChapterId: next?.id ?? null, prevChapterId: prev?.id ?? null, totalChapters: list.length } });
 });
 
+// Global public view counter. GET never counts (it is CDN-cacheable); the
+// client calls this POST once its local hook qualifies the read (15s active
+// or 25% scroll). Anonymous callers count via an IP+UA hash, signed callers
+// via their user id. Re-opens inside 30 min are deduped, not counted.
+export const VIEW_SECONDS = 15;
+export const VIEW_PROGRESS = 0.25;
+export const VIEW_REVISIT_WINDOW_MS = 30 * 60 * 1000;
+
+export function qualifiesForView(readSeconds: number | undefined, progress: number | undefined): boolean {
+  return (readSeconds ?? 0) >= VIEW_SECONDS || (progress ?? 0) >= VIEW_PROGRESS;
+}
+
+const viewBodySchema = z.object({
+  readSeconds: z.number().min(0).max(86400).optional(),
+  progress: z.number().min(0).max(1).optional(),
+});
+
+const memoryViewDedup = new Map<string, number>();
+
+export function memoryViewDedupKey(novelId: string, chapterNumber: number, viewerKey: string): string {
+  return `${novelId}:${chapterNumber}:${viewerKey}`;
+}
+
+async function resolveViewerKey(c: { req: { header: (n: string) => string | undefined } }): Promise<string> {
+  const subject = await verifySubject(c.req.header('Authorization'));
+  if (subject) return `u:${subject}`;
+  const ip = c.req.header('x-forwarded-for')?.split(',')[0]?.trim() || c.req.header('x-real-ip') || 'local';
+  const ua = c.req.header('user-agent') || '';
+  return `ip:${(await sha256Hex(`${ip}|${ua}`)).slice(0, 32)}`;
+}
+
+chaptersRouter.post('/:novelId/chapters/:chapterNumber/view', rateLimit(60), async (c) => {
+  const { novelId, chapterNumber } = c.req.param();
+  const num = parseInt(chapterNumber, 10);
+  if (Number.isNaN(num)) return c.json({ success: false, error: 'رقم الفصل غير صالح' }, 400);
+  const parsed = viewBodySchema.safeParse(await c.req.json().catch(() => ({})));
+  if (!parsed.success) return c.json({ success: false, error: 'حقول غير صالحة', issues: parsed.error.issues }, 400);
+  if (!qualifiesForView(parsed.data.readSeconds, parsed.data.progress)) {
+    return c.json({ success: true, counted: false, reason: 'not_qualified' });
+  }
+  const viewerKey = await resolveViewerKey(c);
+  const now = Date.now();
+
+  if (isDbAvailable()) {
+    try {
+      const rows = await db.select().from(chapters).where(and(eq(chapters.novelId, novelId), eq(chapters.chapterNumber, num))).limit(1);
+      const target = rows[0] ?? (await db.select().from(chapters).where(and(eq(chapters.novelId, novelId), eq(chapters.id, num))).limit(1))[0];
+      if (!target) return c.json({ success: false, error: 'الفصل غير موجود' }, 404);
+      const canonical = target.chapterNumber;
+      const at = new Date(now);
+      // Single atomic statement: the row lock on the dedup PK serializes
+      // concurrent hits from the same viewer, so a re-open inside 30 min
+      // makes every downstream CTE a no-op with no race and one round trip.
+      const raw = await db.execute(sql`
+        WITH upsert AS (
+          INSERT INTO "chapter_view_dedup" ("novel_id", "chapter_number", "viewer_key", "last_viewed_at")
+          VALUES (${novelId}, ${canonical}, ${viewerKey}, ${at})
+          ON CONFLICT ("novel_id", "chapter_number", "viewer_key") DO UPDATE
+            SET "last_viewed_at" = ${at}
+            WHERE "chapter_view_dedup"."last_viewed_at" <= ${at} - interval '30 minutes'
+          RETURNING 1
+        ),
+        ch AS (
+          UPDATE "chapters" SET "views_count" = "views_count" + 1
+          WHERE "novel_id" = ${novelId} AND "chapter_number" = ${canonical}
+            AND EXISTS (SELECT 1 FROM upsert)
+          RETURNING "novel_id", "views_count"
+        ),
+        nv AS (
+          UPDATE "novels" SET "views_count" = "views_count" + 1, "updated_at" = ${at}
+          WHERE "id" = (SELECT "novel_id" FROM ch)
+          RETURNING "views_count"
+        )
+        SELECT EXISTS (SELECT 1 FROM upsert) AS counted,
+               (SELECT "views_count" FROM ch) AS chapter_views,
+               (SELECT "views_count" FROM nv) AS novel_views
+      `);
+      const row = (((raw as unknown as { rows?: Record<string, unknown>[] }).rows ?? raw) as unknown as Record<string, unknown>[])[0] ?? {};
+      if (!row.counted) {
+        return c.json({ success: true, counted: false, reason: 'deduped', data: { viewsCount: target.viewsCount ?? 0 } });
+      }
+      return c.json({
+        success: true, counted: true,
+        data: { viewsCount: Number(row.chapter_views ?? (target.viewsCount ?? 0) + 1), totalViews: Number(row.novel_views ?? 0) },
+      });
+    } catch (err) {
+      console.error('[chapters] db view failed', err); noteDbFailure();
+    }
+  }
+  const list = CHAPTERS_STORE.get(novelId) || [];
+  const chapter = list.find((ch) => ch.chapterNumber === num || ch.id === num);
+  if (!chapter) return c.json({ success: false, error: 'الفصل غير موجود' }, 404);
+  const key = memoryViewDedupKey(novelId, chapter.chapterNumber, viewerKey);
+  const lastMem = memoryViewDedup.get(key) ?? 0;
+  if (now - lastMem < VIEW_REVISIT_WINDOW_MS) {
+    return c.json({ success: true, counted: false, reason: 'deduped', data: { viewsCount: chapter.viewsCount ?? 0 } });
+  }
+  memoryViewDedup.set(key, now);
+  chapter.viewsCount = (chapter.viewsCount ?? 0) + 1;
+  const memNovel = NOVELS_STORE.get(novelId);
+  if (memNovel) memNovel.viewsCount = (memNovel.viewsCount ?? 0) + 1;
+  return c.json({ success: true, counted: true, data: { viewsCount: chapter.viewsCount, totalViews: memNovel?.viewsCount ?? 0 } });
+});
+
 // POST /api/v1/novels/:novelId/chapters
 chaptersRouter.post('/:novelId/chapters', prodGuard(requireAuthOrPat, ensureNovelOwner()), async (c) => {
   const novelId = c.req.param('novelId');
@@ -464,7 +550,7 @@ chaptersRouter.post('/:novelId/chapters', prodGuard(requireAuthOrPat, ensureNove
   const chapterNumber = body.chapterNumber ?? current.length + 1;
   const novel: ChapterData = {
     id: body.id ?? (current.length ? Math.max(...current.map((ch) => ch.id)) + 1 : 1),
-    novelId, chapterNumber, title: body.title, content: body.content, wordCount, createdAt: new Date().toISOString(),
+    novelId, chapterNumber, title: body.title, content: body.content, wordCount, viewsCount: 0, createdAt: new Date().toISOString(),
   };
   current.push(novel);
   CHAPTERS_STORE.set(novelId, current);
@@ -522,9 +608,14 @@ chaptersRouter.delete('/:novelId/chapters/:chapterNumber', prodGuard(requireAuth
       const rows = await db.select().from(chapters)
         .where(and(eq(chapters.novelId, novelId), eq(chapters.chapterNumber, num))).limit(1);
       if (!rows[0]) return c.json({ success: false, error: 'الفصل غير موجود' }, 404);
+      const removedViews = rows[0].viewsCount ?? 0;
       await db.delete(chapters).where(eq(chapters.id, rows[0].id));
       const remaining = await db.select({ id: chapters.id }).from(chapters).where(eq(chapters.novelId, novelId));
-      await db.update(novels).set({ totalChapters: remaining.length, updatedAt: new Date() }).where(eq(novels.id, novelId));
+      await db.update(novels).set({
+        totalChapters: remaining.length,
+        viewsCount: sql`greatest(0, ${novels.viewsCount} - ${removedViews})`,
+        updatedAt: new Date(),
+      }).where(eq(novels.id, novelId));
       return c.json({ success: true, message: 'تم حذف الفصل بنجاح' });
     } catch (err) {
       console.error('[chapters] db delete failed', err); noteDbFailure();
@@ -533,6 +624,8 @@ chaptersRouter.delete('/:novelId/chapters/:chapterNumber', prodGuard(requireAuth
   const list = CHAPTERS_STORE.get(novelId) || [];
   const idx = list.findIndex((x) => x.chapterNumber === num);
   if (idx < 0) return c.json({ success: false, error: 'الفصل غير موجود' }, 404);
-  list.splice(idx, 1);
+  const [removed] = list.splice(idx, 1);
+  const memNovel = NOVELS_STORE.get(novelId);
+  if (memNovel) memNovel.viewsCount = Math.max(0, (memNovel.viewsCount ?? 0) - (removed.viewsCount ?? 0));
   return c.json({ success: true, message: 'تم حذف الفصل بنجاح' });
 });

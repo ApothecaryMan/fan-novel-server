@@ -21,6 +21,7 @@ export interface NovelData {
   status: string;
   rating: number;
   readersCount: string;
+  viewsCount: number;
   totalChapters: number;
   coverUrl: string;
   summary: string;
@@ -53,6 +54,7 @@ export function toApi(row: NovelRow): NovelData {
     status: row.status,
     rating: (row.rating ?? 50) / 10,
     readersCount: row.readersCount ?? '0',
+    viewsCount: (row as { viewsCount?: number | null }).viewsCount ?? 0,
     totalChapters: row.totalChapters ?? 0,
     coverUrl: row.coverUrl ?? '',
     summary: row.summary ?? '',
@@ -248,7 +250,7 @@ novelsRouter.post('/', prodGuard(requireAuthOrPat), async (c) => {
   const novel: NovelData = {
     id, title: body.title, originalTitle: body.originalTitle || '', author: body.author,
     translator: body.translator || '', category: body.category, status: body.status || 'مستمرة',
-    rating: body.rating ?? 5.0, readersCount: body.readersCount || '0', totalChapters: body.totalChapters ?? 0,
+    rating: body.rating ?? 5.0, readersCount: body.readersCount || '0', viewsCount: 0, totalChapters: body.totalChapters ?? 0,
     coverUrl: body.coverUrl || '', summary: body.summary || '', tags: normalizeTags(body.tags),
     commentsEnabled: true, translationRank: body.translationRank ?? null,
     createdAt: now, updatedAt: now,

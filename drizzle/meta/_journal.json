@@ -127,6 +127,13 @@
       "when": 1791112258321,
       "tag": "0017_weekly_reading_goal_hours",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1791138798254,
+      "tag": "0018_chapter_views",
+      "breakpoints": true
     }
   ]
 }

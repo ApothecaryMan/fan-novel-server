@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { getTableConfig, PgDialect, type PgTable } from 'drizzle-orm/pg-core';
 import { describe, expect, it } from 'vitest';
 import {
+  chapterViewDedup,
   chapters,
   novels,
   readingNovels,
@@ -170,6 +171,7 @@ describe('reading statistics database schema', () => {
       tags: column('jsonb', true, { hasDefault: true, default: [] }),
       rating: column('integer', true, { hasDefault: true, default: 50 }),
       readers_count: column('varchar(50)', true, { hasDefault: true, default: '0' }),
+      views_count: column('integer', true, { hasDefault: true, default: 0 }),
       total_chapters: column('integer', true, { hasDefault: true, default: 0 }),
       cover_url: column('text', true),
       summary: column('text', true),
@@ -240,6 +242,13 @@ describe('reading statistics database schema', () => {
       reason: column('varchar(500)', false),
       occurred_at: column('bigint', true),
       received_at: column('timestamp', true, { hasDefault: true }),
+    });
+
+    expectColumns(chapterViewDedup, {
+      novel_id: column('varchar(100)', true),
+      chapter_number: column('integer', true),
+      viewer_key: column('varchar(64)', true),
+      last_viewed_at: column('timestamp with time zone', true, { hasDefault: true }),
     });
   });
 
@@ -317,6 +326,15 @@ describe('reading statistics database schema', () => {
         onUpdate: 'no action',
       },
     });
+    expect(foreignKeysByName(chapterViewDedup)).toEqual({
+      chapter_view_dedup_novel_id_novels_id_fk: {
+        columns: ['novel_id'],
+        foreignTable: 'novels',
+        foreignColumns: ['id'],
+        onDelete: 'cascade',
+        onUpdate: 'no action',
+      },
+    });
     expect(foreignKeysByName(novels)).toEqual({
       novels_author_user_id_users_id_fk: {
         columns: ['author_user_id'],
@@ -352,6 +370,10 @@ describe('reading statistics database schema', () => {
     expect(indexesByName(subscriptionEvents)).toEqual({
       subscription_events_user_occurred_idx: { unique: false, columns: ['user_id', 'occurred_at', 'id'] },
       subscription_events_expired_unique_idx: { unique: true, columns: ['user_id', 'previous_expires_at'] },
+    });
+    expect(indexesByName(chapterViewDedup)).toEqual({
+      chapter_view_dedup_pk: { unique: true, columns: ['novel_id', 'chapter_number', 'viewer_key'] },
+      chapter_view_dedup_recent_idx: { unique: false, columns: ['last_viewed_at'] },
     });
   });
 
