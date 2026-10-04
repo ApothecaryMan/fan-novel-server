@@ -466,17 +466,18 @@ chaptersRouter.post('/:novelId/chapters/:chapterNumber/view', rateLimit(60), asy
       const target = rows[0] ?? (await db.select().from(chapters).where(and(eq(chapters.novelId, novelId), eq(chapters.id, num))).limit(1))[0];
       if (!target) return c.json({ success: false, error: 'الفصل غير موجود' }, 404);
       const canonical = target.chapterNumber;
-      const at = new Date(now);
       // Single atomic statement: the row lock on the dedup PK serializes
       // concurrent hits from the same viewer, so a re-open inside 30 min
       // makes every downstream CTE a no-op with no race and one round trip.
+      // DB now() is used instead of a JS Date param: the neon-http driver
+      // stringifies Dates into a format Postgres rejects as timestamptz.
       const raw = await db.execute(sql`
         WITH upsert AS (
           INSERT INTO "chapter_view_dedup" ("novel_id", "chapter_number", "viewer_key", "last_viewed_at")
-          VALUES (${novelId}, ${canonical}, ${viewerKey}, ${at})
+          VALUES (${novelId}, ${canonical}, ${viewerKey}, now())
           ON CONFLICT ("novel_id", "chapter_number", "viewer_key") DO UPDATE
-            SET "last_viewed_at" = ${at}
-            WHERE "chapter_view_dedup"."last_viewed_at" <= ${at} - interval '30 minutes'
+            SET "last_viewed_at" = now()
+            WHERE "chapter_view_dedup"."last_viewed_at" <= now() - interval '30 minutes'
           RETURNING 1
         ),
         ch AS (
@@ -486,7 +487,7 @@ chaptersRouter.post('/:novelId/chapters/:chapterNumber/view', rateLimit(60), asy
           RETURNING "novel_id", "views_count"
         ),
         nv AS (
-          UPDATE "novels" SET "views_count" = "views_count" + 1, "updated_at" = ${at}
+          UPDATE "novels" SET "views_count" = "views_count" + 1, "updated_at" = now()
           WHERE "id" = (SELECT "novel_id" FROM ch)
           RETURNING "views_count"
         )
