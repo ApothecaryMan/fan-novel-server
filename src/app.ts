@@ -91,6 +91,13 @@ export function createApp() {
     app.use('/uploads/*', serveStatic({ root: './' }));
   }
 
+  // Liveness probe for uptime monitors: never touches the database, so a
+  // 1-minute ping cannot keep serverless compute awake. Point monitors here;
+  // keep /health (below) for real diagnostics.
+  app.get('/health/live', (c) => {
+    return c.json({ status: 'ok', service: 'Web Novel Hono API', version: '1.0.0' });
+  });
+
   app.get('/health', async (c) => {
     const db = isDbAvailable() ? await checkDb() : false;
     return c.json({
