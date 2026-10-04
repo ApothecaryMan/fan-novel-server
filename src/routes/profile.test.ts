@@ -393,8 +393,106 @@ describe('GET /users/:id/profile (public)', () => {
     expect(lapsed.isPro).toBe(false);
   });
 
-  it('never exposes email (key absent, address absent from serialized body)', async () => {
+  // The seal a visitor draws on the card. It has to be ON the public card, in the
+// same response, because the whole feature is "you see their seal" — a second
+// call per opened sheet would be the cost this route exists to avoid.
+describe('public activityTier', () => {
+  const iso = (ago: number) => {
+    const d = new Date();
+    d.setUTCDate(d.getUTCDate() - ago);
+    return d.toISOString().slice(0, 10);
+  };
+
+  it('publishes the rolling seven-day tier a visitor reads', async () => {
     await seedAuthorA();
+    fake().seedComments([]);
+    // 90 minutes and 13_500 words every day for the whole window: tier 2.
+    fake().seedSessions(Array.from({ length: 7 }, () => ({
+      userId: A1_UUID, seconds: 90 * 60, words: 13_500, readDay: iso(0),
+    })));
+    const body: any = await (await app.request(`/users/${A1_UUID}/profile`)).json();
+    expect(body.activityTier).toBe(2);
+  });
+
+  it('averages the window, so one big day out of seven promotes nothing', async () => {
+    await seedAuthorA();
+    fake().seedComments([]);
+    // A single 8-hour/40k-word day averages 68 min and 5_714 words a day over
+    // the window: tier 1. The same total on one day must never read as the
+    // tier 4 that day's own numbers would suggest.
+    fake().seedSessions([
+      { userId: A1_UUID, seconds: 8 * 3_600, words: 40_000, readDay: iso(0) },
+    ]);
+    const body: any = await (await app.request(`/users/${A1_UUID}/profile`)).json();
+    expect(body.activityTier).toBe(1);
+  });
+
+  it('excludes rows outside the window, so an old reading cannot hold a seal', async () => {
+    await seedAuthorA();
+    fake().seedComments([]);
+    // A full qualifying week inside the window: 90 min and 13_500 words a day.
+    fake().seedSessions(Array.from({ length: 7 }, (_, i) => ({
+      userId: A1_UUID, seconds: 90 * 60, words: 13_500, readDay: iso(i),
+    })));
+    // Two days too old to count. If the bounds were dropped this row alone
+    // would drag the average to 432 min/day and report tier 4.
+    fake().seedSessions([
+      { userId: A1_UUID, seconds: 40 * 3_600, words: 500_000, readDay: iso(8) },
+    ]);
+    const body: any = await (await app.request(`/users/${A1_UUID}/profile`)).json();
+    expect(body.activityTier).toBe(2);
+  });
+
+  // A Free-origin row stores an EMPTY read_day (FREE_SESSION_SAFE_DEFAULTS):
+  // the server holds no day dimension for a Free reader, so there is nothing
+  // to average. Reporting tier 0 is the honest answer — better than deriving a
+  // day from `ts` and publishing a window the app never used.
+  it('reports tier 0 when the reader has no day dimension, never a guess', async () => {
+    await seedAuthorA();
+    fake().seedComments([]);
+    fake().seedSessions([
+      { userId: A1_UUID, seconds: 6 * 3_600, words: 40_000, readDay: '' },
+    ]);
+    const body: any = await (await app.request(`/users/${A1_UUID}/profile`)).json();
+    expect(body.activityTier).toBe(0);
+  });
+
+  it('clamps a negative legacy row instead of letting it demote the reader', async () => {
+    await seedAuthorA();
+    fake().seedComments([]);
+    fake().seedSessions(Array.from({ length: 7 }, (_, i) => ({
+      userId: A1_UUID, seconds: 90 * 60, words: 13_500, readDay: iso(i),
+    })));
+    // Same per-row clamp the storage projections apply. Summed raw, this row
+    // would wipe out 833 minutes and 90_000 words and report tier 0.
+    fake().seedSessions([
+      { userId: A1_UUID, seconds: -50_000, words: -90_000, readDay: iso(3) },
+    ]);
+    const body: any = await (await app.request(`/users/${A1_UUID}/profile`)).json();
+    expect(body.activityTier).toBe(2);
+  });
+
+  it('reports tier 0 for an author who never read', async () => {
+    await seedAuthorA();
+    fake().seedComments([]);
+    const body: any = await (await app.request(`/users/${A1_UUID}/profile`)).json();
+    expect(body.activityTier).toBe(0);
+  });
+
+  it('never leaks one reader window into another', async () => {
+    await seedAuthorA();
+    await fake().db.insert(users).values({ id: B_UUID, externalId: 'google_subB',
+      email: 'b@test.com', displayName: 'B', role: 'reader' }).returning();
+    fake().seedComments([]);
+    fake().seedSessions(Array.from({ length: 7 }, () => ({
+      userId: A1_UUID, seconds: 90 * 60, words: 13_500, readDay: iso(0),
+    })));
+    const b: any = await (await app.request(`/users/${B_UUID}/profile`)).json();
+    expect(b.activityTier).toBe(0);
+  });
+});
+
+it('never exposes email (key absent, address absent from serialized body)', async () => {    await seedAuthorA();
     fake().seedComments([]);
     const res = await app.request(`/users/${A1_EXTERNAL}/profile`);
     expect(res.status).toBe(200);

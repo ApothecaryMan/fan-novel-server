@@ -12,7 +12,7 @@ import { effectivePlanExpiry, effectiveReadingPlan, loadFreeStatsForUser } from 
 import { freeProjection } from '../features/readingSync/freeProtocol.js';
 import { proProjection } from '../features/readingSync/contracts.js';
 import { loadProStats } from '../features/readingSync/proStore.js';
-import { getLevelFromSeconds, type LevelInfo as CanonicalLevelInfo } from '../features/readingSync/calculations.js';
+import { getLevelFromSeconds, activityTierFromWindowTotals, activityTierWindow, type LevelInfo as CanonicalLevelInfo } from '../features/readingSync/calculations.js';
 import { toIso, toPublic as projectAccount } from '../domain/accountProjection.js';
 
 export const profileRouter = new Hono();
@@ -342,6 +342,26 @@ profileRouter.get('/me/profile', async (c, next) => {
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/**
+ * Read the window aggregate out of the `jsonb_build_object` subquery.
+ *
+ * Trust-nothing: a driver that hands back the JSON as text, or a NULL object
+ * from an empty group, degrades to "no reading, no seal" (tier 0) instead of
+ * throwing inside a read-only route.
+ */
+function activityWindowTotals(value: unknown): { seconds: number; words: number } {
+  const raw = (typeof value === 'string' ? safeJsonParse(value) : value) as { s?: unknown; w?: unknown } | null;
+  return { seconds: Number(raw?.s ?? 0) || 0, words: Number(raw?.w ?? 0) || 0 };
+}
+
+function safeJsonParse(value: string): unknown {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
 // Public projection: identical to the private one except the `email` key is
 // ABSENT (never null) so a publicly cacheable body cannot leak PII. Handled by
 // the shared projection's own switch rather than by destructuring it away here.
@@ -386,7 +406,11 @@ profileRouter.get('/:id/profile', async (c) => {
     const mem = findMemoryUser(raw);
     if (!mem) return c.json({ success: false, code: 'user_not_found', error: 'user not found' }, 404);
     c.header('Cache-Control', 'public, max-age=60, stale-while-revalidate=60');
-    return c.json({ success: true, user: toPublicSafe(mem), stats: { commentsCount: 0, likesReceived: 0 }, level: 1, isPro: false });
+    // activityTier is PRESENT here, not absent: a dev fixture has no reading
+    // sessions, which is the same answer the DB branch gives for an empty
+    // window (tier 0, no seal). A key that appears only on one branch teaches
+    // the client two shapes for one card.
+    return c.json({ success: true, user: toPublicSafe(mem), stats: { commentsCount: 0, likesReceived: 0 }, level: 1, isPro: false, activityTier: 0 });
   }
   try {
     // UUID-first: comment author chips carry the users.id UUID (dominant tap path).
@@ -403,19 +427,46 @@ profileRouter.get('/:id/profile', async (c) => {
     // negative `seconds` contributes time in no projection.
     // Identifiers are hand-qualified (see the note on the /me/profile
     // aggregate): drizzle renders bare column names in select-list sql``.
+    // The activity tier rides in the SAME statement as one more correlated
+    // scan, so publishing the seal costs no extra round trip — which is the
+    // point: the seal has to be here for any visitor, not behind a second call.
+    // Both sums come out of ONE pass with FILTER rather than two subqueries, so
+    // the extra work is one 7-day index range over a single reader's rows.
+    const window = activityTierWindow();
+    const inWindow = sql`"reading_sessions"."read_day" >= ${window.startDay} AND "reading_sessions"."read_day" <= ${window.endDay}`;
+    // FILTER binds to the aggregate call DIRECTLY — `COALESCE(SUM(x) FILTER
+    // (...), 0)` is a syntax error (42601), so the filtered aggregate is
+    // parenthesized first and the empty-group NULL is coalesced outside it.
+    // Written the other way round the whole public card 503s, which is why the
+    // assertions in profile.postgres.test.ts read the SQL rather than a fake.
+    const windowedSum = (column: 'seconds' | 'words') =>
+      sql<number>`COALESCE((SUM(GREATEST("reading_sessions".${sql.raw(column)}, 0)) FILTER (WHERE ${inWindow})), 0)`;
     const [pub] = await db.select({
       commentsCount: sql<number>`(SELECT COUNT(*) FROM "comments" WHERE "comments"."user_id" = "users"."id" AND "comments"."status" = 'visible')`,
       likesReceived: sql<number>`(SELECT COALESCE(SUM("comments"."likes_count"), 0) FROM "comments" WHERE "comments"."user_id" = "users"."id" AND "comments"."status" = 'visible')`,
       seconds: sql<number>`(SELECT COALESCE(SUM(GREATEST("reading_sessions"."seconds", 0)), 0) FROM "reading_sessions" WHERE "reading_sessions"."user_id" = "users"."id")`,
+      activityWindow: sql<unknown>`(SELECT jsonb_build_object('s', ${windowedSum('seconds')}, 'w', ${windowedSum('words')}) FROM "reading_sessions" WHERE "reading_sessions"."user_id" = "users"."id")`,
     }).from(users).where(eq(users.id, row.id));
     const commentsCount = Number(pub?.commentsCount ?? 0);
     const likesReceived = Number(pub?.likesReceived ?? 0);
     const level = getLevelFromSeconds(Number(pub?.seconds ?? 0)).level;
+    // The seal the app draws on the card. The ladder itself is NOT restated
+    // here — activityTierFromWindowTotals owns it, and this route only reports
+    // the window totals. Free-origin rows carry no read_day, so the bounds drop
+    // them and a Free reader honestly reads tier 0 (no seal) instead of the
+    // route inventing a day dimension the server never received.
+    const activityTotals = activityWindowTotals(pub?.activityWindow);
+    const activityTier = activityTierFromWindowTotals(activityTotals.seconds, activityTotals.words);
     // Pro seal: the effective plan off the already-resolved row (fail-closed:
     // a lapsed expiry reads free). Boolean only — no clocks leave the server.
     const isPro = effectiveReadingPlan(row, Date.now()) === 'pro';
+    // `level`, `isPro` and `activityTier` are all properties of the READER, not
+    // of the caller, so the body stays publicly cacheable and shared: no
+    // `Vary: Authorization` and no per-caller key. The rolling window makes the
+    // seal at most ~2 minutes stale under stale-while-revalidate, the same
+    // freshness the level and the Pro flag already accepted.
     c.header('Cache-Control', 'public, max-age=60, stale-while-revalidate=60');
-    return c.json({ success: true, user: toPublicSafe(row), stats: { commentsCount, likesReceived }, level, isPro });
+    return c.json({ success: true, user: toPublicSafe(row), stats: { commentsCount, likesReceived }, level, isPro, activityTier });
   } catch (error) {
     // Read-only route: see the note on /me/profile — a failed read must not
     // trip the write-side breaker.

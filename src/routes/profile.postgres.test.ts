@@ -40,6 +40,11 @@ if (baseUrl) {
 }
 
 const FIXTURE_PREFIX = 'profile-pg-';
+// The UUID-precedence test writes a shadow account whose externalId is another
+// user's UUID, so it does NOT carry the prefix the cleanup below matches on.
+// Without this the row survives a failed run and every later run dies on the
+// primary key before it reaches a single assertion.
+const SHADOW_UUID = '44444444-4444-4444-8444-444444444444';
 const JWT_SECRET = 'profile-pg-fixture-signing-key-32-b';
 let counter = 0;
 const savedEnv = { ...process.env };
@@ -142,6 +147,7 @@ describe.skipIf(!url)('Profile aggregates (isolated PostgreSQL)', () => {
     if (owned.length > 0) {
       await database.delete(users).where(like(users.externalId, `${FIXTURE_PREFIX}%`));
     }
+    await database.delete(users).where(eq(users.id, SHADOW_UUID));
     vi.restoreAllMocks();
   });
 
@@ -154,10 +160,80 @@ describe.skipIf(!url)('Profile aggregates (isolated PostgreSQL)', () => {
     Object.assign(process.env, savedEnv);
   });
 
+  // The activity seal rides in the SAME correlated statement as the level SUM,
+  // as one jsonb_build_object with two FILTERed aggregates. That makes it the
+  // most testable part of the route: the fake answers the shape from fixtures
+  // and never parses the SQL, so only these assertions can catch a dropped
+  // bound, a missing GREATEST, or a bare identifier that binds to the wrong
+  // table.
+  describe('public activityTier (real SQL)', () => {
+    const iso = (ago: number) => {
+      const d = new Date();
+      d.setUTCDate(d.getUTCDate() - ago);
+      return d.toISOString().slice(0, 10);
+    };
+
+    /** One qualifying day inside the window: 90 minutes, 13_500 words. */
+    const qualifyingWeek = (userId: string) => Array.from({ length: 7 }, (_, i) =>
+      sessionRow(userId, { seconds: 90 * 60, words: 13_500, readDay: iso(i) }));
+
+    it('publishes the rolling seven-day tier', async () => {
+      const { row } = await createUser('pro');
+      await database.insert(readingSessions).values(qualifyingWeek(row.id));
+      const { body } = await pub(row.id);
+      // 90 min and 13_500 words a day: tier 2.
+      expect(body.activityTier).toBe(2);
+      // Same response, same statement — the seal cost the level nothing.
+      expect(body.level).toBeGreaterThanOrEqual(1);
+    });
+
+    it('applies both window bounds, so an old day cannot drag the average up', async () => {
+      const { row } = await createUser('pro');
+      await database.insert(readingSessions).values([
+        ...qualifyingWeek(row.id),
+        // Two days outside the window. Counted in, the average would be
+        // 432 min/day and the route would report tier 4.
+        sessionRow(row.id, { seconds: 40 * 3_600, words: 500_000, readDay: iso(8) }),
+      ]);
+      const { body } = await pub(row.id);
+      expect(body.activityTier).toBe(2);
+    });
+
+    it('ignores a Free-origin row, which stores no read day', async () => {
+      const { row } = await createUser('pro');
+      await database.insert(readingSessions).values([
+        ...qualifyingWeek(row.id),
+        // FREE_SESSION_SAFE_DEFAULTS: a Free session carries read_day = '' and
+        // words = 0. The lower text bound must drop it on its own.
+        sessionRow(row.id, { seconds: 40 * 3_600, words: 500_000, readDay: '', proFieldsPresent: false }),
+      ]);
+      const { body } = await pub(row.id);
+      expect(body.activityTier).toBe(2);
+    });
+
+    it('clamps negative seconds and words per row inside the window', async () => {
+      const { row } = await createUser('pro');
+      await database.insert(readingSessions).values([
+        ...qualifyingWeek(row.id),
+        // Summed raw, this row would erase 833 minutes and 90_000 words and
+        // report tier 0. GREATEST is what keeps the reader's tier honest.
+        sessionRow(row.id, { seconds: -50_000, words: -90_000, readDay: iso(3) }),
+      ]);
+      const { body } = await pub(row.id);
+      expect(body.activityTier).toBe(2);
+    });
+
+    it('reports tier 0, not null or a string, for a reader with no rows', async () => {
+      const { row } = await createUser('free');
+      const { body } = await pub(row.id);
+      expect(body.activityTier).toBe(0);
+      expect(typeof body.activityTier).toBe('number');
+    });
+  });
+
   // Each of these pins one predicate in the hand-written subquery. The fake
   // cannot fail them; a renamed column or a dropped predicate breaks here.
-  it('excludes soft-deleted library rows and counts live ones', async () => {
-    const { row, token } = await createUser('pro');
+  it('excludes soft-deleted library rows and counts live ones', async () => {    const { row, token } = await createUser('pro');
     const base = Date.now();
     await database.insert(schema.userLibrary).values([
       { userId: row.id, novelId: 'a', updatedAt: base, receivedAt: new Date(base) },
@@ -311,7 +387,7 @@ describe.skipIf(!url)('Profile aggregates (isolated PostgreSQL)', () => {
     const { row, externalId } = await createUser();
     // The shadow row claims the first account's UUID in its externalId column.
     const [shadow] = await database.insert(users).values({
-      id: '44444444-4444-4444-8444-444444444444',
+      id: SHADOW_UUID,
       externalId: row.id,
       email: `${nextSubject()}@shadow.test`,
       username: `${nextSubject()}-shadow`,

@@ -34,7 +34,12 @@ import type {
   ProReadingSyncPush,
 } from './contracts.js';
 import {
+  ACTIVITY_TIER_DAYS,
+  ACTIVITY_TIER_STEPS,
   MAX_LEVEL,
+  activityTierForAverage,
+  activityTierFromWindowTotals,
+  activityTierWindow,
   calculateFreeStats,
   calculateFreeStatsFromTotals,
   calculateProStats,
@@ -1138,5 +1143,65 @@ describe('pure reading statistics calculations', () => {
     });
     expect(stats.mostReadNovelsTruncated).toBe(true);
     expect(stats.completedNovels).toEqual([{ novelId: 'novel-100', title: 'Finished' }]);
+  });
+});
+
+describe('activity tier (the public reading seal)', () => {
+  it('keeps one table with five steps, tier 0 first and dormant', () => {
+    expect(ACTIVITY_TIER_STEPS.map((s) => s.tier)).toEqual([0, 1, 2, 3, 4]);
+    expect(ACTIVITY_TIER_STEPS[0]).toMatchObject({ minMinutes: 0, minWords: 0 });
+    expect(ACTIVITY_TIER_DAYS).toBe(7);
+  });
+
+  it('qualifies on either gate, so words alone can promote a fast reader', () => {
+    // Time gate only.
+    expect(activityTierForAverage(30, 0)).toBe(1);
+    // Words gate only: 4_500 words in a day without 30 minutes of clock time.
+    expect(activityTierForAverage(0, 4_500)).toBe(1);
+    expect(activityTierForAverage(0, 13_500)).toBe(2);
+    // Neither gate reached stays dormant, and dormant is the only tier with
+    // no thresholds to clear.
+    expect(activityTierForAverage(29, 4_499)).toBe(0);
+    expect(activityTierForAverage(0, 0)).toBe(0);
+  });
+
+  it('returns the HIGHEST step either gate reaches, not the first match', () => {
+    // 360 min clears every minute gate, so the loop must not stop at tier 1.
+    expect(activityTierForAverage(360, 0)).toBe(4);
+    // Mixed: under the tier-4 time gate but over the tier-4 word gate.
+    expect(activityTierForAverage(180, 54_000)).toBe(4);
+    expect(activityTierForAverage(359, 53_999)).toBe(3);
+  });
+
+  it('averages over the whole window, so one big day promotes nothing', () => {
+    const oneHugeDay = activityTierFromWindowTotals(8 * 3_600, 40_000);
+    // 8h in a single day is 68 min/day over the window: tier 1, not tier 4.
+    expect(oneHugeDay).toBe(1);
+    // The same total spread thin is lower still.
+    expect(activityTierFromWindowTotals(8 * 3_600, 0)).toBe(1);
+    // A sustained week qualifies: 90 min and 13_500 words every day.
+    expect(activityTierFromWindowTotals(90 * 60 * 7, 13_500 * 7)).toBe(2);
+    // A missed week demotes: one 2-hour/20k-word day averages 17 min and
+    // 2_857 words a day, which clears neither gate.
+    expect(activityTierFromWindowTotals(2 * 3_600, 20_000)).toBe(0);
+  });
+
+  it('treats a negative legacy row as contributing nothing', () => {
+    // The same clamp the storage projections apply per row. Without it a
+    // corrupt row could subtract a reader out of the tier they earned.
+    expect(activityTierFromWindowTotals(90 * 60 * 7, 13_500 * 7)).toBe(2);
+    expect(activityTierFromWindowTotals(90 * 60 * 7 - 10_000_000, -500_000)).toBe(0);
+  });
+
+  it('bounds the window to seven inclusive labels ending on the UTC today', () => {
+    const { startDay, endDay } = activityTierWindow();
+    expect(endDay).toBe(new Date().toISOString().slice(0, 10));
+    const start = new Date(`${endDay}T00:00:00Z`);
+    start.setUTCDate(start.getUTCDate() - (ACTIVITY_TIER_DAYS - 1));
+    expect(startDay).toBe(start.toISOString().slice(0, 10));
+    // Fixed-width labels must stay lexicographically ordered, because the
+    // route uses them directly as SQL text bounds on read_day.
+    expect(startDay < endDay).toBe(true);
+    expect(startDay).toHaveLength(10);
   });
 });

@@ -2,6 +2,7 @@ import { vi } from 'vitest';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import type { SQL } from 'drizzle-orm';
 import { comments, readingSessions, users } from '../database/schema.js';
+import { activityTierWindow } from '../features/readingSync/calculations.js';
 
 type Row = typeof users.$inferSelect;
 
@@ -106,7 +107,7 @@ export function identityDb() {
         // over zero users rows returns zero rows, not one row of zeros.
         if (fields !== null && typeof fields === 'object' && fields !== undefined &&
           ['library', 'history', 'sessions', 'seconds', 'words', 'readDays',
-            'commentsCount', 'likesReceived'].some((k) => k in (fields as Record<string, unknown>))) {
+            'commentsCount', 'likesReceived', 'activityWindow'].some((k) => k in (fields as Record<string, unknown>))) {
           if (matched.length === 0) return [];
           const userId = matched[0].id;
           const mine = commentRows.filter((cm) => cm.userId === userId && cm.status === 'visible');
@@ -115,6 +116,17 @@ export function identityDb() {
           // days subquery (ORDER BY day DESC LIMIT 60).
           const readDays = [...new Set(mineSessions.map((s) => s.readDay).filter((d): d is string => typeof d === 'string' && d.length > 0))]
             .sort().reverse().slice(0, 60);
+          // The rolling activity window. Its label bounds live inside the
+          // route's select-list sql`` (they are FILTER arguments, not WHERE
+          // terms), so the fake cannot read them off `condition`; it calls the
+          // same exported window helper the route does. What the fake cannot
+          // check is whether the SQL really applies them — that is what
+          // profile.postgres.test.ts is for.
+          const window = activityTierWindow();
+          const inWindow = mineSessions.filter((s) => {
+            const day = typeof s.readDay === 'string' ? s.readDay : '';
+            return day >= window.startDay && day <= window.endDay;
+          });
           return [{
             library: libraryRows.filter((l) => l.userId === userId && l.deletedAt == null).length,
             history: historyRows.filter((h) => h.userId === userId).length,
@@ -124,6 +136,10 @@ export function identityDb() {
             readDays,
             commentsCount: mine.length,
             likesReceived: mine.reduce((sum, cm) => sum + (cm.likesCount ?? 0), 0),
+            activityWindow: {
+              s: inWindow.reduce((sum, s) => sum + Math.max(0, s.seconds), 0),
+              w: inWindow.reduce((sum, s) => sum + Math.max(0, s.words ?? 0), 0),
+            },
           }];
         }
         return matched;

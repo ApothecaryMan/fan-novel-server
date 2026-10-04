@@ -213,6 +213,89 @@ export function calculateLevel(totalSeconds: number): LevelInfo {
   return getLevelFromSeconds(totalSeconds);
 }
 
+// ---------------------------------------------------------------------------
+// Activity tier — the public reading seal.
+//
+// NOT the level ladder above, and deliberately not derivable from it: the level
+// is a LIFETIME ladder over total active minutes, while the seal is a rolling
+// window DAILY AVERAGE that promotes on either time or words. So one huge day
+// moves nothing and a lazy week demotes, which is the whole point of showing it
+// on someone else's card.
+//
+// The app owns the same table (READING_TIERS) and derives it from local
+// sessions; this copy is what the server publishes, so a visitor sees the same
+// seal the owner sees. The numbers below ARE the contract — if the app's table
+// changes, this one must change with it or the two screens disagree.
+// ---------------------------------------------------------------------------
+
+/** Rolling window length, in days, counting today. */
+export const ACTIVITY_TIER_DAYS = 7;
+
+export interface ActivityTierStep {
+  /** Index into the app's READING_TIERS. 0 is dormant and renders no seal. */
+  tier: number;
+  minMinutes: number;
+  minWords: number;
+}
+
+export const ACTIVITY_TIER_STEPS: readonly ActivityTierStep[] = [
+  { tier: 0, minMinutes: 0, minWords: 0 },
+  { tier: 1, minMinutes: 30, minWords: 4_500 },
+  { tier: 2, minMinutes: 90, minWords: 13_500 },
+  { tier: 3, minMinutes: 180, minWords: 27_000 },
+  { tier: 4, minMinutes: 360, minWords: 54_000 },
+];
+
+/**
+ * Either gate qualifies: fast readers clear on words, slow readers on time, so
+ * nobody is stranded below a tier their actual pace already reaches. Mirrors
+ * the app's `tierForAvg`, including the walk that keeps the HIGHEST step either
+ * gate reaches rather than the first one matched.
+ */
+export function activityTierForAverage(avgMinutes: number, avgWords: number): number {
+  const minutes = nonNegativeInteger(avgMinutes);
+  const words = nonNegativeInteger(avgWords);
+  let tier = 0;
+  for (const step of ACTIVITY_TIER_STEPS) {
+    if (minutes >= step.minMinutes || words >= step.minWords) tier = step.tier;
+  }
+  return tier;
+}
+
+/**
+ * The tier for a reader whose whole rolling window holds `totalSeconds` and
+ * `totalWords`. Days with no rows count as zero — exactly the app's seven-day
+ * average — which is what makes a missed week demote instead of the tier
+ * freezing at its best week.
+ */
+export function activityTierFromWindowTotals(totalSeconds: number, totalWords: number): number {
+  return activityTierForAverage(
+    nonNegativeInteger(totalSeconds) / 60 / ACTIVITY_TIER_DAYS,
+    nonNegativeInteger(totalWords) / ACTIVITY_TIER_DAYS,
+  );
+}
+
+/**
+ * Inclusive label bounds of the rolling window: today and the six days before.
+ *
+ * The server holds no device clock, so "today" is UTC — the same convention the
+ * streak and the stats projections already use. A reader whose local day differs
+ * from UTC can therefore sit one day early or late at the window edge, which
+ * shifts a boundary average; it can never change the ladder itself.
+ *
+ * Fixed-width 'YYYY-MM-DD' labels compare correctly as text, so a caller can use
+ * these directly as SQL bounds on `reading_sessions.read_day`. Free-origin rows
+ * store an empty label and are excluded by the lower bound without a plan test —
+ * the server genuinely holds no day dimension for them.
+ */
+export function activityTierWindow(): { startDay: string; endDay: string } {
+  const end = parseDay(utcTodayLabel())!;
+  return {
+    startDay: dayLabel(end.dayNumber - (ACTIVITY_TIER_DAYS - 1)),
+    endDay: end.label,
+  };
+}
+
 const DAY_MS = 86_400_000;
 const MIN_YEAR = 1;
 const MAX_YEAR = 9999;
