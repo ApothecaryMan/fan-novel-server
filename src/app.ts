@@ -18,9 +18,7 @@ import { adminRouter } from './routes/admin.js';
 import { appUpdateRouter } from './routes/appUpdate.js';
 import { rateLimit } from './middleware/rateLimit.js';
 import { edgeCacheComments } from './middleware/edgeCache.js';
-import { checkDb, db, initDb, isDbAvailable, noteDbFailure } from './database/db.js';
-import { coverBlobs } from './database/schema.js';
-import { eq } from 'drizzle-orm';
+import { checkDb, initDb, isDbAvailable } from './database/db.js';
 import { getEnv, isWorkersRuntime } from './config/env.js';
 
 export function createApp() {
@@ -67,7 +65,7 @@ export function createApp() {
   });
 
   // Upload serving: covers/avatars/banners, one folder per kind in the same
-  // bucket. R2 binding → Postgres blob → local disk (Node) → 404. One GET route
+  // bucket. R2 binding → local disk (Node) → 404. One GET route
   // on both runtimes; falls through with next() on miss.
   const uploadFolders = new Set(['covers', 'avatars', 'banners']);
   app.get('/uploads/:folder/:filename', async (c, next) => {
@@ -84,18 +82,6 @@ export function createApp() {
       if (obj) {
         const type = obj.httpMetadata?.contentType ?? 'image/png';
         return new Response(obj.body, { headers: { 'Content-Type': type, 'Cache-Control': 'public, max-age=31536000, immutable' } });
-      }
-    }
-    // 2. Postgres blob fallback.
-    if (isDbAvailable()) {
-      try {
-        const rows = await db.select().from(coverBlobs).where(eq(coverBlobs.filename, name)).limit(1);
-        if (rows[0]) {
-          const bin = Buffer.from(rows[0].dataBase64, 'base64');
-          return new Response(bin as unknown as BodyInit, { headers: { 'Content-Type': rows[0].mime, 'Cache-Control': 'public, max-age=86400' } });
-        }
-      } catch (err) {
-        console.error('[uploads] db read failed', err); noteDbFailure();
       }
     }
     await next();

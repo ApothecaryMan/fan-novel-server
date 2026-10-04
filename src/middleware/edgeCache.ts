@@ -1,5 +1,5 @@
 /**
- * Edge cache for ANONYMOUS comment reads (Cloudflare Workers only).
+ * Edge cache for ANONYMOUS public reads (Cloudflare Workers only).
  *
  * Why: measured on production, the Postgres queries behind these endpoints run
  * in 0.05–0.9 ms, but the full request takes 470–1500 ms because Neon scales to
@@ -28,6 +28,7 @@ import type { MiddlewareHandler } from 'hono';
 import { getEnv, isWorkersRuntime } from '../config/env.js';
 
 const CACHE_TTL_SECONDS = 60;
+const CHAPTERS_TTL_SECONDS = 3600;
 
 /**
  * Cloudflare exposes the zone cache through the GLOBAL `caches` object
@@ -47,7 +48,19 @@ function edgeCaches(): EdgeCache | null {
 /** Public, anonymous-safe reads. Anything else falls through untouched. */
 function isCacheablePath(pathname: string): boolean {
   if (/^\/api\/v1\/novels\/[^/]+\/comments(?:\/[^/]+\/replies)?$/.test(pathname)) return true;
-  return /^\/api\/v1\/novels\/[^/]+\/chapters\/watermark$/.test(pathname);
+  if (/^\/api\/v1\/novels\/[^/]+\/chapters\/watermark$/.test(pathname)) return true;
+  // Chapter bodies/list/manifest are immutable public content (no locked-chapter
+  // flag exists; when one is introduced, locked responses must be marked
+  // private/no-store by the route and this cache will skip them automatically).
+  if (/^\/api\/v1\/novels\/[^/]+\/chapters(?:\/manifest)?$/.test(pathname)) return true;
+  return /^\/api\/v1\/novels\/[^/]+\/chapters\/[^/]+$/.test(pathname);
+}
+
+/** Edge TTL per path: watermarks and comment pages 60s, chapter content 1h. */
+function ttlForPath(pathname: string): number {
+  if (pathname.endsWith('/chapters/watermark')) return CACHE_TTL_SECONDS;
+  if (pathname.includes('/chapters')) return CHAPTERS_TTL_SECONDS;
+  return CACHE_TTL_SECONDS;
 }
 
 export function edgeCacheComments(): MiddlewareHandler {
@@ -95,7 +108,7 @@ export function edgeCacheComments(): MiddlewareHandler {
     // client still needs the original response body.
     const forCache = res.clone();
     const cacheHeaders = new Headers(res.headers);
-    cacheHeaders.set('Cache-Control', `public, max-age=${CACHE_TTL_SECONDS}`);
+    cacheHeaders.set('Cache-Control', `public, max-age=${ttlForPath(url.pathname)}`);
     const stored = new Response(forCache.body, {
       status: res.status,
       statusText: res.statusText,

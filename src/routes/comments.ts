@@ -576,29 +576,32 @@ commentsNovelsRouter.get('/:novelId/comments', optionalAuth, async (c) => {
         )
         : byTime;
     }
-    const rows = await db.select().from(comments).where(cursorCond ? and(base, cursorCond) : base).orderBy(...order).limit(limit + 1);
+    // Rows and first-page count are independent statements; neon-http pays one
+    // HTTPS round trip per query, so fire both together instead of serially.
+    const countP = !cursor
+      ? db.select({ n: sql<number>`count(*)::int` }).from(comments).where(base)
+      : Promise.resolve(null);
+    const [rows, countRes] = await Promise.all([
+      db.select().from(comments).where(cursorCond ? and(base, cursorCond) : base).orderBy(...order).limit(limit + 1),
+      countP,
+    ]);
     const hasMore = rows.length > limit;
     const page = hasMore ? rows.slice(0, limit) : rows;
 
     // S2: root total only on the first page (no cursor). Later pages return
     // total: null; clients fall back to the first-page cached total or the
     // count endpoint. Saves 1 HTTPS round trip per scroll page on neon-http.
-    let rootTotal: number | null = null;
-    if (!cursor) {
-      const [{ n }] = await db.select({ n: sql<number>`count(*)::int` }).from(comments).where(base);
-      rootTotal = Number(n ?? page.length);
-    }
+    const rootTotal: number | null = countRes ? Number(countRes[0]?.n ?? page.length) : null;
 
-    // liked-by-me batch
-    const liked = new Set<number>();
-    if (!getEnv().syncOpen) {
-      const caller = await getCaller(c);
-      if (caller.row && page.length) {
-        const vrows = await db.select({ commentId: commentVotes.commentId }).from(commentVotes)
-          .where(and(eq(commentVotes.userId, caller.row.id), inArray(commentVotes.commentId, page.map((r) => r.id))));
-        for (const v of vrows) liked.add(v.commentId);
-      }
-    }
+    // liked-by-me batch + reply preview run concurrently (independent
+    // statements over the same page ids — one HTTPS trip each on neon-http,
+    // so parallel halves the added latency versus serial awaits).
+    // Single getCaller for the whole route: it costs a users lookup per call.
+    const callerForVotes = getEnv().syncOpen ? null : await getCaller(c);
+    const votesP = (callerForVotes?.row && page.length)
+      ? db.select({ commentId: commentVotes.commentId }).from(commentVotes)
+        .where(and(eq(commentVotes.userId, callerForVotes.row.id), inArray(commentVotes.commentId, page.map((r) => r.id))))
+      : Promise.resolve([] as { commentId: number }[]);
     // reply preview: ONE round trip via window function (neon-http: each
     // query = HTTPS). NEWEST ≤2 visible rows per listed root, so a
     // just-posted reply is always in the inline preview. (Was oldest-first,
@@ -614,10 +617,12 @@ commentsNovelsRouter.get('/:novelId/comments', optionalAuth, async (c) => {
     // the missing chain along, bounded by MAX_DEPTH so the result stays small.
     // It is part of the same statement, so this is still one round trip.
     const previews = new Map<number, CommentRow[]>();
+    for (const r of page) previews.set(r.id, []);
+    let previewP: Promise<unknown> | null = null;
     if (page.length) {
       const ids = page.map((r) => r.id);
       const statusFilter = visibleOnly ? sql`AND c."status" = 'visible'` : sql``;
-      const result = await db.execute(sql`
+      previewP = db.execute(sql`
         WITH RECURSIVE picked AS (
           SELECT c.* FROM "comments" c
           WHERE c."id" IN (
@@ -650,8 +655,16 @@ commentsNovelsRouter.get('/:novelId/comments', optionalAuth, async (c) => {
           AND "id" NOT IN (${sql.join(ids.map((id) => sql`${id}`), sql`, `)})
         ORDER BY "created_at" ASC, "id" ASC
       `);
+    }
+    const [vrows, previewResult] = await Promise.all([
+      votesP,
+      previewP ?? Promise.resolve(null),
+    ]);
+    const liked = new Set<number>();
+    for (const v of vrows) liked.add(v.commentId);
+    if (previewResult) {
+      const result = previewResult;
       const rawRows = ((result as unknown as { rows?: Record<string, unknown>[] }).rows ?? result) as unknown as Record<string, any>[];
-      for (const r of page) previews.set(r.id, []);
       for (const w of rawRows) {
         const k: CommentRow = {
           id: Number(w.id),
@@ -699,7 +712,7 @@ commentsNovelsRouter.get('/:novelId/comments', optionalAuth, async (c) => {
         ? { s: last.likesCount ?? 0, t: new Date(last.createdAt as unknown as string).getTime(), i: last.id }
         : { t: new Date(last.createdAt as unknown as string).getTime(), i: last.id })
       : null;
-    const callerForCache = getEnv().syncOpen ? null : await getCaller(c);
+    const callerForCache = callerForVotes;
     if (wantStatus !== undefined) { c.header('Cache-Control', 'no-store'); c.header('Vary', 'Authorization'); } else if (callerForCache?.row) { c.header('Cache-Control', 'private, max-age=30'); c.header('Vary', 'Authorization'); } else { c.header('Cache-Control', 'public, max-age=60, stale-while-revalidate=60'); }
     return c.json({ success: true, total: rootTotal, data, pagination: { limit, nextCursor, hasMore } });
   } catch (err) {
@@ -836,8 +849,11 @@ commentsNovelsRouter.get('/:novelId/comments/:commentId/replies', async (c) => {
         and(eq(comments.createdAt, new Date(cursor.t)), gt(comments.id, cursor.i)),
       )
       : undefined;
-    const rows = await db.select().from(comments).where(cursorCond ? and(base, cursorCond) : base)
-      .orderBy(asc(comments.createdAt), asc(comments.id)).limit(limit + 1);
+    const [rows, countRes] = await Promise.all([
+      db.select().from(comments).where(cursorCond ? and(base, cursorCond) : base)
+        .orderBy(asc(comments.createdAt), asc(comments.id)).limit(limit + 1),
+      db.select({ n: sql<number>`count(*)::int` }).from(comments).where(base),
+    ]);
     const hasMore = rows.length > limit;
     const page = hasMore ? rows.slice(0, limit) : rows;
     const lookup = await buildAuthorLookup(page.map((r) => r.userId).filter(Boolean) as string[]);
@@ -850,7 +866,7 @@ commentsNovelsRouter.get('/:novelId/comments/:commentId/replies', async (c) => {
     if (repliesCaller?.row) { c.header('Cache-Control', 'private, max-age=30'); c.header('Vary', 'Authorization'); }
     else { c.header('Cache-Control', 'public, max-age=60, stale-while-revalidate=60'); }
     return c.json({
-      success: true, total: Number((await db.select({ n: sql<number>`count(*)::int` }).from(comments).where(base))[0]?.n ?? page.length),
+      success: true, total: Number(countRes[0]?.n ?? page.length),
       data: page.map((r) => toApi(r, authorOf(r.userId, lookup), 0)),
       pagination: { limit, nextCursor, hasMore },
     });

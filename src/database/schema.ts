@@ -185,8 +185,8 @@ export const readingNovels = pgTable('reading_novels', {
   readingNovelsUserNovelIdx: uniqueIndex('reading_novels_user_novel_idx').on(table.userId, table.novelId)
 }));
 
-// 8. أغلفة الروايات (DB blob fallback when no object storage is bound).
-// Covers average ~200KB; 0.5GB Neon holds ~2500 of them. Replaced by R2 when bound.
+// 8. أغلفة الروايات (DEPRECATED: reads/writes removed now covers live in R2;
+// table kept until a drop migration runs. Prod holds 0 rows as of 2026-10-03).
 export const coverBlobs = pgTable('cover_blobs', {
   filename: varchar('filename', { length: 255 }).primaryKey(),
   mime: varchar('mime', { length: 50 }).notNull(),

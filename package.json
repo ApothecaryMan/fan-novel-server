@@ -13,6 +13,7 @@
     "db:indexes:concurrent": "node scripts/apply-reading-indexes-concurrently.mjs",
     "db:studio": "drizzle-kit studio",
     "admin:promote": "node scripts/promote-admin.mjs",
+    "covers:backfill": "node scripts/backfill-covers-to-r2.mjs",
     "test": "vitest run"
   },
   "dependencies": {

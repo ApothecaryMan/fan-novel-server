@@ -1,9 +1,6 @@
 import { Hono } from 'hono';
 import path from 'path';
 import crypto from 'crypto';
-import { eq } from 'drizzle-orm';
-import { db, isDbAvailable, noteDbFailure } from '../database/db.js';
-import { coverBlobs } from '../database/schema.js';
 import { requireAuthOrPat } from '../middleware/authorToken.js';
 import { getEnv, getWorkerBinding, isWorkersRuntime } from '../config/env.js';
 
@@ -89,17 +86,7 @@ uploadRouter.post('/image', async (c, next) => {
     const remote = await uploadToR2(buffer, folder, filename, file.type);
     if (remote) return c.json({ success: true, message: 'تم رفع الصورة بنجاح', url: remote, filename });
 
-    // 3. Postgres blob (works everywhere including Workers; ~2500 covers per 0.5GB).
-    if (isDbAvailable()) {
-      try {
-        await db.insert(coverBlobs).values({ filename, mime: file.type, dataBase64: buffer.toString('base64') });
-        return c.json({ success: true, message: 'تم رفع الصورة بنجاح', url: `/uploads/${folder}/${filename}`, filename });
-      } catch (err) {
-        console.error('[upload] db blob failed', err); noteDbFailure();
-      }
-    }
-
-    // 4. Local disk (Node only).
+    // 3. Local disk (Node only).
     if (isWorkersRuntime()) {
       return c.json({ success: false, error: 'image storage unavailable (database unreachable)' }, 503);
     }
