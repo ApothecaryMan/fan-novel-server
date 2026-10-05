@@ -59,3 +59,98 @@ describe('GET /api/v1/app/version', () => {
     expect(await res.json()).toEqual({ success: false, error: 'not found' });
   });
 });
+
+describe('GET /api/v1/app/download with a stored release', () => {
+  const BYTES = new TextEncoder().encode('0123456789');
+
+  function fakeBucket() {
+    return {
+      head: async (key: string) =>
+        key === 'releases/latest.apk'
+          ? {
+              size: BYTES.length,
+              etag: '"abc"',
+              httpMetadata: { contentType: 'application/vnd.android.package-archive' },
+            }
+          : null,
+      get: async (key: string, options?: { range?: { offset?: number; length?: number } }) => {
+        if (key !== 'releases/latest.apk') return null;
+        const start = options?.range?.offset ?? 0;
+        const end =
+          options?.range?.length !== undefined
+            ? start + options.range.length
+            : BYTES.length;
+        const slice = BYTES.slice(start, Math.min(end, BYTES.length));
+        return {
+          body: new Response(slice).body,
+          size: BYTES.length,
+          etag: '"abc"',
+          httpMetadata: { contentType: 'application/vnd.android.package-archive' },
+        };
+      },
+    };
+  }
+
+  function appWithRelease(overrides: Record<string, string> = {}) {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    setWorkerEnv({
+      ...productionBindings,
+      NODE_ENV: 'development',
+      SYNC_OPEN: 'true',
+      DATABASE_URL: undefined,
+      ...overrides,
+    });
+    (globalThis as any).__WORKER_BINDINGS__ = { RELEASES: fakeBucket() };
+    return createApp();
+  }
+
+  afterEach(() => {
+    delete (globalThis as any).__WORKER_BINDINGS__;
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it('serves the full object with length, ranges, and etag headers', async () => {
+    const res = await appWithRelease().request('/api/v1/app/download');
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-length')).toBe('10');
+    expect(res.headers.get('accept-ranges')).toBe('bytes');
+    expect(res.headers.get('etag')).toBe('"abc"');
+    expect(res.headers.get('content-type')).toBe('application/vnd.android.package-archive');
+    expect(await res.text()).toBe('0123456789');
+  });
+
+  it('serves a byte range with 206 and content-range', async () => {
+    const res = await appWithRelease().request('/api/v1/app/download', {
+      headers: { Range: 'bytes=2-5' },
+    });
+    expect(res.status).toBe(206);
+    expect(res.headers.get('content-range')).toBe('bytes 2-5/10');
+    expect(res.headers.get('content-length')).toBe('4');
+    expect(await res.text()).toBe('2345');
+  });
+
+  it('serves an open-ended range to the end of the object', async () => {
+    const res = await appWithRelease().request('/api/v1/app/download', {
+      headers: { Range: 'bytes=7-' },
+    });
+    expect(res.status).toBe(206);
+    expect(res.headers.get('content-range')).toBe('bytes 7-9/10');
+    expect(await res.text()).toBe('789');
+  });
+
+  it('rejects an unsatisfiable range with 416', async () => {
+    const res = await appWithRelease().request('/api/v1/app/download', {
+      headers: { Range: 'bytes=99-' },
+    });
+    expect(res.status).toBe(416);
+    expect(res.headers.get('content-range')).toBe('bytes */10');
+  });
+
+  it('answers HEAD with headers and no body', async () => {
+    const res = await appWithRelease().request('/api/v1/app/download', { method: 'HEAD' });
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-length')).toBe('10');
+    expect(await res.text()).toBe('');
+  });
+});
