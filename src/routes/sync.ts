@@ -1,8 +1,8 @@
 import { Hono, type Context } from 'hono';
-import { and, eq, gt } from 'drizzle-orm';
+import { and, eq, gt, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { db, isDbAvailable, noteDbFailure } from '../database/db.js';
-import { users, userLibrary, readingSessions, subscriptionEvents } from '../database/schema.js';
+import { users, userAchievementUnlocks, userLibrary, readingSessions, subscriptionEvents } from '../database/schema.js';
 import { verifySubject } from '../middleware/auth.js';
 import { getEnv } from '../config/env.js';
 import {
@@ -14,6 +14,11 @@ import {
 import { pullProData, storeProPush } from '../features/readingSync/proStore.js';
 import { buildProPushResponse, parseProV2Pull, parseProV2Push } from '../features/readingSync/proProtocol.js';
 import type { ReadingPlan, ProReadingSyncPush, ProReadingSyncPull } from '../features/readingSync/contracts.js';
+import {
+  collapseUnlockBatch,
+  parseUnlockPull,
+  parseUnlockPush,
+} from '../features/readingSync/unlocks.js';
 import {
   accountNotFoundResponse,
   buildFreePullResponse,
@@ -572,9 +577,99 @@ syncRouter.post('/pull', async (c) => {
   });
 });
 
-// GET /api/v1/sync/stats — row counts per user (debug/status UI).
-syncRouter.post('/stats', async (c) => {
+// POST /api/v1/sync/unlocks/push — idempotent unlock deltas.
+// Merge is MIN(first_seen_at) / MAX(level) / MAX(catalog_version); the server
+// never evaluates thresholds. Malformed rows fail as 400 (client drops the op),
+// never 500 (client would retry forever). Plan-agnostic: no plan gate.
+syncRouter.post('/unlocks/push', async (c) => {
   if (!isDbAvailable()) return c.json({ error: 'sync database not configured' }, 503);
+  const body = await c.req.json().catch(() => null);
+  const authedSub = await authedSubject(c);
+  if (!getEnv().syncOpen && !authedSub) return c.json({ error: 'unauthorized: valid Bearer token required' }, 401);
+  let payload;
+  try {
+    payload = parseUnlockPush(body);
+  } catch {
+    return c.json({ error: 'invalid unlocks payload' }, 400);
+  }
+  const externalId = payload.user.externalId;
+  if (authedSub && authedSub !== externalId) {
+    return c.json({ error: 'forbidden: token identity does not match user.externalId' }, 403);
+  }
+  const user = await resolveLegacySyncUser(c, externalId);
+  if (user instanceof Response) return user;
+  const now = Date.now();
+  const deltas = collapseUnlockBatch(payload.unlocks);
+  if (deltas.length > 0) {
+    try {
+      await db
+        .insert(userAchievementUnlocks)
+        .values(deltas.map((d) => ({
+          userId: user.id,
+          achievementId: d.achievementId,
+          level: d.level,
+          firstSeenAt: clampTs(d.firstSeenAt, now),
+          catalogVersion: d.catalogVersion,
+          updatedAt: now,
+        })))
+        .onConflictDoUpdate({
+          target: [userAchievementUnlocks.userId, userAchievementUnlocks.achievementId],
+          set: {
+            level: sql`GREATEST(${userAchievementUnlocks.level}, excluded."level")`,
+            firstSeenAt: sql`LEAST(${userAchievementUnlocks.firstSeenAt}, excluded."first_seen_at")`,
+            catalogVersion: sql`GREATEST(${userAchievementUnlocks.catalogVersion}, excluded."catalog_version")`,
+            updatedAt: sql`excluded."updated_at"`,
+          },
+        });
+    } catch {
+      noteDbFailure();
+      return c.json({ error: 'account storage unavailable' }, 503);
+    }
+  }
+  return c.json({ success: true, applied: deltas.length, serverNow: now });
+});
+
+// POST /api/v1/sync/unlocks/pull — full unlock list for login/new device.
+syncRouter.post('/unlocks/pull', async (c) => {
+  if (!isDbAvailable()) return c.json({ error: 'sync database not configured' }, 503);
+  const body = await c.req.json().catch(() => null);
+  const authedSub = await authedSubject(c);
+  if (!getEnv().syncOpen && !authedSub) return c.json({ error: 'unauthorized: valid Bearer token required' }, 401);
+  let payload;
+  try {
+    payload = parseUnlockPull(body);
+  } catch {
+    return c.json({ error: 'invalid unlocks payload' }, 400);
+  }
+  const externalId = payload.user.externalId;
+  if (authedSub && authedSub !== externalId) {
+    return c.json({ error: 'forbidden: token identity does not match user.externalId' }, 403);
+  }
+  const user = await resolveLegacySyncUser(c, externalId);
+  if (user instanceof Response) return user;
+  try {
+    const rows = await db
+      .select()
+      .from(userAchievementUnlocks)
+      .where(eq(userAchievementUnlocks.userId, user.id));
+    return c.json({
+      success: true,
+      serverNow: Date.now(),
+      unlocks: rows.map((r) => ({
+        achievementId: r.achievementId,
+        level: Number(r.level),
+        firstSeenAt: Number(r.firstSeenAt),
+        catalogVersion: Number(r.catalogVersion),
+      })),
+    });
+  } catch {
+    noteDbFailure();
+    return c.json({ error: 'account storage unavailable' }, 503);
+  }
+});
+
+// GET /api/v1/sync/stats — row counts per user (debug/status UI).
+syncRouter.post('/stats', async (c) => {  if (!isDbAvailable()) return c.json({ error: 'sync database not configured' }, 503);
   const body = await c.req.json().catch(() => null);
   const externalId = typeof body?.user?.externalId === 'string' ? body.user.externalId : '';
   if (!externalId) return c.json({ error: 'user.externalId is required' }, 400);

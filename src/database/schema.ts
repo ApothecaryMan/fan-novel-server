@@ -293,6 +293,22 @@ export const commentModLog = pgTable('comment_mod_log', {
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
 });
 
+// 13b. Achievement unlock deltas (client-evaluated, cosmetic v1).
+// One row per (user, achievement). Push merges MIN(first_seen_at) and
+// MAX(level); the server never evaluates thresholds. Higher catalog_version
+// wins on mismatch. updated_at is LWW for GC/debugging only.
+export const userAchievementUnlocks = pgTable('user_achievement_unlocks', {
+  userId: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
+  achievementId: varchar('achievement_id', { length: 100 }).notNull(),
+  level: smallint('level').notNull(),
+  firstSeenAt: bigint('first_seen_at', { mode: 'number' }).notNull(),
+  catalogVersion: integer('catalog_version').notNull(),
+  updatedAt: bigint('updated_at', { mode: 'number' }).notNull(),
+}, (t) => ({
+  userAchievementUnlocksPk: uniqueIndex('user_achievement_unlocks_pkey').on(t.userId, t.achievementId),
+  userAchievementUnlocksLevelCheck: check('user_achievement_unlocks_level_check', sql`${t.level} >= 2 AND ${t.level} <= 6`),
+}));
+
 // 13. Global chapter-view dedup (powers public view counters).
 // One row per (novel, chapter, viewer). Counters live on chapters.views_count
 // and novels.views_count; this table only answers "did this viewer already

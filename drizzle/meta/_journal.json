@@ -134,6 +134,13 @@
       "when": 1791138798254,
       "tag": "0018_chapter_views",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1791486926195,
+      "tag": "0019_user_achievement_unlocks",
+      "breakpoints": true
     }
   ]
 }
