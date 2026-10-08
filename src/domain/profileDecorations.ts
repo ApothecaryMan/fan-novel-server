@@ -75,6 +75,19 @@ export const profileDecorationsSchema = z.object({
   nameEffect: nameEffectSchema.optional(),
   bannerGradient: bannerGradientSchema.optional(),
   avatarFrameKey: z.string().min(1).max(200).optional(),
+  /**
+   * Sheet-frame key: a `profile_frames/...` path into the R2 bucket. Shape only,
+   * like the avatar frame — the remote catalog grows without a server deploy,
+   * so an enum here would 400 every save carrying a new frame (the whole PATCH
+   * fails, not just the new field). The client validates and falls back.
+   */
+  profileFrameKey: z.string().min(1).max(200).optional(),
+  /**
+   * Profile-effect name from the remote catalog. Free-form string for the same
+   * reason: new effects must save without a server change. Length mirrors the
+   * client's own effect-name bound.
+   */
+  profileEffectName: z.string().min(1).max(100).optional(),
 }).strict();
 
 export type ProfileDecorations = z.infer<typeof profileDecorationsSchema>;
@@ -95,5 +108,5 @@ export function parseProfileDecorations(raw: unknown): ProfileDecorations | null
 
 /** True when the value carries nothing a renderer would draw. */
 export function isEmptyDecorations(value: ProfileDecorations | null): boolean {
-  return !value || (!value.nameEffect && !value.bannerGradient && !value.avatarFrameKey);
+  return !value || (!value.nameEffect && !value.bannerGradient && !value.avatarFrameKey && !value.profileFrameKey && !value.profileEffectName);
 }

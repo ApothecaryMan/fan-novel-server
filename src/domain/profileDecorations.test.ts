@@ -100,6 +100,27 @@ describe('parseProfileDecorations', () => {
     expect(parseProfileDecorations({ avatarFrameKey: '' })).toBeNull();
     expect(parseProfileDecorations({ avatarFrameKey: 'a'.repeat(201) })).toBeNull();
   });
+
+  // The sheet-frame key and effect name are validated by SHAPE, not against a
+  // fixed catalogue — the remote R2 catalog grows without a server deploy, so
+  // pinning the server to known values would 400 every save carrying a new
+  // decoration (the whole PATCH fails, not just the new field).
+  it('accepts profile frame keys and effect names, including future ones', () => {
+    expect(parseProfileDecorations({
+      profileFrameKey: 'profile_frames/999_new.png',
+      profileEffectName: 'Future Effect',
+    })).toEqual({
+      profileFrameKey: 'profile_frames/999_new.png',
+      profileEffectName: 'Future Effect',
+    });
+  });
+
+  it('rejects an empty or absurdly long frame key or effect name', () => {
+    expect(parseProfileDecorations({ profileFrameKey: '' })).toBeNull();
+    expect(parseProfileDecorations({ profileFrameKey: 'a'.repeat(201) })).toBeNull();
+    expect(parseProfileDecorations({ profileEffectName: '' })).toBeNull();
+    expect(parseProfileDecorations({ profileEffectName: 'a'.repeat(101) })).toBeNull();
+  });
 });
 
 describe('isEmptyDecorations', () => {
@@ -111,6 +132,8 @@ describe('isEmptyDecorations', () => {
   it('is false as soon as one decoration would render', () => {
     expect(isEmptyDecorations({ avatarFrameKey: 'fan_avatar/gold_avatar_frame_512.png' })).toBe(false);
     expect(isEmptyDecorations({ nameEffect: valid.nameEffect })).toBe(false);
+    expect(isEmptyDecorations({ profileFrameKey: 'profile_frames/999_new.png' })).toBe(false);
+    expect(isEmptyDecorations({ profileEffectName: 'Future Effect' })).toBe(false);
   });
 });
 
