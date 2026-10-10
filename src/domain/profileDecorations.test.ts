@@ -11,8 +11,23 @@ import {
 // below exists so that a value this build cannot draw degrades to "plain"
 // instead of reaching a renderer as something it will throw on.
 
+const nameStyleV2: NonNullable<ProfileDecorations['nameStyle']> = {
+  v: 2,
+  fillMode: 'linear',
+  c1: '#ff5e9c', c2: '#7b61ff', c3: '#27e1ff',
+  angle: 90, mid: 50, stripe: 10, gloss: 0,
+  sw: 0, sc: '#000000', sw2: 0, sc2: '#ffffff', bevel: 0,
+  glowR: 0, glowR2: 0, glowI: 80, glowC: '#ff2bd6', glowC2: '#7a2bff', split: 0,
+  exD: 0, exA: 45, exC1: '#4b2bb5', exC2: '#1a0f4d', exFade: 0,
+  shD: 0, shB: 8, shC: '#000000', shA: 90,
+  size: 56, weight: 900, spacing: 0,
+  skew: 0, rot: 0, tx: 0, ty: 0, sy: 100,
+  upper: false,
+  hue: 0, sat: 100, bri: 100,
+};
+
 const valid: ProfileDecorations = {
-  nameEffect: { kind: 'fire', color: '#FF7043', color2: '#FFD740' },
+  nameStyle: nameStyleV2,
   bannerGradient: { target: 'banner', color: '#FF7043', fade: 'soft', extent: 'mid', strength: 60 },
   avatarFrameKey: 'fan_avatar/gold_avatar_frame_512.png',
 };
@@ -23,7 +38,7 @@ describe('parseProfileDecorations', () => {
   });
 
   it('accepts any subset, because each decoration is independent', () => {
-    expect(parseProfileDecorations({ nameEffect: valid.nameEffect })).toEqual({ nameEffect: valid.nameEffect });
+    expect(parseProfileDecorations({ nameStyle: nameStyleV2 })).toEqual({ nameStyle: nameStyleV2 });
     expect(parseProfileDecorations({ avatarFrameKey: 'fan_avatar/fire_avatar_frame_full_quality.png' }))
       .toEqual({ avatarFrameKey: 'fan_avatar/fire_avatar_frame_full_quality.png' });
   });
@@ -33,11 +48,23 @@ describe('parseProfileDecorations', () => {
     expect(parseProfileDecorations(undefined)).toBeNull();
   });
 
-  // A kind this build does not know yet (written by a newer client) must read as
-  // nothing. Rendering the known parts would be a partial card, which is worse
-  // than none and is exactly the failure the client normalizer cannot see.
-  it('rejects an unknown name-effect kind rather than half-reading it', () => {
-    expect(parseProfileDecorations({ nameEffect: { ...valid.nameEffect, kind: 'hologram' } })).toBeNull();
+  // A fill mode or version this build does not know (written by a newer
+  // client) must read as nothing. Rendering the known parts would be a
+  // partial card, which is worse than none.
+  it('rejects an unknown name-style fill mode or version rather than half-reading it', () => {
+    expect(parseProfileDecorations({ nameStyle: { ...nameStyleV2, fillMode: 'hologram' } })).toBeNull();
+    expect(parseProfileDecorations({ nameStyle: { ...nameStyleV2, v: 3 } })).toBeNull();
+  });
+
+  it('rejects an out-of-range or non-finite name-style number', () => {
+    for (const bad of [-1, 111, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(parseProfileDecorations({ nameStyle: { ...nameStyleV2, size: bad } })).toBeNull();
+    }
+    expect(parseProfileDecorations({ nameStyle: { ...nameStyleV2, split: 11 } })).toBeNull();
+  });
+
+  it('rejects a name style missing a required field', () => {
+    expect(parseProfileDecorations({ nameStyle: { ...nameStyleV2, glowI: undefined } })).toBeNull();
   });
 
   it('rejects an unknown banner target, fade and extent', () => {
@@ -51,13 +78,13 @@ describe('parseProfileDecorations', () => {
   // client would reject could be stored and then render as nothing.
   it('rejects a colour outside the client hex domain', () => {
     for (const bad of ['red', '#12345', 'FF7043', '#GGGGGG', '#1234']) {
-      expect(parseProfileDecorations({ nameEffect: { ...valid.nameEffect!, color: bad } })).toBeNull();
+      expect(parseProfileDecorations({ nameStyle: { ...nameStyleV2, c1: bad } })).toBeNull();
     }
   });
 
   it('accepts the 3, 6 and 8 digit hex forms the client allows', () => {
     for (const hex of ['#f70', '#ff7043', '#ff7043cc']) {
-      expect(parseProfileDecorations({ nameEffect: { kind: 'solid', color: hex, color2: hex } })).not.toBeNull();
+      expect(parseProfileDecorations({ nameStyle: { ...nameStyleV2, c1: hex, c2: hex } })).not.toBeNull();
     }
   });
 
@@ -82,7 +109,7 @@ describe('parseProfileDecorations', () => {
   });
 
   it('rejects a non-object and a stray array', () => {
-    for (const bad of ['fire', 42, [valid], { nameEffect: 'fire' }]) {
+    for (const bad of ['fire', 42, [valid], { nameStyle: 'fire' }]) {
       expect(parseProfileDecorations(bad)).toBeNull();
     }
   });
@@ -131,16 +158,37 @@ describe('isEmptyDecorations', () => {
 
   it('is false as soon as one decoration would render', () => {
     expect(isEmptyDecorations({ avatarFrameKey: 'fan_avatar/gold_avatar_frame_512.png' })).toBe(false);
-    expect(isEmptyDecorations({ nameEffect: valid.nameEffect })).toBe(false);
+    expect(isEmptyDecorations({ nameStyle: nameStyleV2 })).toBe(false);
     expect(isEmptyDecorations({ profileFrameKey: 'profile_frames/999_new.png' })).toBe(false);
     expect(isEmptyDecorations({ profileEffectName: 'Future Effect' })).toBe(false);
   });
 });
 
 describe('profileDecorationsSchema', () => {
-  it('is strict: an extra key inside a sub-object is rejected too', () => {
+  it('is strict: an extra key inside a legacy-style sub-object is rejected', () => {
     expect(profileDecorationsSchema.safeParse({
-      nameEffect: { ...valid.nameEffect, glow: true },
+      bannerGradient: { target: 'banner', color: '#FF7043', fade: 'soft', extent: 'mid', strength: 60, glow: true },
     }).success).toBe(false);
+  });
+
+  // The inner nameStyle object is deliberately LENIENT: a future client field
+  // must survive an old server instead of 400ing the whole save. Unknown keys
+  // ride along untouched so nothing is lost on the round trip.
+  it('preserves an unknown future nameStyle key instead of rejecting the save', () => {
+    const out = parseProfileDecorations({ nameStyle: { ...nameStyleV2, glowX: 1 } });
+    expect(out).not.toBeNull();
+    expect((out?.nameStyle as Record<string, unknown>).glowX).toBe(1);
+  });
+
+  it('accepts an optional font family within its length bound', () => {
+    expect(parseProfileDecorations({ nameStyle: { ...nameStyleV2, fontFamily: 'Thmanyah' } })).not.toBeNull();
+    expect(parseProfileDecorations({ nameStyle: { ...nameStyleV2, fontFamily: '' } })).toBeNull();
+    expect(parseProfileDecorations({ nameStyle: { ...nameStyleV2, fontFamily: 'a'.repeat(101) } })).toBeNull();
+  });
+
+  it('rejects an absurdly large name style even when every field is valid', () => {
+    expect(parseProfileDecorations({
+      nameStyle: { ...nameStyleV2, futureBlob: 'a'.repeat(5000) },
+    })).toBeNull();
   });
 });

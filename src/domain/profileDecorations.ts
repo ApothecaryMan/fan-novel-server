@@ -7,16 +7,13 @@
  *
  * The shapes here MIRROR the app's models exactly and deliberately do NOT drift:
  *
- *   Fan Novel/src/features/profile/nameEffect.ts   NameEffect
+ *   Fan Novel/src/features/profile/nameStyle.ts   NameStyleConfig (v: 2 only)
  *   Fan Novel/src/features/profile/bannerGradient.ts BannerGradient
  *   Fan Novel/src/features/decorations/fanAvatarFrames.ts  frame keys
  *
- * The client already normalizes a stored value with `normalizeNameEffect` /
- * `normalizeBannerGradient` before rendering, so an older build that meets a kind
- * or key it does not know renders plain rather than throwing. That is the
- * forward-compatibility guarantee: the SERVER may learn a new kind before a
- * client can draw it, and the only cost is that it renders plain until the
- * client updates.
+ * There is no v1 path: the app is still in development, no legacy row exists,
+ * and the client normalizes with `normalizeNameStyle` before rendering, so a
+ * value this build cannot draw renders plain rather than throwing.
  *
  * ONE jsonb column, not three columns. A single atomic value makes a
  * half-updated card impossible, and a decoration added next year needs no
@@ -27,11 +24,8 @@
 
 import { z } from 'zod';
 
-export const NAME_EFFECT_KINDS = [
-  'plain', 'solid', 'gradient', 'glitter', 'outline',
-  'rainbow', 'neon', 'fire', 'gold', 'ice', 'sunset', 'matrix', 'retro', 'sparkle',
-] as const;
-export type NameEffectKind = (typeof NAME_EFFECT_KINDS)[number];
+export const NAME_STYLE_FILL_MODES = ['solid', 'linear', 'stripes', 'metal', 'rainbow'] as const;
+export type NameStyleFillMode = (typeof NAME_STYLE_FILL_MODES)[number];
 
 export const BANNER_TARGETS = ['banner', 'below'] as const;
 export type BannerTarget = (typeof BANNER_TARGETS)[number];
@@ -56,11 +50,35 @@ const hex = z.string().regex(/^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})
  * client validates with `isFanAvatarFrameKey` and falls back to no frame, which
  * is the same trust-nothing read the other two fields get.
  */
-export const nameEffectSchema = z.object({
-  kind: z.enum(NAME_EFFECT_KINDS),
-  color: hex,
-  color2: hex,
-}).strict();
+/** Bounded number mirroring the client's editor ranges exactly. */
+const num = (min: number, max: number) => z.number().finite().min(min).max(max);
+
+/**
+ * The v2 studio style. Bounds mirror the client's NUM_RANGES one-for-one; a
+ * value the picker cannot produce is a tampered payload and fails the save.
+ *
+ * Deliberately NOT strict: unknown keys ride along untouched (capped by total
+ * size below) so a future client field survives an old server instead of
+ * 400ing the whole save. The top-level object stays strict — only this inner
+ * shape is lenient, and only because styles grow field-by-field.
+ */
+export const nameStyleSchema = z.object({
+  v: z.literal(2),
+  fillMode: z.enum(NAME_STYLE_FILL_MODES),
+  c1: hex, c2: hex, c3: hex,
+  angle: num(0, 360), mid: num(5, 95), stripe: num(3, 40), gloss: num(0, 100),
+  sw: num(0, 14), sc: hex, sw2: num(0, 14), sc2: hex, bevel: num(0, 6),
+  glowR: num(0, 30), glowR2: num(0, 80), glowI: num(0, 100), glowC: hex, glowC2: hex, split: num(0, 10),
+  exD: num(0, 40), exA: num(0, 360), exC1: hex, exC2: hex, exFade: num(0, 100),
+  shD: num(0, 40), shB: num(0, 30), shC: hex, shA: num(0, 360),
+  fontFamily: z.string().min(1).max(100).optional(),
+  size: num(20, 110), weight: num(100, 900), spacing: num(-4, 30),
+  skew: num(-30, 30), rot: num(-30, 30), tx: num(-60, 60), ty: num(-60, 60), sy: num(50, 150),
+  upper: z.boolean(),
+  hue: num(0, 360), sat: num(0, 250), bri: num(40, 180),
+}).passthrough().refine((v) => JSON.stringify(v).length <= 4096, {
+  message: 'nameStyle too large',
+});
 
 export const bannerGradientSchema = z.object({
   target: z.enum(BANNER_TARGETS),
@@ -72,7 +90,7 @@ export const bannerGradientSchema = z.object({
 }).strict();
 
 export const profileDecorationsSchema = z.object({
-  nameEffect: nameEffectSchema.optional(),
+  nameStyle: nameStyleSchema.optional(),
   bannerGradient: bannerGradientSchema.optional(),
   avatarFrameKey: z.string().min(1).max(200).optional(),
   /**
@@ -108,5 +126,5 @@ export function parseProfileDecorations(raw: unknown): ProfileDecorations | null
 
 /** True when the value carries nothing a renderer would draw. */
 export function isEmptyDecorations(value: ProfileDecorations | null): boolean {
-  return !value || (!value.nameEffect && !value.bannerGradient && !value.avatarFrameKey && !value.profileFrameKey && !value.profileEffectName);
+  return !value || (!value.nameStyle && !value.bannerGradient && !value.avatarFrameKey && !value.profileFrameKey && !value.profileEffectName);
 }
