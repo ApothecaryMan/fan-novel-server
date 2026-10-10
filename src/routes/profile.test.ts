@@ -28,6 +28,22 @@ const fake = () => holder.fake!;
 const claims = (sub: string, email: string) => ({ sub, email, aud: 'web-client',
   iss: 'accounts.google.com', email_verified: true, exp: Math.floor(Date.now() / 1000) + 600 });
 
+// Complete v2 studio style, mirroring the client's DEFAULT_NAME_STYLE.
+const nameStyleV2 = {
+  v: 2,
+  fillMode: 'linear',
+  c1: '#ff5e9c', c2: '#7b61ff', c3: '#27e1ff',
+  angle: 90, mid: 50, stripe: 10, gloss: 0,
+  sw: 0, sc: '#000000', sw2: 0, sc2: '#ffffff', bevel: 0,
+  glowR: 0, glowR2: 0, glowI: 80, glowC: '#ff2bd6', glowC2: '#7a2bff', split: 0,
+  exD: 0, exA: 45, exC1: '#4b2bb5', exC2: '#1a0f4d', exFade: 0,
+  shD: 0, shB: 8, shC: '#000000', shA: 90,
+  size: 56, weight: 900, spacing: 0,
+  skew: 0, rot: 0, tx: 0, ty: 0, sy: 100,
+  upper: false,
+  hue: 0, sat: 100, bri: 100,
+};
+
 async function loginAs(sub: string, email: string) {
   vi.stubGlobal('fetch', vi.fn(async () => Response.json(claims(sub, email))));
   return app.request('/auth/google', { method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -215,7 +231,7 @@ describe('GET /users/me/profile', () => {
     const me = fake().rows.find((r) => r.email === 'deco1@test.com');
     if (!me) throw new Error('test setup: login did not persist a user row');
     const stored = {
-      nameEffect: { kind: 'fire', color: '#FF7043', color2: '#FFD740' },
+      nameStyle: nameStyleV2,
       bannerGradient: { target: 'banner', color: '#FF7043', fade: 'soft', extent: 'mid', strength: 60 },
       avatarFrameKey: 'fan_avatar/gold_avatar_frame_512.png',
     };
@@ -233,9 +249,9 @@ describe('GET /users/me/profile', () => {
     const { token }: any = await (await loginAs('deco-2', 'deco2@test.com')).json();
     const me = fake().rows.find((r) => r.email === 'deco2@test.com');
     if (!me) throw new Error('test setup: login did not persist a user row');
-    // A kind from a newer client, hand-written straight past the write gate.
+    // A version from a newer client, hand-written straight past the write gate.
     await fake().db.update(users)
-      .set({ profileDecorations: { nameEffect: { kind: 'hologram', color: '#fff', color2: '#000' } } as any })
+      .set({ profileDecorations: { nameStyle: { ...nameStyleV2, v: 3 } } as any })
       .where(eq(users.id, me.id));
     const body: any = await (await app.request('/users/me/profile', {
       headers: { Authorization: `Bearer ${token}` },
@@ -331,7 +347,7 @@ describe('GET /users/:id/profile (public)', () => {
   it('carries the owner decorations onto the public author card', async () => {
     await seedAuthorA();
     const stored = {
-      nameEffect: { kind: 'gold', color: '#FFD740', color2: '#FF7043' },
+      nameStyle: nameStyleV2,
       bannerGradient: { target: 'below', color: '#4CAF50', fade: 'sharp', extent: 'low', strength: 40 },
       avatarFrameKey: 'fan_avatar/white_rabbit_ears.png',
     };

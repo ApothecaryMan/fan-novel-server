@@ -345,7 +345,20 @@ describe.skipIf(!url)('Profile aggregates (isolated PostgreSQL)', () => {
   it('reads the decorations column off the real users row', async () => {
     const { row, token } = await createUser('pro');
     const stored: ProfileDecorations = {
-      nameEffect: { kind: 'fire', color: '#FF7043', color2: '#FFD740' },
+      nameStyle: {
+        v: 2,
+        fillMode: 'linear',
+        c1: '#ff5e9c', c2: '#7b61ff', c3: '#27e1ff',
+        angle: 90, mid: 50, stripe: 10, gloss: 0,
+        sw: 0, sc: '#000000', sw2: 0, sc2: '#ffffff', bevel: 0,
+        glowR: 0, glowR2: 0, glowI: 80, glowC: '#ff2bd6', glowC2: '#7a2bff', split: 0,
+        exD: 0, exA: 45, exC1: '#4b2bb5', exC2: '#1a0f4d', exFade: 0,
+        shD: 0, shB: 8, shC: '#000000', shA: 90,
+        size: 56, weight: 900, spacing: 0,
+        skew: 0, rot: 0, tx: 0, ty: 0, sy: 100,
+        upper: false,
+        hue: 0, sat: 100, bri: 100,
+      },
       bannerGradient: { target: 'below', color: '#4CAF50', fade: 'soft', extent: 'mid', strength: 60 },
       avatarFrameKey: 'fan_avatar/gold_avatar_frame_512.png',
     };
@@ -367,7 +380,7 @@ describe.skipIf(!url)('Profile aggregates (isolated PostgreSQL)', () => {
     // Written past the zod gate, exactly what a newer client or a hand edit does.
     await database.execute(sql`
       UPDATE "users" SET "profile_decorations" = ${JSON.stringify({
-        nameEffect: { kind: 'hologram', color: '#fff', color2: '#000' },
+        nameStyle: { v: 3 },
       })}::jsonb WHERE "id" = ${row.id}::uuid
     `);
     const body = await pub(row.id);
