@@ -173,7 +173,7 @@ authRouter.get('/username/availability', requireAuth, async (c) => {
 });
 // PATCH /api/v1/auth/me — explicit profile edit (display name, handle,
 // bio/status, avatar, banner). Unlike POST /google (fill-or-heal), this overwrites:
-// media URLs must be remote http(s) or server /uploads/covers/* — device file URIs are rejected.
+// media URLs must be remote http(s) or server /uploads/covers|avatars|banners/* — device file URIs are rejected.
 const profilePatchSchema = z.object({
   name: z.string().min(1).max(100).optional(),
   username: z.string().regex(USERNAME_RE, 'اسم المستخدم: 3-20 حرف (أحرف وأرقام و_)').optional(),
@@ -203,7 +203,7 @@ authRouter.patch('/me', requireAuth, async (c) => {
   }
   for (const [label, url] of [['avatarUrl', avatarUrl], ['bannerUrl', bannerUrl]] as const) {
     if (url !== undefined && url !== null && !cleanMediaUrl(url)) {
-      return c.json({ error: `${label} يجب أن يكون رابط صورة http(s) أو /uploads/covers/` }, 400);
+      return c.json({ error: `${label} يجب أن يكون رابط صورة http(s) أو /uploads/covers|avatars|banners/` }, 400);
     }
   }
   if (bioInput !== undefined && bioInput !== null && cleanBio(bioInput) === undefined) {
