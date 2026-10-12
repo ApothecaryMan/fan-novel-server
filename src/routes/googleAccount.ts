@@ -26,6 +26,27 @@ export function cleanMediaUrl(url?: string | null): string | undefined {
   return undefined;
 }
 
+const GOOGLE_PHOTO_HOST_RE = /(^|\.)googleusercontent\.com$/i;
+
+export function isGoogleHostedPhoto(url?: string | null): boolean {
+  if (typeof url !== 'string') return false;
+  const value = url.trim();
+  if (!/^https?:\/\//i.test(value)) return false;
+  try {
+    return GOOGLE_PHOTO_HOST_RE.test(new URL(value).hostname);
+  } catch {
+    return false;
+  }
+}
+
+export function decideAvatarHeal(stored?: string | null, fresh?: string | null): string | undefined {
+  const current = cleanMediaUrl(stored);
+  const next = cleanMediaUrl(fresh);
+  if (!current && next) return next;
+  if (current && next && current !== next && isGoogleHostedPhoto(current)) return next;
+  return undefined;
+}
+
 export function cleanBio(value?: string | null): string | null | undefined {
   if (value === undefined) return undefined;
   if (value === null) return null;
@@ -107,7 +128,8 @@ export async function resolveGoogleAccount(database: Db, identity: VerifiedGoogl
   const patch: Partial<typeof users.$inferInsert> = {};
   if (row.email !== identity.email) patch.email = identity.email;
   if (bootstrapAdmin && row.role !== 'admin') patch.role = 'admin';
-  if (!cleanMediaUrl(row.avatarUrl) && cleanMediaUrl(input.avatarUrl)) patch.avatarUrl = cleanMediaUrl(input.avatarUrl);
+  const healedAvatar = decideAvatarHeal(row.avatarUrl, input.avatarUrl);
+  if (healedAvatar) patch.avatarUrl = healedAvatar;
   if (!cleanMediaUrl(row.bannerUrl) && cleanMediaUrl(input.bannerUrl)) patch.bannerUrl = cleanMediaUrl(input.bannerUrl);
   if (Object.keys(patch).length === 0) return row;
   try {
