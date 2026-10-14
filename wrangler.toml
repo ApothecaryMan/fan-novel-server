@@ -25,9 +25,9 @@ ADMIN_EMAILS = "mohamedrezk.mar@gmail.com"
 APP_LATEST_VERSION = "0.4.2"
 APP_MIN_VERSION = ""
 APP_UPDATE_URL = "https://fan-novel-server.mohamed1232003.workers.dev/api/v1/app/download"
-APP_UPDATE_NOTES = "جرس إشعارات لكل رواية مع اشتراك وتنبيهات فصول قابلة للتحكم|إعداد تحديث أسبوعي تلقائي مع أولوية للروايات الجارية|أطلس تفاعلي ومخطط قوة في ورقة تفاصيل الرواية مع توسعة اللور|حفظ أغلفة الروايات للعمل دون إنترنت في كل الشاشات|تهيئة مخزن الإحصائيات عند الإقلاع بعد جاهزية قاعدة البيانات"
+APP_UPDATE_NOTES = "جرس إشعارات لكل رواية مع اشتراك وتنبيهات فصول قابلة للتحكم|إعداد تحديث أسبوعي تلقائي مع أولوية للروايات الجارية|أطلس تفاعلي ومخطط قوة في ورقة تفاصيل الرواية مع توسعة اللور|حفظ أغلفة الروايات للعمل دون إنترنت في كل الشاشات|تهيئة مخزن الإحصائيات عند الإقلاع بعد جاهزية قاعدة البيانات|وحدة موحدة لوسائط البروفايل تحفظ الصورة والبانر عبر كل الشاشات|ورقة هوية النشر في تعليقات truthnovel مع تحسين التعامل مع الكيبورد"
 APP_UPDATE_FORCE = "false"
-APP_APK_SHA256 = "8a491bd7a63d1b262b3958ddb62624921d6932790d2227275e1a8f7ebe2db64e"
+APP_APK_SHA256 = "59700f6765d298f089999dd5ebb7050e9a9038a1d57409251af297303f99389e"
 
 # Required secrets (wrangler secret put):
 #   DATABASE_URL  — Neon pooled connection string (https, no Hyperdrive needed; neon-http driver)
