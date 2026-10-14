@@ -6,56 +6,37 @@ import { getEnv, getWorkerBinding, isWorkersRuntime } from '../config/env.js';
 
 export const uploadRouter = new Hono();
 
-const ALLOWED = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif']);
-const ALLOWED_EXT: Record<string, string> = {
+const MIME_EXT: Record<string, string> = {
   'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp', 'image/gif': '.gif',
 };
+const KIND_FOLDER: Record<string, string> = { cover: 'covers', avatar: 'avatars', banner: 'banners' };
 
-// Upload kind -> R2 prefix. Keeps covers, avatars and banners in separate
-// folders inside the same bucket.
-const UPLOAD_FOLDERS: Record<string, string> = {
-  cover: 'covers',
-  avatar: 'avatars',
-  banner: 'banners',
-};
-
-interface R2BucketLike {
+interface BucketLike {
   put: (key: string, body: ArrayBuffer | Uint8Array, opts?: { httpMetadata?: { contentType?: string } }) => Promise<unknown>;
-  get: (key: string) => Promise<{ body: ReadableStream; httpMetadata?: { contentType?: string } } | null>;
 }
 
-function mediaBucket(): R2BucketLike | null {
-  return getWorkerBinding<R2BucketLike>('COVERS');
-}
-
-async function uploadToBinding(buffer: Buffer, folder: string, filename: string, mime: string): Promise<string | null> {
-  const bucket = mediaBucket();
+async function putBinding(buffer: Buffer, key: string, mime: string): Promise<string | null> {
+  const bucket = getWorkerBinding<BucketLike>('COVERS');
   if (!bucket) return null;
-  await bucket.put(`${folder}/${filename}`, buffer, { httpMetadata: { contentType: mime } });
-  // Served back through this same Worker (no public bucket needed).
-  return `/uploads/${folder}/${filename}`;
+  await bucket.put(key, buffer, { httpMetadata: { contentType: mime } });
+  return `/uploads/${key}`;
 }
 
-async function uploadToR2(buffer: Buffer, folder: string, filename: string, mime: string): Promise<string | null> {
+async function putR2(buffer: Buffer, key: string, mime: string): Promise<string | null> {
   const env = getEnv();
   if (!env.R2_ENDPOINT || !env.R2_BUCKET || !env.R2_ACCESS_KEY || !env.R2_SECRET_KEY) return null;
   try {
     const { S3Client, PutObjectCommand } = await import('@aws-sdk/client-s3');
-    const client = new S3Client({
-      region: 'auto',
-      endpoint: env.R2_ENDPOINT,
-      credentials: { accessKeyId: env.R2_ACCESS_KEY, secretAccessKey: env.R2_SECRET_KEY },
-    });
-    await client.send(new PutObjectCommand({ Bucket: env.R2_BUCKET, Key: `${folder}/${filename}`, Body: buffer, ContentType: mime }));
-    const base = (env.R2_PUBLIC_URL ?? env.R2_ENDPOINT).replace(/\/$/, '');
-    return `${base}/${folder}/${filename}`;
+    const client = new S3Client({ region: 'auto', endpoint: env.R2_ENDPOINT,
+      credentials: { accessKeyId: env.R2_ACCESS_KEY, secretAccessKey: env.R2_SECRET_KEY } });
+    await client.send(new PutObjectCommand({ Bucket: env.R2_BUCKET, Key: key, Body: buffer, ContentType: mime }));
+    return `${(env.R2_PUBLIC_URL ?? env.R2_ENDPOINT).replace(/\/$/, '')}/${key}`;
   } catch (err) {
     console.error('[upload] R2 failed, local fallback', err);
     return null;
   }
 }
 
-// POST /api/v1/upload/image (form field: kind=cover|avatar|banner; auth required when SYNC_OPEN=false, open LAN otherwise)
 uploadRouter.post('/image', async (c, next) => {
   if (!getEnv().syncOpen) return requireAuthOrPat(c, next);
   await next();
@@ -64,29 +45,21 @@ uploadRouter.post('/image', async (c, next) => {
     const body = await c.req.parseBody();
     const file = body['file'];
     if (!file || !(file instanceof File)) return c.json({ success: false, error: 'لم يتم إرسال ملف صورة صالح' }, 400);
-    if (!ALLOWED.has(file.type)) return c.json({ success: false, error: 'نوع الصورة غير مدعوم (jpeg/png/webp/gif فقط)' }, 400);
-
-    const kind = typeof body['kind'] === 'string' ? body['kind'] : 'cover';
-    const folder = UPLOAD_FOLDERS[kind] ?? 'covers';
-
-    const maxBytes = getEnv().UPLOAD_MAX_MB * 1024 * 1024;
+    if (!MIME_EXT[file.type]) return c.json({ success: false, error: 'نوع الصورة غير مدعوم (jpeg/png/webp/gif فقط)' }, 400);
+    const folder = KIND_FOLDER[typeof body['kind'] === 'string' ? body['kind'] : 'cover'] ?? 'covers';
     const buffer = Buffer.from(await file.arrayBuffer());
-    if (buffer.length > maxBytes) return c.json({ success: false, error: `حجم الصورة يتجاوز ${getEnv().UPLOAD_MAX_MB}MB` }, 413);
-
-    const filename = `${Date.now()}_${crypto.randomBytes(6).toString('hex')}${ALLOWED_EXT[file.type] ?? '.png'}`;
-
-    // 1. Workers R2 binding (private bucket, served via GET below).
-    const bound = await uploadToBinding(buffer, folder, filename, file.type).catch((err) => {
+    if (buffer.length > getEnv().UPLOAD_MAX_MB * 1024 * 1024) {
+      return c.json({ success: false, error: `حجم الصورة يتجاوز ${getEnv().UPLOAD_MAX_MB}MB` }, 413);
+    }
+    const filename = `${Date.now()}_${crypto.randomBytes(6).toString('hex')}${MIME_EXT[file.type]}`;
+    const key = `${folder}/${filename}`;
+    const bound = await putBinding(buffer, key, file.type).catch((err) => {
       console.error('[upload] binding failed', err);
       return null;
     });
     if (bound) return c.json({ success: true, message: 'تم رفع الصورة بنجاح', url: bound, filename });
-
-    // 2. S3-compatible endpoint (R2 API token / any S3).
-    const remote = await uploadToR2(buffer, folder, filename, file.type);
+    const remote = await putR2(buffer, key, file.type);
     if (remote) return c.json({ success: true, message: 'تم رفع الصورة بنجاح', url: remote, filename });
-
-    // 3. Local disk (Node only).
     if (isWorkersRuntime()) {
       return c.json({ success: false, error: 'image storage unavailable (database unreachable)' }, 503);
     }
@@ -94,7 +67,7 @@ uploadRouter.post('/image', async (c, next) => {
     const dir = path.resolve(process.cwd(), 'uploads', folder);
     await fs.mkdir(dir, { recursive: true });
     await fs.writeFile(path.join(dir, filename), buffer);
-    return c.json({ success: true, message: 'تم رفع الصورة بنجاح', url: `/uploads/${folder}/${filename}`, filename });
+    return c.json({ success: true, message: 'تم رفع الصورة بنجاح', url: `/uploads/${key}`, filename });
   } catch (error: any) {
     console.error('Upload Error:', error);
     return c.json({ success: false, error: error.message || 'فشل في رفع الصورة' }, 500);
