@@ -22,12 +22,12 @@ ADMIN_EMAILS = "mohamedrezk.mar@gmail.com"
 # In-app update prompt (GET /api/v1/app/version). Edit these + `wrangler deploy`
 # to announce a new APK. An empty APP_LATEST_VERSION disables the prompt.
 # APP_UPDATE_NOTES is a "|"-separated list of short lines.
-APP_LATEST_VERSION = "0.3.1"
+APP_LATEST_VERSION = "0.4.2"
 APP_MIN_VERSION = ""
 APP_UPDATE_URL = "https://fan-novel-server.mohamed1232003.workers.dev/api/v1/app/download"
-APP_UPDATE_NOTES = "نمط تقليب الصفحات الجديد للقارئ بمحرك Skia مع زر نهاية الفصل ومؤشر النقاط|ورقة «ما الجديد» بحلة جديدة مع شارات وخلفية أشكال متحركة|زر استكشاف الإضافات في الحالات الفارغة للرئيسية والمكتبة|احتفال الترقية بشكل Material متحرك في الإحصائيات|التحقق من بصمة sha256 لملف APK ومعالجة رفض إذن التثبيت|إصلاح الشاشة الرمادية في الإحصائيات والإنجازات على أندرويد|زر الرجوع يعيدك إلى تبويب الرئيسية ويغلق فئة الأذكار قبل الخروج|قوائم إحصائيات افتراضية مع لقطة محفوظة تظهر فورًا ثم تتحدث|إزالة مبدل عنوان رأس الإحصائيات وتحسين أداء الأشكال"
+APP_UPDATE_NOTES = "جرس إشعارات لكل رواية مع اشتراك وتنبيهات فصول قابلة للتحكم|إعداد تحديث أسبوعي تلقائي مع أولوية للروايات الجارية|أطلس تفاعلي ومخطط قوة في ورقة تفاصيل الرواية مع توسعة اللور|حفظ أغلفة الروايات للعمل دون إنترنت في كل الشاشات|تهيئة مخزن الإحصائيات عند الإقلاع بعد جاهزية قاعدة البيانات|تثبيت أنظف مع تحقق إلزامي من بصمة ملف APK|إصلاح فهرس اللقطة في المتاجر الجديدة بعد تخطي متعقب|عرض أسرع لتفاصيل الرواية مع قراءة متزامنة للجرس|إبقاء قائمة الفصول عبر التحديثات وعرض الأغلفة عبر expo-image"
 APP_UPDATE_FORCE = "false"
-APP_APK_SHA256 = "d989fd4b95ea57482bd94cdd3409ad2cb85242436198b003fb01592062ad316f"
+APP_APK_SHA256 = "8a491bd7a63d1b262b3958ddb62624921d6932790d2227275e1a8f7ebe2db64e"
 
 # Required secrets (wrangler secret put):
 #   DATABASE_URL  — Neon pooled connection string (https, no Hyperdrive needed; neon-http driver)
