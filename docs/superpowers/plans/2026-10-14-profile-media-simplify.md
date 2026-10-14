@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- New app file `src/features/profile/profileMedia.ts` <= 100 lines total.
+- New app file `src/features/profile/profileMedia.ts` ~100 lines (goal, not cap — up to ~120 clear lines; simplicity over count).
 - Online-only: no session -> return null + toast, no refresh dance, no offline queue, no Google-photo heal.
 - Store holds absolute `http(s)` URLs only; never persist `file://` or bare `/uploads/...`.
 - Avatars render direct, never proxied; banners use `toProxyDisplayUrl(url) ?? url`, GIFs always direct.
@@ -56,10 +56,13 @@ Expected: FAIL (heal helpers still exported / referenced).
 
 Login creates `avatarUrl/bannerUrl` from input once; later logins patch email/role only.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [ ] **Step 4: Run tests to verify they pass (gate: old clients unaffected)**
 
-Run: `npm test -- src/routes/googleAccount.unit.test.ts`
-Expected: PASS. Also run `npm run typecheck`, expected clean.
+Run: `npm test -- src/routes/googleAccount.unit.test.ts src/routes/auth.identity.test.ts`
+Expected: PASS. Also run `npm run typecheck`, expected clean. The login
+request/response contract is unchanged — heal removal only drops an optional
+extra avatar patch, so old app versions keep logging in and showing the stored
+photo.
 
 - [ ] **Step 5: Commit**
 
@@ -121,7 +124,7 @@ expect(toAbsoluteMediaUrl('', 'http://x')).toBeUndefined();
 Run: `npm test -- src/features/profile/profileMedia.test.ts` (in `Fan Novel/`)
 Expected: FAIL with "module not defined".
 
-- [ ] **Step 3: Implement `profileMedia.ts` (<=100 lines): kind map (avatar `[1,1]`/`avatars`, banner `[14,5]`/`banners`), 7-entry mime map, `toAbsoluteMediaUrl`, `saveProfileMedia` (session guard, picker, `FileSystem.uploadAsync` multipart, resolve, `PATCH`, store set, return remote; nothing painted before remote), `clearProfileMedia` (explicit `avatarUrl: undefined` / `bannerUrl: undefined` then `PATCH {kind: null}`)**
+- [ ] **Step 3: Implement `profileMedia.ts`: kind map (avatar `[1,1]`/`avatars`, banner `[14,5]`/`banners`), 7-entry mime map, `toAbsoluteMediaUrl` (`file://`/empty -> `undefined`), `saveProfileMedia` (session guard, picker, `FileSystem.uploadAsync` multipart `fieldName=file` + `parameters:{kind}`, resolve, `PATCH`, store set only on success, return remote; nothing painted before remote), `clearProfileMedia` (`PATCH /me` FIRST with `{ avatarUrl: null }` / `{ bannerUrl: null }`, then `updateProfile({ avatarUrl: undefined })` / `updateProfile({ bannerUrl: undefined })` only on success; PATCH failure leaves the old store value untouched)**
 
 - [ ] **Step 3b: Pin failure semantics with store/API mocks**
 

@@ -21,8 +21,9 @@ string. That string is persisted via `PATCH /api/v1/auth/me` into
 
 ## 2. Goal / non-goals
 
-Goal: one obvious app file `src/features/profile/profileMedia.ts` (<=100 lines
-total, pick + upload + save + clear + URL resolve) and a slimmed server
+Goal: one obvious app file `src/features/profile/profileMedia.ts` (~100 lines;
+simplicity over count — up to ~120 clear lines beats forced compression) for
+pick + upload + save + clear + URL resolve, and a slimmed server
 (`routes/upload.ts` ~60 lines, `routes/googleAccount.ts` keeps only
 `cleanMediaUrl`/`cleanBio`). After change: user picks banner/avatar once, it is
 uploaded to R2 through the server, saved on the profile row, and every surface
@@ -50,9 +51,13 @@ New `src/features/profile/profileMedia.ts` exports:
 `/uploads/avatars|banners/...` joined to `API_BASE_URL`), `PATCH /me`
 with that URL, `updateProfile()` with the confirmed remote URL, return it.
 No local `file://` is written to the store; UI shows spinner until remote
-returns. `clearProfileMedia`: `updateProfile({ avatarUrl: undefined })` for avatar
-or `updateProfile({ bannerUrl: undefined })` for banner, then
-`PATCH /me {kind: null}`. Mime map (jpg/jpeg/png/webp/gif) and resolver fold
+returns. `clearProfileMedia`: `PATCH /me` FIRST with the explicit field body
+(`{ avatarUrl: null }` for avatar, `{ bannerUrl: null }` for banner — the
+server accepts field names, not `kind`), and only on success
+`updateProfile({ avatarUrl: undefined })` / `updateProfile({ bannerUrl:
+undefined })`. Server authority: the store is never cleared before the server
+confirms, so a failed PATCH leaves the old value in place with nothing to
+revert. Mime map (jpg/jpeg/png/webp/gif) and resolver fold
 in from deleted `uploadMime`/`uploadResponse` (same regexes, no behavior change).
 Delete: `store/googleProfileMerge.ts`+test, `store/validatedMedia.ts`+test,
 `features/settings/profileMediaSync.ts`+test, `lib/uploadMime.ts`+test,
@@ -89,10 +94,10 @@ carry the same strings; no per-surface merge.
 
 No session -> toast `needsSessionCheck`, return null. Upload non-2xx,
 non-JSON, missing URL, or non-http(s) URL -> throw, caller toasts
-`bannerSyncFailed`/`avatarSyncFailed`, store untouched (nothing to revert
-because nothing was painted). PATCH rejection -> same toast path, store
-untouched. Remove PATCH failure -> error toast, store keeps old value and next
-open re-reads server via `refreshServerProfile`. Server keeps 400 (bad
+`bannerSyncFailed`/`avatarSyncFailed`, store untouched (nothing was painted
+before the remote returned). Remove: `PATCH` runs first, so a rejection means
+the store still holds the old value — toast the error and leave it; the next
+open re-reads the server via `refreshServerProfile`. Server keeps 400 (bad
 mime/kind), 413 (over cap), 401 (no auth), 503 (no storage on Workers).
 
 ## 8. Display contract
@@ -100,9 +105,11 @@ mime/kind), 413 (over cap), 401 (no auth), 503 (no storage on Workers).
 Store holds absolute http(s) only. Avatar renders direct (never proxied).
 Banner renders `toProxyDisplayUrl(url) ?? url`, GIFs always direct, proxy
 `onError` falls back to direct once (existing `ProfileViewerSheet` logic,
-unchanged). Missing URL renders placeholder/letter. Relative strings from old
-rows resolve via `toAbsoluteMediaUrl` at accept time, so no screen ever
-receives `file://` or bare `/uploads/...`.
+unchanged). Missing URL renders placeholder/letter. Legacy rows holding
+`file://` (written by the old optimistic code) resolve to `undefined` in
+`toAbsoluteMediaUrl` and render the same placeholder/letter — never a broken
+image. Relative strings from old rows resolve via `toAbsoluteMediaUrl` at
+accept time, so no screen ever receives `file://` or bare `/uploads/...`.
 
 ## 9. Testing
 
@@ -118,4 +125,10 @@ its comments; remove both, confirm placeholder on both devices.
 Dropping heal means a stale Google photo stays until user picks once (accepted
 in review). Dropping offline queue means airplane-mode picks fail fast instead
 of retrying (accepted). Deleting tests for removed modules is intentional;
-equivalent coverage moves to the new test file.
+equivalent coverage moves to the new test file. Replaced/removed images leave
+their old R2 objects orphaned (no delete on replace/clear) — accepted for now;
+revisit with a cleanup pass if bucket storage grows. Removing heal does not
+break old app versions: the login request/response contract is unchanged, heal
+only ever issued an optional extra avatar patch, and old clients keep their
+local merge — worst case they keep showing the stored photo until the user
+picks once.
