@@ -7,9 +7,8 @@ Approved direction: Approach A — one app file + slim server, online-only, bloc
 
 Avatar/banner flow is scattered: app holds `store/googleProfileMerge.ts` (167),
 `store/validatedMedia.ts` (35), `features/settings/profileMediaSync.ts` (61),
-`services/uploadResponse.ts` (14), `lib/uploadMime.ts` (19) plus
-`unconfirmedMedia`/heal branches in `store/authStore.ts`; server holds heal
-helpers in `routes/googleAccount.ts`. Total ~450 lines for pick-upload-save-show.
+`lib/uploadMime.ts` (19) plus `unconfirmedMedia`/heal branches in
+`store/authStore.ts`; server holds heal helpers in `routes/googleAccount.ts`. Total ~450 lines for pick-upload-save-show.
 Keep untouched: `lib/imageProxy.ts`, decorations, `GET /uploads/*` serving.
 
 Fact: the app never talks to R2. App sends multipart to
@@ -34,22 +33,27 @@ persistence, direct-to-R2 signed URLs, decoration changes, proxy changes.
 ## 3. Architecture
 
 Single writer, server authority. The new module is the only place that knows
-`kind -> folder`, picker aspect, mime map, upload endpoint, and PATCH shape.
-`authStore` keeps `currentUser.avatarUrl/bannerUrl` as plain absolute-URL
-strings plus `updateProfile()` as a local setter; it performs no merge, no
-heal, no unconfirmed tracking. Login/profile fetch accept the server strings
-as-is (resolving relative to absolute once at the boundary). Display
-components stay pure renderers of those strings.
+the picker aspect per kind, the ext-to-mime map, and the PATCH shape. Upload
+itself is reused from `ApiService.uploadImage(uri, mime, kind)` (web FormData
+and native FileSystem paths, already tested there); the server maps `kind` to
+its R2 prefix. `authStore` keeps `currentUser.avatarUrl/bannerUrl` as plain
+absolute-URL strings plus `updateProfile()` as a local setter; it performs no
+merge, no heal, no unconfirmed tracking. Every server `avatarUrl/bannerUrl`
+enters the store or a render prop through `withAbsoluteMediaUrls` once at the
+boundary (login accept, `applyServerProfile`, validate/refresh accept, public
+profile and comment-author mapping). Display components stay pure renderers
+of those strings.
 
 ## 4. App changes
 
 New `src/features/profile/profileMedia.ts` exports:
-`toAbsoluteMediaUrl(url, origin)`, `saveProfileMedia(kind)`, `clearProfileMedia(kind)`.
+`toAbsoluteMediaUrl(url, origin)`, `withAbsoluteMediaUrls(obj, origin)`,
+`saveProfileMedia(kind)`, `clearProfileMedia(kind)`.
 `saveProfileMedia`: guard session, `ImagePicker` (avatar `[1,1]`, banner
-`[14,5]`, quality 0.85), `FileSystem.uploadAsync` multipart `fieldName=file`
-+ `parameters:{kind}`, parse body, resolve to absolute http(s) (relative
-`/uploads/avatars|banners/...` joined to `API_BASE_URL`), `PATCH /me`
-with that URL, `updateProfile()` with the confirmed remote URL, return it.
+`[14,5]`, quality 0.85), ext-to-mime inference folded in from `uploadMime`,
+`ApiService.uploadImage(localUri, mime, kind)` (returns the absolute URL),
+`PATCH /me` with that URL, `updateProfile()` with the confirmed remote URL,
+return it.
 No local `file://` is written to the store; UI shows spinner until remote
 returns. `clearProfileMedia`: `PATCH /me` FIRST with the explicit field body
 (`{ avatarUrl: null }` for avatar, `{ bannerUrl: null }` for banner — the
@@ -57,11 +61,14 @@ server accepts field names, not `kind`), and only on success
 `updateProfile({ avatarUrl: undefined })` / `updateProfile({ bannerUrl:
 undefined })`. Server authority: the store is never cleared before the server
 confirms, so a failed PATCH leaves the old value in place with nothing to
-revert. Mime map (jpg/jpeg/png/webp/gif) and resolver fold
-in from deleted `uploadMime`/`uploadResponse` (same regexes, no behavior change).
+revert. The existing 7-key ext map folds in as-is (jpg/jpeg/png/webp/gif plus
+heic/heif, which the server allowlist still rejects exactly as today — same
+error path, no new behavior). `withAbsoluteMediaUrls` maps a server user/author
+object's `avatarUrl`/`bannerUrl` through `toAbsoluteMediaUrl` (legacy `file://`
+and empty become `undefined`) so every boundary emits render-ready values.
 Delete: `store/googleProfileMerge.ts`+test, `store/validatedMedia.ts`+test,
-`features/settings/profileMediaSync.ts`+test, `lib/uploadMime.ts`+test,
-`services/uploadResponse.ts`+test. Edit: `AccountSettings.tsx` calls the two
+`features/settings/profileMediaSync.ts`+test, `lib/uploadMime.ts`+test.
+`services/uploadResponse.ts` stays (`ApiService` uses it for all uploads). Edit: `AccountSettings.tsx` calls the two
 functions (removes `pickImageUri`/`uploadProfileMedia` locals);
 `store/authStore.ts` removes `unconfirmedMedia`, `setMediaUnconfirmed`,
 merge/select/resolve imports and reassert branches, login uses accepted
