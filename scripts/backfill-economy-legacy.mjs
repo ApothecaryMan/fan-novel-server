@@ -4,6 +4,10 @@ import pg from 'pg';
 const esc = (s) => s.replace(/[^a-z0-9-]/gi, '').slice(0, 60) || 'legacy';
 
 async function main() {
+  const ignoreKeys = new Set(
+    (process.argv.find((a) => a.startsWith('--ignore-keys=')) ?? '')
+      .slice('--ignore-keys='.length).split(',').map((s) => s.trim()).filter(Boolean),
+  );
   const url = process.env.DATABASE_URL;
   if (!url) throw new Error('DATABASE_URL is required');
   const pool = new pg.Pool({ connectionString: url, max: 5 });
@@ -32,6 +36,10 @@ async function main() {
       }
       const known = ['avatarFrameKey', 'profileFrameKey', 'nameStyle', 'bannerGradient', 'profileEffectName'];
       for (const k of Object.keys(d)) {
+        if (ignoreKeys.has(k)) {
+          console.error(JSON.stringify({ skipped: { user: u.id, key: k } }));
+          continue;
+        }
         if (!known.includes(k) && (d[k] !== undefined && d[k] !== null)) unmapped.push({ user: u.id, key: k, value: d[k] });
       }
       planned.push({ userId: u.id, items });
