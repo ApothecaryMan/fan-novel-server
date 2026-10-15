@@ -56,8 +56,14 @@ async function main() {
     );
   }
   const price = Number(args['--price'] ?? 100);
+  const priceAvatar = Number(args['--price-avatar'] ?? price);
+  const priceFrame = Number(args['--price-frame'] ?? price);
+  const priceEffect = Number(args['--price-effect'] ?? price);
+  const priceBadge = Number(args['--price-badge'] ?? price);
   const currency = args['--currency'] ?? 'free';
-  if (!Number.isInteger(price) || price <= 0) throw new Error('--price must be a positive integer');
+  for (const p of [priceAvatar, priceFrame, priceEffect, priceBadge]) {
+    if (!Number.isInteger(p) || p <= 0) throw new Error('prices must be positive integers');
+  }
   if (!['free', 'pro'].includes(currency)) throw new Error("--currency must be free|pro");
   const url = process.env.DATABASE_URL;
   if (!url) throw new Error('DATABASE_URL is required');
@@ -68,7 +74,7 @@ async function main() {
   for (const key of [...parseArray(text, 'FAN_AVATAR_FRAME_KEYS'), ...parseArray(text, 'DEV_AVATAR_FRAME_KEYS')]) {
     if (seenAvatar.has(key)) continue;
     seenAvatar.add(key);
-    items.push({ sku: `frame-avatar-${slug(key)}`, type: 'avatar', name: key.split('/').pop(), metadata: { frameKey: key, proExclusive: false } });
+    items.push({ sku: `frame-avatar-${slug(key)}`, type: 'avatar', price: priceAvatar, name: key.split('/').pop(), metadata: { frameKey: key, proExclusive: false } });
   }
   const frameRows = new Map();
   for (const key of [...parseArray(text, 'FAN_PROFILE_FRAME_KEYS'), ...parseFrameKeys(text, 'DEV_PROFILE_FRAMES')]) {
@@ -78,13 +84,13 @@ async function main() {
     if (frameRows.has(e.key)) frameRows.get(e.key).name = e.name;
   }
   for (const { key, name } of frameRows.values()) {
-    items.push({ sku: `frame-profile-${slug(key)}`, type: 'frame', name, metadata: { frameKey: key, proExclusive: false } });
+    items.push({ sku: `frame-profile-${slug(key)}`, type: 'frame', price: priceFrame, name, metadata: { frameKey: key, proExclusive: false } });
   }
   const seenEffect = new Set();
   for (const name of [...parseEffectNames(text, 'FAN_PROFILE_EFFECTS'), ...parseEffectNames(text, 'DEV_PROFILE_EFFECTS')]) {
     if (seenEffect.has(name)) continue;
     seenEffect.add(name);
-    items.push({ sku: `effect-${slug(name)}`, type: 'profile_effect', name, metadata: { styleId: name, proExclusive: false } });
+    items.push({ sku: `effect-${slug(name)}`, type: 'profile_effect', price: priceEffect, name, metadata: { styleId: name, proExclusive: false } });
   }
   const pool = new pg.Pool({ connectionString: url, max: 5 });
   try {
@@ -92,7 +98,7 @@ async function main() {
     for (const it of items) {
       const r = await pool.query(
         `INSERT INTO store_items (sku, type, name, price_points, currency, metadata, is_active) VALUES ($1,$2,$3,$4,$5,$6,true) ON CONFLICT (sku) DO NOTHING RETURNING id`,
-        [it.sku, it.type, it.name, price, currency, JSON.stringify(it.metadata)]);
+        [it.sku, it.type, it.name, it.price, currency, JSON.stringify(it.metadata)]);
       if (r.rowCount) created++;
     }
     console.log(JSON.stringify({ scanned: items.length, created }));
