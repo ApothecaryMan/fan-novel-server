@@ -137,6 +137,35 @@ describe('economy ledger (Postgres, fail-loud)', () => {
     await assertInvariant(u.id);
   });
 
+  it('inactive and out-of-window items return 404', async () => {
+    const u = await user();
+    await grantPoints(database, { userId: u.id, amount: 1000, currency: 'free', type: 'reward', key: 'fund2', source: 'achievement' });
+    const off = await item({ sku: 'off-1', isActive: false });
+    await expect(purchaseItem(database, { userId: u.id, sku: off.sku, idempotencyKey: 'c:off', isPro: false }))
+      .rejects.toMatchObject({ code: 'item_unavailable', status: 404 });
+    const future = await item({ sku: 'fut-1', availableFrom: new Date(Date.now() + 86_400_000) });
+    await expect(purchaseItem(database, { userId: u.id, sku: future.sku, idempotencyKey: 'c:fut', isPro: false }))
+      .rejects.toMatchObject({ code: 'item_unavailable', status: 404 });
+    expect(await database.select().from(schema.userInventory)).toHaveLength(0);
+    await assertInvariant(u.id);
+  });
+
+  it('refund of an equipped item unequips cleanly with an empty slot', async () => {
+    const { equipItem } = await import('./service.js');
+    const u = await user();
+    await database.insert(schema.iapPurchases).values({ purchaseToken: 'tok-eq', userId: u.id, sku: 'pro_pack_small', pointsGranted: 500, currency: 'pro', status: 'granted' });
+    await grantPoints(database, { userId: u.id, amount: 500, currency: 'pro', type: 'iap_purchase', key: 'iap:tok-eq', source: 'iap' });
+    const it1 = await item({ sku: 'eq-1', pricePoints: 200, currency: 'pro' });
+    await purchaseItem(database, { userId: u.id, sku: it1.sku, idempotencyKey: 'c:eq', isPro: false });
+    await equipItem(database, { userId: u.id, slot: 'avatar', itemId: it1.id, isPro: false, graceUntilMs: null });
+    const res = await refundPurchase(database, { purchaseToken: 'tok-eq' });
+    expect(res.status).toBe('refunded');
+    expect(await database.select().from(schema.userEquipped).where(eq(schema.userEquipped.userId, u.id))).toHaveLength(0);
+    const [row] = await database.select().from(schema.users).where(eq(schema.users.id, u.id));
+    expect(row.profileDecorations).toBeNull();
+    await assertInvariant(u.id);
+  });
+
   it('refund after spend claws back newest pro items with debt in response', async () => {
     const u = await user();
     await database.insert(schema.iapPurchases).values({ purchaseToken: 'tok1', userId: u.id, sku: 'pro_pack_small', pointsGranted: 500, currency: 'pro', status: 'granted' });

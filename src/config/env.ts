@@ -27,6 +27,8 @@ const envSchema = z.object({
   APP_UPDATE_FORCE: z.enum(['true', 'false']).default('false'),
   APP_APK_SHA256: z.string().default(''),
   IAP_WEBHOOK_SECRET: z.string().optional(),
+  GOOGLE_PLAY_SERVICE_ACCOUNT: z.string().optional(),
+  IAP_ALLOW_STUB: z.enum(['true', 'false']).default('false'),
 }).superRefine((value, ctx) => {
   if (value.NODE_ENV !== 'production') return;
   const invalid = (field: string) => ctx.addIssue({ code: z.ZodIssueCode.custom, path: [field], message: 'invalid configuration' });

@@ -181,9 +181,9 @@ const profilePatchSchema = z.object({
   status: z.string().max(500).nullable().optional(),
   avatarUrl: z.string().max(2000).nullable().optional(),
   bannerUrl: z.string().max(2000).nullable().optional(),
-  // Owner-chosen display decorations, replaced as ONE value. `null` clears them
-  // all, which is what the reset action means. The schema is the write gate, so
-  // the column can never hold a shape no renderer can draw.
+  // Owner-chosen display decorations were replaced as ONE value here; since the
+  // store lockdown they are managed only via PUT /api/v1/store/equip, so the
+  // schema keeps accepting the key shape but the handler rejects it above.
   decorations: profileDecorationsSchema.nullable().optional(),
   // Owner-set weekly reading target in hours. `null` clears it (the card falls
   // back to its set-target placeholder). Bounded to a real week.
@@ -232,11 +232,6 @@ authRouter.patch('/me', requireAuth, async (c) => {
       if (bioInput !== undefined) patch.bio = cleanBio(bioInput);
       if (avatarUrl !== undefined) patch.avatarUrl = avatarUrl === null ? null : cleanMediaUrl(avatarUrl);
       if (bannerUrl !== undefined) patch.bannerUrl = bannerUrl === null ? null : cleanMediaUrl(bannerUrl);
-      // Whole-value replace. An empty object is normalised to NULL so a reset
-      // leaves no residue to be read back as "configured but invisible".
-      if (decorations !== undefined) {
-        patch.profileDecorations = isEmptyDecorations(decorations) ? null : decorations;
-      }
       if (weeklyReadingGoalHours !== undefined) patch.weeklyReadingGoalHours = weeklyReadingGoalHours;
       const [updated] = await db.update(users).set(patch).where(eq(users.id, row.id)).returning();
       if (!updated) return c.json({ error: 'account not found' }, 401);

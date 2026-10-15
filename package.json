@@ -14,6 +14,8 @@
     "db:studio": "drizzle-kit studio",
     "admin:promote": "node scripts/promote-admin.mjs",
     "covers:backfill": "node scripts/backfill-covers-to-r2.mjs",
+    "economy:backfill": "node scripts/backfill-economy-legacy.mjs",
+    "economy:reconcile": "node scripts/economy-reconcile.mjs",
     "release:apk": "node scripts/publish-apk.mjs",
     "test": "vitest run"
   },

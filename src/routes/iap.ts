@@ -18,9 +18,14 @@ const PACKAGES: Record<string, { points: number; currency: string }> = {
 
 const verifySchema = z.object({ purchaseToken: z.string().min(1).max(255), sku: z.string().min(1).max(100) });
 
+function stubAllowed(): boolean {
+  return getEnv().IAP_ALLOW_STUB === 'true';
+}
+
 iapRouter.post('/verify', requireAuth, async (c) => {
   const caller = await getCaller(c);
   if (!caller.row) return c.json({ error: 'unauthorized' }, 401);
+  if (!stubAllowed()) return c.json({ error: 'play_unavailable' }, 503);
   const parsed = verifySchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return c.json({ error: 'invalid receipt' }, 400);
   const pack = PACKAGES[parsed.data.sku];

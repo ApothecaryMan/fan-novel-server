@@ -120,6 +120,39 @@ storeAdminRouter.post('/items', requireAuth, async (c) => {
   }
 });
 
+const itemPatchSchema = z.object({
+  name: z.string().min(1).max(200).optional(), pricePoints: z.number().int().positive().optional(),
+  rarity: z.string().max(32).nullable().optional(), metadata: z.record(z.unknown()).optional(),
+  isActive: z.boolean().optional(),
+  availableFrom: z.string().datetime().nullable().optional(), availableUntil: z.string().datetime().nullable().optional(),
+});
+storeAdminRouter.patch('/items/:id', requireAuth, async (c) => {
+  const gate = await requireAdmin(c);
+  if ('errorResponse' in gate) return gate.errorResponse;
+  const parsed = itemPatchSchema.safeParse(await c.req.json().catch(() => null));
+  if (!parsed.success) return c.json({ error: 'invalid item patch' }, 400);
+  if (!isDbAvailable()) return c.json({ error: 'store unavailable' }, 503);
+  try {
+    const [current] = await db.select().from(storeItems).where(eq(storeItems.id, c.req.param('id'))).limit(1);
+    if (!current) return c.json({ error: 'item_unavailable' }, 404);
+    if (parsed.data.metadata !== undefined) {
+      const meta = validateItemMetadata(current.type, parsed.data.metadata);
+      if (!meta.ok) return c.json({ error: meta.error }, 400);
+      parsed.data.metadata = meta.value as Record<string, unknown>;
+    }
+    const patch: Record<string, unknown> = {};
+    if (parsed.data.name !== undefined) patch.name = parsed.data.name;
+    if (parsed.data.pricePoints !== undefined) patch.pricePoints = parsed.data.pricePoints;
+    if (parsed.data.rarity !== undefined) patch.rarity = parsed.data.rarity;
+    if (parsed.data.metadata !== undefined) patch.metadata = parsed.data.metadata;
+    if (parsed.data.isActive !== undefined) patch.isActive = parsed.data.isActive;
+    if (parsed.data.availableFrom !== undefined) patch.availableFrom = parsed.data.availableFrom ? new Date(parsed.data.availableFrom) : null;
+    if (parsed.data.availableUntil !== undefined) patch.availableUntil = parsed.data.availableUntil ? new Date(parsed.data.availableUntil) : null;
+    if (!Object.keys(patch).length) return c.json({ error: 'empty patch' }, 400);
+    const [row] = await db.update(storeItems).set(patch).where(eq(storeItems.id, current.id)).returning();
+    return c.json({ success: true, item: row });
+  } catch (e) { return err(c, e); }
+});
 const grantSchema = z.object({ userId: z.string().uuid(), amount: z.number().int().min(1).max(1000000), currency: z.enum(['free', 'pro']), reason: z.string().max(500).optional() });
 storeAdminRouter.post('/grant', requireAuth, async (c) => {
   const gate = await requireAdmin(c);

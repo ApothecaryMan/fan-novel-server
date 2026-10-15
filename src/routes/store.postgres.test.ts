@@ -153,6 +153,87 @@ describe('economy store routes (Postgres, fail-loud)', () => {
     expect(good.status).toBe(201);
   });
 
+  it('verify fails closed without the stub flag and grants nothing', async () => {
+    const { row, token } = await createUser();
+    const res = await app.request('/iap/verify', { method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ purchaseToken: 'closed-1', sku: 'pro_pack_small' }) });
+    expect(res.status).toBe(503);
+    expect(await database.select().from(schema.iapPurchases)).toHaveLength(0);
+    expect(await database.select().from(schema.pointTransactions)).toHaveLength(0);
+    expect(row.id).toBeTruthy();
+  });
+
+  it('verify grants with the explicit stub flag and acknowledges', async () => {
+    process.env.IAP_ALLOW_STUB = 'true';
+    try {
+      const { row, token } = await createUser();
+      const res = await app.request('/iap/verify', { method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ purchaseToken: 'open-1', sku: 'pro_pack_small' }) });
+      expect(res.status).toBe(200);
+      expect((await res.json()).verification).toBe('stubbed');
+      const [purchase] = await database.select().from(schema.iapPurchases).where(eq(schema.iapPurchases.purchaseToken, 'open-1'));
+      expect(purchase.pointsGranted).toBe(500);
+      expect(purchase.acknowledgedAt).not.toBeNull();
+      const again = await app.request('/iap/verify', { method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ purchaseToken: 'open-1', sku: 'pro_pack_small' }) });
+      expect((await again.json()).replayed).toBe(true);
+      expect(row.id).toBeTruthy();
+    } finally {
+      delete process.env.IAP_ALLOW_STUB;
+    }
+  });
+
+  it('webhook without a configured secret rejects everything with 401', async () => {
+    const saved = process.env.IAP_WEBHOOK_SECRET;
+    delete process.env.IAP_WEBHOOK_SECRET;
+    try {
+      const res = await app.request('/iap/webhook', { method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer wh-secret' },
+        body: JSON.stringify({ messageType: 'voidedPurchase', purchaseToken: 'x' }) });
+      expect(res.status).toBe(401);
+      expect(await database.select().from(schema.pointTransactions)).toHaveLength(0);
+    } finally {
+      process.env.IAP_WEBHOOK_SECRET = saved;
+    }
+  });
+
+  it('admin patches price and active flag, rejects bad metadata and unknown ids', async () => {
+    const { token } = await createUser('admin');
+    const auth = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+    const it1 = await createItem({ sku: 'patch-1', pricePoints: 100 });
+    const ok = await app.request(`/admin/store/items/${it1.id}`, { method: 'PATCH', headers: auth,
+      body: JSON.stringify({ pricePoints: 250, isActive: false }) });
+    expect(ok.status).toBe(200);
+    expect((await ok.json()).item.pricePoints).toBe(250);
+    const bad = await app.request(`/admin/store/items/${it1.id}`, { method: 'PATCH', headers: auth,
+      body: JSON.stringify({ metadata: { nope: 1 } }) });
+    expect(bad.status).toBe(400);
+    const missing = await app.request('/admin/store/items/00000000-0000-4000-8000-000000000000', { method: 'PATCH', headers: auth,
+      body: JSON.stringify({ pricePoints: 5 }) });
+    expect(missing.status).toBe(404);
+  });
+
+  it('backfill converts legacy decorations once and is a no-op the second time', async () => {
+    const { execFile } = await import('node:child_process');
+    const [row] = await database.insert(schema.users).values({
+      externalId: nextId(), email: 'backfill@test.local', username: nextId(), role: 'reader',
+      profileDecorations: { avatarFrameKey: 'fan_avatar/legacy.png' } as never,
+    }).returning();
+    const run = () => new Promise<{ stdout: string }>((resolve, reject) => {
+      execFile('node', ['scripts/backfill-economy-legacy.mjs'], { env: { ...process.env, DATABASE_URL: url }, cwd: process.cwd() },
+        (error, stdout, stderr) => (error ? reject(new Error(stderr || error.message)) : resolve({ stdout })));
+    });
+    const first = JSON.parse((await run()).stdout);
+    expect(first).toMatchObject({ users: 1 });
+    expect(first.inventory).toBeGreaterThan(0);
+    const second = JSON.parse((await run()).stdout);
+    expect(second).toMatchObject({ users: 1, items: 0, inventory: 0, equipped: 0 });
+    expect(row.id).toBeTruthy();
+  });
+
   it('refund uses stored pointsGranted, not current package config', async () => {
     const { row } = await createUser();
     await database.insert(schema.iapPurchases).values({ purchaseToken: 'w2', userId: row.id, sku: 'pro_pack_small', pointsGranted: 999, currency: 'pro', status: 'granted' });
