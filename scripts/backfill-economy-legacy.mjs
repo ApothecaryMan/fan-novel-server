@@ -48,21 +48,45 @@ async function main() {
       console.error(JSON.stringify({ unmapped }, null, 2));
       throw new Error(`backfill stopped: ${unmapped.length} unmapped decoration values (nothing written)`);
     }
-    let itemCount = 0, invCount = 0, equipCount = 0;
+    let itemCount = 0, invCount = 0, equipCount = 0, reusedCount = 0;
     const seen = new Set();
+    const { rows: existing } = await q(
+      `SELECT id, type, metadata FROM store_items WHERE NOT (sku LIKE 'legacy-%')`);
+    const matchKey = (it) => {
+      const meta = it.metadata;
+      const needle = meta.frameKey ?? meta.styleId ?? null;
+      if (!needle) return null;
+      const field = meta.frameKey ? 'frameKey' : 'styleId';
+      const hit = existing.find((row) => row.type === it.type && row.metadata?.[field] === needle);
+      return hit ? hit.id : null;
+    };
+    const bySku = new Map();
     for (const p of planned) {
       for (const it of p.items) {
+        // Reuse the catalog item when the same key is already seeded: one row
+        // per decoration, one true price, no $1 legacy duplicates.
+        const reused = matchKey(it);
+        if (reused) {
+          bySku.set(it.sku, reused);
+          reusedCount++;
+          continue;
+        }
         if (!seen.has(it.sku)) {
           seen.add(it.sku);
           const r = await q(
-            `INSERT INTO store_items (sku, type, name, price_points, currency, metadata, is_active) VALUES ($1,$2,$3,1,'free',$4,true) ON CONFLICT (sku) DO NOTHING RETURNING id`,
-            [it.sku, it.type, it.name, JSON.stringify(it.metadata)]);
-          if (r.rowCount) itemCount++;
+            `INSERT INTO store_items (sku, type, name, price_points, currency, metadata, is_active) VALUES ($1,$2,$3,$4,'free',$5,true) ON CONFLICT (sku) DO NOTHING RETURNING id`,
+            [it.sku, it.type, it.name, it.type === 'profile_effect' ? 300 : 100, JSON.stringify(it.metadata)]);
+          if (r.rowCount) {
+            itemCount++;
+            bySku.set(it.sku, r.rows[0].id);
+          }
         }
       }
     }
-    const { rows: catalog } = await q(`SELECT id, sku FROM store_items WHERE sku LIKE 'legacy-%'`);
-    const bySku = new Map(catalog.map((r) => [r.sku, r.id]));
+    const { rows: legacyRows } = await q(`SELECT id, sku FROM store_items WHERE sku LIKE 'legacy-%'`);
+    for (const r of legacyRows) {
+      if (!bySku.has(r.sku)) bySku.set(r.sku, r.id);
+    }
     for (const p of planned) {
       for (const it of p.items) {
         const itemId = bySku.get(it.sku);
@@ -78,7 +102,7 @@ async function main() {
         }
       }
     }
-    console.log(JSON.stringify({ users: planned.length, items: itemCount, inventory: invCount, equipped: equipCount }));
+    console.log(JSON.stringify({ users: planned.length, items: itemCount, reused: reusedCount, inventory: invCount, equipped: equipCount }));
   } finally {
     await pool.end();
   }
