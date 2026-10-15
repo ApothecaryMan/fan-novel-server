@@ -315,6 +315,23 @@ describe('economy store routes (Postgres, fail-loud)', () => {
     expect(relogin.status).toBe(401);
   });
 
+  it('sync strips gated customs the moment Pro lapses', async () => {
+    const { row, token } = await createUser('reader', true);
+    const auth = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+    const style = { v: 2, fillMode: 'solid', c1: '#ffffff', c2: '#000000', c3: '#ff0000', angle: 0, mid: 50, stripe: 10, gloss: 0, sw: 0, sc: '#000000', sw2: 0, sc2: '#ffffff', bevel: 0, glowR: 0, glowR2: 0, glowI: 0, glowC: '#000000', glowC2: '#000000', split: 0, exD: 0, exA: 0, exC1: '#000000', exC2: '#000000', exFade: 0, shD: 0, shB: 0, shC: '#000000', shA: 0, size: 56, weight: 400, spacing: 0, skew: 0, rot: 0, tx: 0, ty: 0, sy: 100, upper: false, hue: 0, sat: 100, bri: 100 };
+    const set = await app.request('/store/equip', { method: 'PUT', headers: auth, body: JSON.stringify({ slot: 'name_style', value: style }) });
+    expect(set.status).toBe(200);
+    await database.update(schema.users).set({ readingStatsPlanExpiresAt: Date.now() - 1000 }).where(eq(schema.users.id, row.id));
+    const sync = await app.request('/store/sync', { headers: { Authorization: `Bearer ${token}` } });
+    expect(sync.status).toBe(200);
+    expect((await sync.json()).decorations?.nameStyle).toBeUndefined();
+    const [stripped] = await database.select().from(schema.users).where(eq(schema.users.id, row.id));
+    expect(stripped.profileDecorations).toBeNull();
+    const freeSet = await app.request('/store/equip', { method: 'PUT', headers: auth, body: JSON.stringify({ slot: 'name_style', value: style }) });
+    expect(freeSet.status).toBe(403);
+    expect((await freeSet.json()).error).toBe('pro_required');
+  });
+
   it('refund uses stored pointsGranted, not current package config', async () => {
     await withStubEnv(async () => {
       const { row } = await createUser();

@@ -46,8 +46,17 @@ storeRouter.get('/sync', requireAuth, async (c) => {
     const balances = await getBalances(db, caller.row.id);
     const owned = await db.select({ itemId: userInventory.itemId }).from(userInventory).where(eq(userInventory.userId, caller.row.id));
     const equipped = await db.select({ slot: userEquipped.slot, itemId: userEquipped.itemId }).from(userEquipped).where(eq(userEquipped.userId, caller.row.id));
-    const [fresh] = await db.select().from(users).where(eq(users.id, caller.row.id)).limit(1);
-    const { parseProfileDecorations } = await import('../domain/profileDecorations.js');
+    let [fresh] = await db.select().from(users).where(eq(users.id, caller.row.id)).limit(1);
+    const { parseProfileDecorations, stripGatedCustoms } = await import('../domain/profileDecorations.js');
+    // Gated customs end with the subscription: an expired Pro loses them from
+    // the cache on the next sync (old values included), so every surface goes
+    // plain and the mobile pull resets the local editors.
+    if (!isPro && fresh && ((fresh.profileDecorations as any)?.nameStyle !== undefined
+      || (fresh.profileDecorations as any)?.bannerGradient !== undefined)) {
+      const stripped = stripGatedCustoms(parseProfileDecorations(fresh.profileDecorations), false);
+      const [rewritten] = await db.update(users).set({ profileDecorations: stripped as any, updatedAt: new Date() }).where(eq(users.id, caller.row.id)).returning();
+      if (rewritten) fresh = rewritten;
+    }
     return c.json({ balances, ownedItemIds: owned.map((o) => o.itemId), equipped, decorations: parseProfileDecorations(fresh?.profileDecorations), serverNow: new Date(nowMs).toISOString() });
   } catch {
     noteDbFailure();

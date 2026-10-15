@@ -156,15 +156,17 @@ async function writeMergedCache(tx: any, userId: string, customsOverride?: { nam
 export async function equipItem(db: any, opts: { userId: string; slot: string; itemId?: string | null; value?: unknown; isPro: boolean; graceUntilMs: number | null; nowMs?: number }) {
   return db.transaction(async (tx: any) => {
     if ((CUSTOM_SLOTS as readonly string[]).includes(opts.slot)) {
-      const { nameStyleSchema, bannerGradientSchema, isEmptyDecorations } = await import('../../domain/profileDecorations.js');
+      const { nameStyleSchema, bannerGradientSchema } = await import('../../domain/profileDecorations.js');
       const schema = opts.slot === 'name_style' ? nameStyleSchema : bannerGradientSchema;
-      if (opts.value !== null && opts.value !== undefined) {
+      const clearing = opts.value === null || opts.value === undefined;
+      if (!clearing) {
+        if (!opts.isPro) throw new PurchaseError('pro_required', 403);
         const parsed = schema.safeParse(opts.value);
         if (!parsed.success) throw new PurchaseError('invalid_custom_value', 400);
       }
       const customs = await currentCustoms(tx, opts.userId);
       if (opts.slot === 'name_style') {
-        if (opts.value === null || (typeof opts.value === 'object' && isEmptyDecorations({ nameStyle: opts.value } as never))) {
+        if (clearing) {
           return writeMergedCache(tx, opts.userId, { ...customs, clearNameStyle: true });
         }
         return writeMergedCache(tx, opts.userId, { ...customs, nameStyle: opts.value });

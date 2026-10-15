@@ -235,7 +235,7 @@ describe('GET /users/me/profile', () => {
       bannerGradient: { target: 'banner', color: '#FF7043', fade: 'soft', extent: 'mid', strength: 60 },
       avatarFrameKey: 'fan_avatar/gold_avatar_frame_512.png',
     };
-    await fake().db.update(users).set({ profileDecorations: stored as any }).where(eq(users.id, me.id));
+    await fake().db.update(users).set({ profileDecorations: stored as any, readingStatsPlan: 'pro', readingStatsPlanExpiresAt: Date.now() + 86_400_000 }).where(eq(users.id, me.id));
     const body: any = await (await app.request('/users/me/profile', {
       headers: { Authorization: `Bearer ${token}` },
     })).json();
@@ -351,7 +351,7 @@ describe('GET /users/:id/profile (public)', () => {
       bannerGradient: { target: 'below', color: '#4CAF50', fade: 'sharp', extent: 'low', strength: 40 },
       avatarFrameKey: 'fan_avatar/white_rabbit_ears.png',
     };
-    await fake().db.update(users).set({ profileDecorations: stored as any }).where(eq(users.id, A1_UUID));
+    await fake().db.update(users).set({ profileDecorations: stored as any, readingStatsPlan: 'pro', readingStatsPlanExpiresAt: Date.now() + 86_400_000 }).where(eq(users.id, A1_UUID));
     fake().seedComments([]);
     const body: any = await (await app.request(`/users/${A1_UUID}/profile`)).json();
     expect(body.user.decorations).toEqual(stored);

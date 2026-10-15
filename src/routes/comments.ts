@@ -8,7 +8,8 @@ import { requireAuth, optionalAuth } from '../middleware/auth.js';
 import { getCaller } from '../middleware/ownership.js';
 import { rateLimit } from '../middleware/rateLimit.js';
 import { getEnv } from '../config/env.js';
-import { parseProfileDecorations, type ProfileDecorations } from '../domain/profileDecorations.js';
+import { parseProfileDecorations, stripGatedCustoms, type ProfileDecorations } from '../domain/profileDecorations.js';
+import { effectiveReadingPlan } from '../features/readingSync/freeStore.js';
 
 // Native comments for app-native novels only (sourceId 'internal:published').
 // Site sources (site:*) keep the extension path; see docs/COMMENTS_NATIVE_PLAN.md.
@@ -253,7 +254,10 @@ export async function buildAuthorLookup(userIds: string[]): Promise<Map<string, 
       username: u.username ?? undefined,
       bannerUrl: u.bannerUrl ?? undefined,
       createdAt: toIsoStamp(u.createdAt),
-      decorations: parseProfileDecorations(u.profileDecorations) ?? undefined,
+      decorations: stripGatedCustoms(
+        parseProfileDecorations(u.profileDecorations),
+        effectiveReadingPlan(u, Date.now()) === 'pro',
+      ) ?? undefined,
     });
   }
   return lookup;

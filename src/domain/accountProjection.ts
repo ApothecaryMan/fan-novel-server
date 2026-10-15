@@ -12,7 +12,8 @@
  * `/:id/profile` body must not (see toPublicSafe in routes/profile.ts).
  */
 
-import { parseProfileDecorations } from './profileDecorations.js';
+import { parseProfileDecorations, stripGatedCustoms } from './profileDecorations.js';
+import { effectiveReadingPlan } from '../features/readingSync/freeStore.js';
 
 export function toIso(value: unknown): string | null {
   if (value instanceof Date) return isNaN(value.getTime()) ? null : value.toISOString();
@@ -39,7 +40,13 @@ export function toPublic(u: any, options: { includeEmail?: boolean } = {}) {
     // renders plain instead of half-rendered. The client's own
     // normalizeNameEffect/normalizeBannerGradient apply the same rule one step
     // further out, so an unknown kind is safe at both ends.
-    decorations: parseProfileDecorations(u.profileDecorations),
+    // Gated customs (studio nameStyle/bannerGradient) are Pro-only and end with
+    // the subscription: any reader without an active Pro reads them as absent,
+    // immediately, on every surface. Owned slots are untouched.
+    decorations: stripGatedCustoms(
+      parseProfileDecorations(u.profileDecorations),
+      effectiveReadingPlan(u, Date.now()) === 'pro',
+    ),
     role: u.role ?? 'reader',
     isAuthor: Boolean(u.isAuthor),
     isTranslator: Boolean(u.isTranslator),

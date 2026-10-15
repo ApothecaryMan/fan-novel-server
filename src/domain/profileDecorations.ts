@@ -128,3 +128,17 @@ export function parseProfileDecorations(raw: unknown): ProfileDecorations | null
 export function isEmptyDecorations(value: ProfileDecorations | null): boolean {
   return !value || (!value.nameStyle && !value.bannerGradient && !value.avatarFrameKey && !value.profileFrameKey && !value.profileEffectName);
 }
+
+/**
+ * Pro gate for studio customs. nameStyle/bannerGradient are Pro-only and end
+ * with the subscription: without an active Pro they read as absent,
+ * immediately, on every surface. Owned slots pass through untouched; a value
+ * emptied by the strip reads as null so renderers see plain, not partial.
+ */
+export function stripGatedCustoms(value: ProfileDecorations | null, isPro: boolean): ProfileDecorations | null {
+  if (isPro || !value) return value;
+  const { nameStyle: _dropStyle, bannerGradient: _dropBanner, ...rest } = value;
+  void _dropStyle;
+  void _dropBanner;
+  return isEmptyDecorations(rest as ProfileDecorations) ? null : (rest as ProfileDecorations);
+}
