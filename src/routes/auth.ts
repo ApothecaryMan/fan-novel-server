@@ -13,6 +13,40 @@ import { toPublic as projectAccount } from '../domain/accountProjection.js';
 
 export const authRouter = new Hono();
 
+// DELETE /api/v1/auth/me — anonymize the caller's account. The row id is kept
+// so append-only ledgers (point_transactions and its RESTRICT FKs) stay intact;
+// PII is scrubbed and the Google identity unlinked so the next login provisions
+// a fresh account. There is no hard delete: RESTRICT would reject it for any
+// user with economy rows, and silent cascade loss is worse than a kept stub.
+authRouter.delete('/me', requireAuth, async (c) => {
+  const payload = c.get('authUser') as { sub?: string };
+  const sub = payload.sub ?? '';
+  if (!isDbAvailable()) return c.json({ error: 'account storage unavailable' }, 503);
+  try {
+    const found = await db.select().from(users).where(eq(users.externalId, sub)).limit(1);
+    const row = found[0];
+    if (!row) return c.json({ error: 'account not found' }, 401);
+    const stub = `deleted_${row.id.slice(0, 8)}`;
+    const [updated] = await db.update(users).set({
+      externalId: `deleted_${row.id}`,
+      googleSubject: null,
+      email: null,
+      username: stub,
+      displayName: 'Deleted user',
+      avatarUrl: null,
+      bannerUrl: null,
+      bio: null,
+      profileDecorations: null,
+      passwordHash: null,
+      updatedAt: new Date(),
+    }).where(eq(users.id, row.id)).returning();
+    if (!updated) return c.json({ error: 'account not found' }, 401);
+    return c.json({ success: true });
+  } catch (error) {
+    return accountError(c, error);
+  }
+});
+
 // Explicit development/test fixtures only. Never consult these in production.
 const memUsers: any[] = [];
 

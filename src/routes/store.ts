@@ -70,7 +70,10 @@ storeRouter.post('/purchase', requireAuth, async (c) => {
   } catch (e) { return err(c, e); }
 });
 
-const equipSchema = z.object({ slot: z.enum(['avatar', 'name_effect', 'frame', 'badge']), itemId: z.string().uuid().nullable() });
+const equipSchema = z.union([
+  z.object({ slot: z.enum(['avatar', 'name_effect', 'frame', 'badge']), itemId: z.string().uuid().nullable() }),
+  z.object({ slot: z.enum(['name_style', 'banner']), value: z.unknown() }),
+]);
 storeRouter.put('/equip', requireAuth, async (c) => {
   const caller = await getCaller(c);
   if (!caller.row) return c.json({ error: 'unauthorized' }, 401);
@@ -79,8 +82,9 @@ storeRouter.put('/equip', requireAuth, async (c) => {
   if (!isDbAvailable()) return c.json({ error: 'store unavailable' }, 503);
   try {
     const nowMs = Date.now();
+    const body = parsed.data as { slot: string; itemId?: string | null; value?: unknown };
     const res = await equipItem(db, {
-      userId: caller.row.id, slot: parsed.data.slot, itemId: parsed.data.itemId,
+      userId: caller.row.id, slot: body.slot, itemId: body.itemId ?? null, value: body.value,
       isPro: effectiveReadingPlan(caller.row, nowMs) === 'pro',
       graceUntilMs: typeof caller.row.readingStatsGraceUntil === 'number' ? caller.row.readingStatsGraceUntil : null, nowMs,
     });

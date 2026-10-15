@@ -298,6 +298,23 @@ describe('economy store routes (Postgres, fail-loud)', () => {
     expect(legs[0].actorId).toBeTruthy();
   });
 
+  it('DELETE /auth/me anonymizes the row and keeps ledger and inventory', async () => {
+    const { row, token } = await createUser();
+    await fund(row.id, 200);
+    const auth = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+    const res = await app.request('/auth/me', { method: 'DELETE', headers: auth });
+    expect(res.status).toBe(200);
+    const [kept] = await database.select().from(schema.users).where(eq(schema.users.id, row.id));
+    expect(kept).toBeTruthy();
+    expect(kept.email).toBeNull();
+    expect(kept.googleSubject).toBeNull();
+    expect(kept.displayName).toBe('Deleted user');
+    const legs = await database.select().from(schema.pointTransactions).where(eq(schema.pointTransactions.userId, row.id));
+    expect(legs.length).toBeGreaterThan(0);
+    const relogin = await app.request('/auth/me', { method: 'GET', headers: auth });
+    expect(relogin.status).toBe(401);
+  });
+
   it('refund uses stored pointsGranted, not current package config', async () => {
     await withStubEnv(async () => {
       const { row } = await createUser();

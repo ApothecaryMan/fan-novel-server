@@ -183,4 +183,26 @@ describe('economy ledger (Postgres, fail-loud)', () => {
     const again = await refundPurchase(database, { purchaseToken: 'tok1' });
     expect(again.status).toBe('replayed');
   });
+
+  it('custom slots store validated values without ownership and merge with equipped', async () => {
+    const { equipItem } = await import('./service.js');
+    const u = await user();
+    const style = { v: 2, fillMode: 'solid', c1: '#ffffff', c2: '#000000', c3: '#ff0000', angle: 0, mid: 50, stripe: 10, gloss: 0, sw: 0, sc: '#000000', sw2: 0, sc2: '#ffffff', bevel: 0, glowR: 0, glowR2: 0, glowI: 0, glowC: '#000000', glowC2: '#000000', split: 0, exD: 0, exA: 0, exC1: '#000000', exC2: '#000000', exFade: 0, shD: 0, shB: 0, shC: '#000000', shA: 0, size: 56, weight: 400, spacing: 0, skew: 0, rot: 0, tx: 0, ty: 0, sy: 100, upper: false, hue: 0, sat: 100, bri: 100 };
+    const banner = { target: 'banner', color: '#4CAF50', fade: 'soft', extent: 'mid', strength: 60 };
+    await expect(equipItem(database, { userId: u.id, slot: 'name_style', value: { fillMode: 'hologram' }, isPro: false, graceUntilMs: null }))
+      .rejects.toMatchObject({ code: 'invalid_custom_value', status: 400 });
+    const r1 = await equipItem(database, { userId: u.id, slot: 'name_style', value: style, isPro: false, graceUntilMs: null });
+    expect(r1.decorations).toMatchObject({ nameStyle: style });
+    const it1 = await item({ pricePoints: 100, currency: 'free' });
+    await grantPoints(database, { userId: u.id, amount: 100, currency: 'free', type: 'reward', key: 'cf', source: 'achievement' });
+    await purchaseItem(database, { userId: u.id, sku: it1.sku, idempotencyKey: 'c:cf', isPro: false });
+    const r2 = await equipItem(database, { userId: u.id, slot: 'avatar', itemId: it1.id, isPro: false, graceUntilMs: null });
+    expect(r2.decorations).toMatchObject({ nameStyle: style, avatarFrameKey: 'fan_avatar/x.png' });
+    const r3 = await equipItem(database, { userId: u.id, slot: 'banner', value: banner, isPro: false, graceUntilMs: null });
+    expect(r3.decorations).toMatchObject({ bannerGradient: banner });
+    const r4 = await equipItem(database, { userId: u.id, slot: 'name_style', value: null, isPro: false, graceUntilMs: null });
+    expect(r4.decorations).not.toHaveProperty('nameStyle');
+    expect(r4.decorations).toMatchObject({ avatarFrameKey: 'fan_avatar/x.png' });
+    await assertInvariant(u.id);
+  });
 });

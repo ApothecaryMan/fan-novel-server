@@ -122,9 +122,57 @@ export function decorationsFromEquipped(equipped: Array<{ slot: string; metadata
   return Object.keys(out).length ? out : null;
 }
 
-export async function equipItem(db: any, opts: { userId: string; slot: string; itemId: string | null; isPro: boolean; graceUntilMs: number | null; nowMs?: number }) {
+export const OWNED_SLOTS = ['avatar', 'name_effect', 'frame', 'badge'] as const;
+export const CUSTOM_SLOTS = ['name_style', 'banner'] as const;
+
+function mergedDecorations(owned: Record<string, unknown> | null, customs: { nameStyle?: unknown; bannerGradient?: unknown }): Record<string, unknown> | null {
+  const out: Record<string, unknown> = { ...(owned ?? {}) };
+  if (customs.nameStyle !== undefined) out.nameStyle = customs.nameStyle as never;
+  if (customs.bannerGradient !== undefined) out.bannerGradient = customs.bannerGradient as never;
+  return Object.keys(out).length ? out : null;
+}
+
+async function currentCustoms(tx: any, userId: string): Promise<{ nameStyle?: unknown; bannerGradient?: unknown }> {
+  const [row] = await tx.select({ profileDecorations: users.profileDecorations }).from(users).where(eq(users.id, userId)).limit(1);
+  const d = (row?.profileDecorations ?? {}) as Record<string, unknown>;
+  const customs: { nameStyle?: unknown; bannerGradient?: unknown } = {};
+  if (d.nameStyle !== undefined) customs.nameStyle = d.nameStyle;
+  if (d.bannerGradient !== undefined) customs.bannerGradient = d.bannerGradient;
+  return customs;
+}
+
+async function writeMergedCache(tx: any, userId: string, customsOverride?: { nameStyle?: unknown; bannerGradient?: unknown; clearNameStyle?: boolean; clearBanner?: boolean }) {
+  const rows = await tx.select({ slot: userEquipped.slot, metadata: storeItems.metadata })
+    .from(userEquipped).innerJoin(storeItems, eq(storeItems.id, userEquipped.itemId))
+    .where(eq(userEquipped.userId, userId));
+  const customs = customsOverride ? { ...customsOverride } : await currentCustoms(tx, userId);
+  const nameStyle = (customs as any).clearNameStyle ? undefined : (customs as any).nameStyle;
+  const bannerGradient = (customs as any).clearBanner ? undefined : (customs as any).bannerGradient;
+  const decorations = mergedDecorations(decorationsFromEquipped(rows as any), { nameStyle, bannerGradient });
+  await tx.update(users).set({ profileDecorations: decorations as any, updatedAt: new Date() }).where(eq(users.id, userId));
+  return { equipped: rows.map((r: any) => ({ slot: r.slot })), decorations };
+}
+
+export async function equipItem(db: any, opts: { userId: string; slot: string; itemId?: string | null; value?: unknown; isPro: boolean; graceUntilMs: number | null; nowMs?: number }) {
   return db.transaction(async (tx: any) => {
-    if (opts.itemId === null) {
+    if ((CUSTOM_SLOTS as readonly string[]).includes(opts.slot)) {
+      const { nameStyleSchema, bannerGradientSchema, isEmptyDecorations } = await import('../../domain/profileDecorations.js');
+      const schema = opts.slot === 'name_style' ? nameStyleSchema : bannerGradientSchema;
+      if (opts.value !== null && opts.value !== undefined) {
+        const parsed = schema.safeParse(opts.value);
+        if (!parsed.success) throw new PurchaseError('invalid_custom_value', 400);
+      }
+      const customs = await currentCustoms(tx, opts.userId);
+      if (opts.slot === 'name_style') {
+        if (opts.value === null || (typeof opts.value === 'object' && isEmptyDecorations({ nameStyle: opts.value } as never))) {
+          return writeMergedCache(tx, opts.userId, { ...customs, clearNameStyle: true });
+        }
+        return writeMergedCache(tx, opts.userId, { ...customs, nameStyle: opts.value });
+      }
+      if (opts.value === null) return writeMergedCache(tx, opts.userId, { ...customs, clearBanner: true });
+      return writeMergedCache(tx, opts.userId, { ...customs, bannerGradient: opts.value });
+    }
+    if (opts.itemId === null || opts.itemId === undefined) {
       await tx.delete(userEquipped).where(and(eq(userEquipped.userId, opts.userId), eq(userEquipped.slot, opts.slot)));
     } else {
       const [item] = await tx.select().from(storeItems).where(eq(storeItems.id, opts.itemId)).limit(1);
@@ -142,12 +190,7 @@ export async function equipItem(db: any, opts: { userId: string; slot: string; i
       await tx.insert(userEquipped).values({ userId: opts.userId, slot: opts.slot, itemId: item.id })
         .onConflictDoUpdate({ target: [userEquipped.userId, userEquipped.slot], set: { itemId: item.id, equippedAt: new Date() } });
     }
-    const rows = await tx.select({ slot: userEquipped.slot, metadata: storeItems.metadata })
-      .from(userEquipped).innerJoin(storeItems, eq(storeItems.id, userEquipped.itemId))
-      .where(eq(userEquipped.userId, opts.userId));
-    const decorations = decorationsFromEquipped(rows as any);
-    await tx.update(users).set({ profileDecorations: decorations as any, updatedAt: new Date() }).where(eq(users.id, opts.userId));
-    return { equipped: rows.map((r: any) => ({ slot: r.slot })), decorations };
+    return writeMergedCache(tx, opts.userId);
   });
 }
 
@@ -192,7 +235,9 @@ export async function refundPurchase(db: any, opts: { purchaseToken: string }) {
       const remaining = await tx.select({ slot: userEquipped.slot, metadata: storeItems.metadata })
         .from(userEquipped).innerJoin(storeItems, eq(storeItems.id, userEquipped.itemId))
         .where(eq(userEquipped.userId, purchase.userId));
-      await tx.update(users).set({ profileDecorations: decorationsFromEquipped(remaining as any) as any, updatedAt: new Date() })
+      const customs = await currentCustoms(tx, purchase.userId);
+      const decorations = mergedDecorations(decorationsFromEquipped(remaining as any), customs as any);
+      await tx.update(users).set({ profileDecorations: decorations as any, updatedAt: new Date() })
         .where(eq(users.id, purchase.userId));
     }
     await tx.update(iapPurchases).set({ status: 'refunded', refundedAt: new Date() })

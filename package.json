@@ -15,6 +15,7 @@
     "admin:promote": "node scripts/promote-admin.mjs",
     "covers:backfill": "node scripts/backfill-covers-to-r2.mjs",
     "economy:backfill": "node scripts/backfill-economy-legacy.mjs",
+    "economy:seed-frames": "node scripts/seed-economy-frames.mjs",
     "economy:reconcile": "node scripts/economy-reconcile.mjs",
     "release:apk": "node scripts/publish-apk.mjs",
     "test": "vitest run"
