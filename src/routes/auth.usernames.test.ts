@@ -138,8 +138,9 @@ describe('username ownership routes', () => {
   });
 });
 
-// PATCH /auth/me also owns the owner's display decorations. The write gate is
-// the zod schema, so the column can never hold a shape no renderer can draw.
+// PATCH /auth/me no longer owns display decorations: any `decorations` key is
+// rejected with 400 (code decorations_locked) and writes nothing. Decorations
+// are owned by PUT /store/equip, which validates ownership server-side.
 describe('PATCH /auth/me — profile decorations', () => {
   const good = {
     nameStyle: {
@@ -160,48 +161,44 @@ describe('PATCH /auth/me — profile decorations', () => {
     avatarFrameKey: 'fan_avatar/gold_avatar_frame_512.png',
   } as const;
 
-  it('stores the whole value and echoes it back on the user', async () => {
+  // Store lockdown: decorations are owned by PUT /store/equip now. Any
+  // `decorations` key on this route is rejected and writes nothing — even a
+  // whole valid value, a partial value, null, or {} (clearing goes through
+  // equip with item_id null).
+  it('rejects a whole value with 400 and writes nothing', async () => {
     const { token }: any = await (await loginAs('deco-w1', 'decow1@test.com')).json();
     const res = await me(token, 'PATCH', { decorations: good });
-    expect(res.status).toBe(200);
-    const body: any = await res.json();
-    expect(body.user.decorations).toEqual(good);
-    expect(fake().rows.find((r) => r.email === 'decow1@test.com')?.profileDecorations).toEqual(good);
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ code: 'decorations_locked' });
+    expect(fake().rows.find((r) => r.email === 'decow1@test.com')?.profileDecorations).toBeFalsy();
   });
 
-  it('stores a partial value — each decoration is independent', async () => {
+  it('rejects a partial value with 400 and writes nothing', async () => {
     const { token }: any = await (await loginAs('deco-w2', 'decow2@test.com')).json();
     const res = await me(token, 'PATCH', { decorations: { avatarFrameKey: 'fan_avatar/fire_avatar_frame_full_quality.png' } });
-    expect(res.status).toBe(200);
-    expect(fake().rows.find((r) => r.email === 'decow2@test.com')?.profileDecorations)
-      .toEqual({ avatarFrameKey: 'fan_avatar/fire_avatar_frame_full_quality.png' });
+    expect(res.status).toBe(400);
+    expect(fake().rows.find((r) => r.email === 'decow2@test.com')?.profileDecorations).toBeFalsy();
   });
 
-  // REPLACE, not merge: a value that omits a previously-set decoration must
-  // clear it, or a reset could never actually reset.
-  it('replaces rather than merges, so omitting a decoration clears it', async () => {
+  it('rejects a second write that used to replace, keeping the first value absent', async () => {
     const { token }: any = await (await loginAs('deco-w3', 'decow3@test.com')).json();
-    await me(token, 'PATCH', { decorations: good });
-    await me(token, 'PATCH', { decorations: { avatarFrameKey: 'fan_avatar/gold_avatar_frame_512.png' } });
-    const stored: any = fake().rows.find((r) => r.email === 'decow3@test.com')?.profileDecorations;
-    expect(Object.keys(stored)).toEqual(['avatarFrameKey']);
+    expect((await me(token, 'PATCH', { decorations: good })).status).toBe(400);
+    expect((await me(token, 'PATCH', { decorations: { avatarFrameKey: 'fan_avatar/gold_avatar_frame_512.png' } })).status).toBe(400);
+    expect(fake().rows.find((r) => r.email === 'decow3@test.com')?.profileDecorations).toBeFalsy();
   });
 
-  it('clears everything when decorations is null', async () => {
+  it('rejects null instead of clearing (clearing goes through equip)', async () => {
     const { token }: any = await (await loginAs('deco-w4', 'decow4@test.com')).json();
-    await me(token, 'PATCH', { decorations: good });
     const res = await me(token, 'PATCH', { decorations: null });
-    expect(res.status).toBe(200);
-    // Normalised to NULL, not stored as an empty object that would read back as
-    // "configured but invisible".
-    expect(fake().rows.find((r) => r.email === 'decow4@test.com')?.profileDecorations).toBeNull();
+    expect(res.status).toBe(400);
+    expect(fake().rows.find((r) => r.email === 'decow4@test.com')?.profileDecorations).toBeFalsy();
   });
 
-  it('clears everything when an empty object is sent', async () => {
+  it('rejects an empty object instead of clearing', async () => {
     const { token }: any = await (await loginAs('deco-w5', 'decow5@test.com')).json();
-    await me(token, 'PATCH', { decorations: good });
-    await me(token, 'PATCH', { decorations: {} });
-    expect(fake().rows.find((r) => r.email === 'decow5@test.com')?.profileDecorations).toBeNull();
+    const res = await me(token, 'PATCH', { decorations: {} });
+    expect(res.status).toBe(400);
+    expect(fake().rows.find((r) => r.email === 'decow5@test.com')?.profileDecorations).toBeFalsy();
   });
 
   it('rejects a malformed value with 400 and writes nothing', async () => {
@@ -225,13 +222,41 @@ describe('PATCH /auth/me — profile decorations', () => {
     expect(fake().rows.find((r) => r.email === 'decow6@test.com')?.profileDecorations).toBeFalsy();
   });
 
-  it('still accepts an ordinary profile edit alongside the other fields', async () => {
+  it('rejects the whole request when decorations ride along with other fields', async () => {
     const { token }: any = await (await loginAs('deco-w7', 'decow7@test.com')).json();
     const res = await me(token, 'PATCH', { name: 'Still Works', decorations: { avatarFrameKey: 'fan_avatar/gold_avatar_frame_512.png' } });
+    expect(res.status).toBe(400);
+    const row = fake().rows.find((r) => r.email === 'decow7@test.com');
+    expect(row?.profileDecorations).toBeFalsy();
+    expect(row?.displayName).not.toBe('Still Works');
+  });
+
+  it('treats unchanged decorations as a no-op and applies the other fields', async () => {
+    const { token }: any = await (await loginAs('deco-w8', 'decow8@test.com')).json();
+    fake().rows.find((r) => r.email === 'decow8@test.com')!.profileDecorations = { ...good } as any;
+    const res = await me(token, 'PATCH', { username: 'kept_deco', decorations: { ...good } });
     expect(res.status).toBe(200);
-    const body: any = await res.json();
-    expect(body.user).toMatchObject({ name: 'Still Works' });
-    expect(body.user.decorations).toEqual({ avatarFrameKey: 'fan_avatar/gold_avatar_frame_512.png' });
+    const row = fake().rows.find((r) => r.email === 'decow8@test.com');
+    expect(row?.username).toBe('kept_deco');
+    expect(row?.profileDecorations).toEqual(good);
+  });
+
+  it('rejects when the decorations value differs from the stored one', async () => {
+    const { token }: any = await (await loginAs('deco-w9', 'decow9@test.com')).json();
+    fake().rows.find((r) => r.email === 'decow9@test.com')!.profileDecorations = { ...good } as any;
+    const res = await me(token, 'PATCH', { name: 'Nope', decorations: { avatarFrameKey: 'fan_avatar/other.png' } });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ code: 'decorations_locked' });
+    const row = fake().rows.find((r) => r.email === 'decow9@test.com');
+    expect(row?.displayName).not.toBe('Nope');
+    expect(row?.profileDecorations).toEqual(good);
+  });
+
+  it('treats null decorations on an empty stored value as a no-op', async () => {
+    const { token }: any = await (await loginAs('deco-w10', 'decow10@test.com')).json();
+    const res = await me(token, 'PATCH', { name: 'Null Kept', decorations: null });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as any).user.name).toBe('Null Kept');
   });
 });
 

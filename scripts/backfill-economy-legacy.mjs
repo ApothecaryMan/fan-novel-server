@@ -1,0 +1,90 @@
+#!/usr/bin/env node
+import { createHash } from 'node:crypto';
+import pg from 'pg';
+
+const sha8 = (s) => createHash('sha256').update(s).digest('hex').slice(0, 8);
+const esc = (s) => s.replace(/[^a-z0-9-]/gi, '').slice(0, 60) || 'legacy';
+
+async function main() {
+  const url = process.env.DATABASE_URL;
+  if (!url) throw new Error('DATABASE_URL is required');
+  const pool = new pg.Pool({ connectionString: url, max: 5 });
+  const q = (text, params) => pool.query(text, params);
+  try {
+    const { rows: users } = await q(`SELECT id, profile_decorations FROM users WHERE profile_decorations IS NOT NULL`);
+    const planned = [];
+    const unmapped = [];
+    for (const u of users) {
+      const d = u.profile_decorations;
+      if (!d || typeof d !== 'object' || Array.isArray(d)) { unmapped.push({ user: u.id, value: d }); continue; }
+      const items = [];
+      if (typeof d.avatarFrameKey === 'string' && d.avatarFrameKey) {
+        const sku = `legacy-avatar-${esc(d.avatarFrameKey)}`;
+        items.push({ sku, type: 'avatar', name: `Legacy avatar frame`, metadata: { frameKey: d.avatarFrameKey, proExclusive: false }, slot: 'avatar' });
+      }
+      if (typeof d.profileFrameKey === 'string' && d.profileFrameKey) {
+        const sku = `legacy-frame-${esc(d.profileFrameKey)}`;
+        items.push({ sku, type: 'frame', name: `Legacy profile frame`, metadata: { frameKey: d.profileFrameKey, proExclusive: false }, slot: 'frame' });
+      }
+      if (d.nameStyle && typeof d.nameStyle === 'object') {
+        const sku = `legacy-name-${sha8(JSON.stringify(d.nameStyle))}`;
+        items.push({ sku, type: 'name_effect', name: `Legacy name style`, metadata: { styleId: sku, proExclusive: false }, slot: 'name_effect' });
+      }
+      if (typeof d.profileEffectName === 'string' && d.profileEffectName && !d.nameStyle) {
+        const sku = `legacy-effect-${esc(d.profileEffectName)}`;
+        items.push({ sku, type: 'name_effect', name: `Legacy effect`, metadata: { styleId: d.profileEffectName, proExclusive: false }, slot: 'name_effect' });
+      }
+      if (d.bannerGradient && typeof d.bannerGradient === 'object') {
+        const sku = `legacy-banner-${sha8(JSON.stringify(d.bannerGradient))}`;
+        items.push({ sku, type: 'badge', name: `Legacy banner`, metadata: { badgeKey: sku, proExclusive: false }, slot: 'badge' });
+      } else if (typeof d.profileEffectName === 'string' && d.profileEffectName && d.nameStyle) {
+        const sku = `legacy-effect-${esc(d.profileEffectName)}`;
+        items.push({ sku, type: 'badge', name: `Legacy effect`, metadata: { badgeKey: d.profileEffectName, proExclusive: false }, slot: null });
+      }
+      const known = ['avatarFrameKey', 'profileFrameKey', 'nameStyle', 'bannerGradient', 'profileEffectName'];
+      for (const k of Object.keys(d)) {
+        if (!known.includes(k) && (d[k] !== undefined && d[k] !== null)) unmapped.push({ user: u.id, key: k, value: d[k] });
+      }
+      planned.push({ userId: u.id, items });
+    }
+    if (unmapped.length) {
+      console.error(JSON.stringify({ unmapped }, null, 2));
+      throw new Error(`backfill stopped: ${unmapped.length} unmapped decoration values (nothing written)`);
+    }
+    let itemCount = 0, invCount = 0, equipCount = 0;
+    const seen = new Set();
+    for (const p of planned) {
+      for (const it of p.items) {
+        if (!seen.has(it.sku)) {
+          seen.add(it.sku);
+          const r = await q(
+            `INSERT INTO store_items (sku, type, name, price_points, currency, metadata, is_active) VALUES ($1,$2,$3,1,'free',$4,true) ON CONFLICT (sku) DO NOTHING RETURNING id`,
+            [it.sku, it.type, it.name, JSON.stringify(it.metadata)]);
+          if (r.rowCount) itemCount++;
+        }
+      }
+    }
+    const { rows: catalog } = await q(`SELECT id, sku FROM store_items WHERE sku LIKE 'legacy-%'`);
+    const bySku = new Map(catalog.map((r) => [r.sku, r.id]));
+    for (const p of planned) {
+      for (const it of p.items) {
+        const itemId = bySku.get(it.sku);
+        const r = await q(
+          `INSERT INTO user_inventory (user_id, item_id, source, price_paid, currency) VALUES ($1,$2,'legacy',0,'free') ON CONFLICT (user_id, item_id) DO NOTHING RETURNING id`,
+          [p.userId, itemId]);
+        if (r.rowCount) invCount++;
+        if (it.slot) {
+          const e = await q(
+            `INSERT INTO user_equipped (user_id, slot, item_id) VALUES ($1,$2,$3) ON CONFLICT (user_id, slot) DO NOTHING RETURNING slot`,
+            [p.userId, it.slot, itemId]);
+          if (e.rowCount) equipCount++;
+        }
+      }
+    }
+    console.log(JSON.stringify({ users: planned.length, items: itemCount, inventory: invCount, equipped: equipCount }));
+  } finally {
+    await pool.end();
+  }
+}
+
+main().catch((e) => { console.error(e.message); process.exit(1); });
