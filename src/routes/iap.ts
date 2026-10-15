@@ -19,7 +19,8 @@ const PACKAGES: Record<string, { points: number; currency: string }> = {
 const verifySchema = z.object({ purchaseToken: z.string().min(1).max(255), sku: z.string().min(1).max(100) });
 
 function stubAllowed(): boolean {
-  return getEnv().IAP_ALLOW_STUB === 'true';
+  const env = getEnv();
+  return !env.isProd && env.IAP_ALLOW_STUB === 'true';
 }
 
 iapRouter.post('/verify', requireAuth, async (c) => {
@@ -59,6 +60,7 @@ iapRouter.post('/verify', requireAuth, async (c) => {
 });
 
 iapRouter.post('/webhook', async (c) => {
+  if (!stubAllowed()) return c.json({ error: 'play_unavailable' }, 503);
   const secret = getEnv().IAP_WEBHOOK_SECRET ?? '';
   const auth = c.req.header('Authorization') ?? '';
   if (!secret || auth !== `Bearer ${secret}`) return c.json({ error: 'unauthorized' }, 401);

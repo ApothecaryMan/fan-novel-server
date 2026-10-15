@@ -190,18 +190,41 @@ const profilePatchSchema = z.object({
   weeklyReadingGoalHours: z.number().int().min(1).max(168).nullable().optional(),
 });
 
+function deepEqual(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) return false;
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+  const ka = Object.keys(a as Record<string, unknown>);
+  const kb = new Set(Object.keys(b as Record<string, unknown>));
+  if (ka.length !== kb.size) return false;
+  return ka.every((k) => kb.has(k) && deepEqual((a as any)[k], (b as any)[k]));
+}
+
+function decorationsNoop(submitted: unknown, stored: unknown): boolean {
+  const normSubmitted = submitted === null || (typeof submitted === 'object' && submitted !== null && isEmptyDecorations(submitted as never)) ? null : submitted;
+  const normStored = stored ?? null;
+  return deepEqual(normSubmitted, normStored);
+}
+
 authRouter.patch('/me', requireAuth, async (c) => {
   const payload = c.get('authUser') as { sub?: string };
   const sub = payload.sub ?? '';
   const parsed = profilePatchSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return c.json({ error: 'بيانات الملف الشخصي غير صالحة', issues: parsed.error.issues }, 400);
-  if (parsed.data.decorations !== undefined) {
-    return c.json({ error: 'decorations are managed via PUT /api/v1/store/equip', code: 'decorations_locked' }, 400);
-  }
-  const { name, username, bio, status, avatarUrl, bannerUrl, decorations, weeklyReadingGoalHours } = parsed.data;
+  const data = { ...parsed.data };
+  const { name, username, bio, status, avatarUrl, bannerUrl, weeklyReadingGoalHours } = data;
+  let decorations = data.decorations;
+  const rejectChangedDecorations = (stored: unknown) => {
+    if (decorations === undefined) return null;
+    if (decorationsNoop(decorations, stored)) {
+      decorations = undefined;
+      return null;
+    }
+    return { error: 'decorations are managed via PUT /api/v1/store/equip', code: 'decorations_locked' };
+  };
   const bioInput = bio !== undefined ? bio : status;
   if (name === undefined && username === undefined && bioInput === undefined && avatarUrl === undefined
-    && bannerUrl === undefined && decorations === undefined && weeklyReadingGoalHours === undefined) {
+    && bannerUrl === undefined && weeklyReadingGoalHours === undefined && decorations === undefined) {
     return c.json({ error: 'لا يوجد ما يتم تحديثه' }, 400);
   }
   for (const [label, url] of [['avatarUrl', avatarUrl], ['bannerUrl', bannerUrl]] as const) {
@@ -218,6 +241,12 @@ authRouter.patch('/me', requireAuth, async (c) => {
       const found = await db.select().from(users).where(eq(users.externalId, sub)).limit(1);
       const row = found[0];
       if (!row) return c.json({ error: 'account not found' }, 401);
+      const locked = rejectChangedDecorations(row.profileDecorations);
+      if (locked) return c.json(locked, 400);
+      if (name === undefined && username === undefined && bioInput === undefined && avatarUrl === undefined
+        && bannerUrl === undefined && weeklyReadingGoalHours === undefined) {
+        return c.json({ error: 'لا يوجد ما يتم تحديثه' }, 400);
+      }
       if (username !== undefined && username !== row.username) {
         const clash = await db.select({ id: users.id }).from(users).where(eq(users.username, username)).limit(1);
         if (clash[0]) {
@@ -257,6 +286,8 @@ authRouter.patch('/me', requireAuth, async (c) => {
   if (getEnv().isProd) return c.json({ error: 'account storage unavailable' }, 503);
   const user = memUsers.find((u) => u.externalId === sub);
   if (!user) return c.json({ error: 'account not found' }, 401);
+  const memLocked = rejectChangedDecorations((user as any).profileDecorations ?? null);
+  if (memLocked) return c.json(memLocked, 400);
   if (username !== undefined) {
     if (memUsers.some((u) => u !== user && u.username === username)) {
       const suggestions = await suggestUsernames(username, async (name) => memUsers.some((u) => u.username === name));

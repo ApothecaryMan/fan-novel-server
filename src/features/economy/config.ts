@@ -14,6 +14,7 @@ export const DAILY_REWARD_CAP: Record<EconomyCurrency, number> = { free: 500, pr
 export const PRO_DISCOUNT_PERCENT = 10;
 export const PRO_POINTS_MULTIPLIER = 2;
 export const PRO_MONTHLY_GRANT: Record<EconomyCurrency, number> = { free: 300, pro: 0 };
+export const ADMIN_GRANT_MAX = 1000000;
 
 export function keyFor(source: RewardSource, parts: string): string {
   return `${source}:${parts}`;

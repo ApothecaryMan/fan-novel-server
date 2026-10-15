@@ -6,7 +6,7 @@ import { storeItems, userEquipped, userInventory, users } from '../database/sche
 import { requireAuth } from '../middleware/auth.js';
 import { getCaller } from '../middleware/ownership.js';
 import { effectiveReadingPlan } from '../features/readingSync/freeStore.js';
-import { PRO_MONTHLY_GRANT } from '../features/economy/config.js';
+import { ADMIN_GRANT_MAX, PRO_MONTHLY_GRANT } from '../features/economy/config.js';
 import { validateItemMetadata } from '../features/economy/itemTypes.js';
 import { PurchaseError, equipItem, getBalances, grantPoints, purchaseItem } from '../features/economy/service.js';
 
@@ -153,7 +153,7 @@ storeAdminRouter.patch('/items/:id', requireAuth, async (c) => {
     return c.json({ success: true, item: row });
   } catch (e) { return err(c, e); }
 });
-const grantSchema = z.object({ userId: z.string().uuid(), amount: z.number().int().min(1).max(1000000), currency: z.enum(['free', 'pro']), reason: z.string().max(500).optional() });
+const grantSchema = z.object({ userId: z.string().uuid(), amount: z.number().int().min(1).max(ADMIN_GRANT_MAX), currency: z.enum(['free', 'pro']), reason: z.string().min(1).max(500) });
 storeAdminRouter.post('/grant', requireAuth, async (c) => {
   const gate = await requireAdmin(c);
   if ('errorResponse' in gate) return gate.errorResponse;

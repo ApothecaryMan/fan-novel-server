@@ -130,20 +130,23 @@ describe('economy store routes (Postgres, fail-loud)', () => {
   });
 
   it('webhook rejects bad auth, ignores subscriptions, refunds voided once under replay', async () => {
-    const { row } = await createUser();
-    await database.insert(schema.iapPurchases).values({ purchaseToken: 'w1', userId: row.id, sku: 'pro_pack_small', pointsGranted: 500, currency: 'pro', status: 'granted' });
-    await fund(row.id, 500, 'pro', 'iap:w1');
-    const noAuth = await app.request('/iap/webhook', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ messageType: 'voidedPurchase', purchaseToken: 'w1' }) });
-    expect(noAuth.status).toBe(401);
-    expect(await database.select().from(schema.pointTransactions).then((r) => r.filter((t) => t.type === 'refund'))).toHaveLength(0);
-    const sub = await app.request('/iap/webhook', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer wh-secret' }, body: JSON.stringify({ messageType: 'subscriptionNotification' }) });
-    expect(sub.status).toBe(200);
-    const results = await Promise.all(Array.from({ length: 5 }, () => app.request('/iap/webhook', { method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer wh-secret' },
-      body: JSON.stringify({ messageType: 'voidedPurchase', purchaseToken: 'w1' }) })));
-    expect(results.every((r) => r.status === 200)).toBe(true);
-    const refunds = await database.select().from(schema.pointTransactions).then((r) => r.filter((t) => t.type === 'refund' && t.referenceId === 'w1'));
-    expect(refunds).toHaveLength(1);
+    await withStubEnv(async () => {
+      const { row } = await createUser();
+      await database.insert(schema.iapPurchases).values({ purchaseToken: 'w1', userId: row.id, sku: 'pro_pack_small', pointsGranted: 500, currency: 'pro', status: 'granted' });
+      await fund(row.id, 500, 'pro', 'iap:w1');
+      const noAuth = await app.request('/iap/webhook', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ messageType: 'voidedPurchase', purchaseToken: 'w1' }) });
+      expect(noAuth.status).toBe(401);
+      expect(await database.select().from(schema.pointTransactions).then((r) => r.filter((t) => t.type === 'refund'))).toHaveLength(0);
+      const sub = await app.request('/iap/webhook', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer wh-secret' }, body: JSON.stringify({ messageType: 'subscriptionNotification' }) });
+      expect(sub.status).toBe(200);
+      const results = await Promise.all(Array.from({ length: 5 }, () => app.request('/iap/webhook', { method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer wh-secret' },
+        body: JSON.stringify({ messageType: 'voidedPurchase', purchaseToken: 'w1' }) })));
+      expect(results.every((r) => r.status === 200)).toBe(true);
+      const refunds = await database.select().from(schema.pointTransactions).then((r) => r.filter((t) => t.type === 'refund' && t.referenceId === 'w1'));
+      expect(refunds).toHaveLength(1);
+      expect(row.id).toBeTruthy();
+    });
   });
 
   it('admin rejects invalid metadata and accepts badge with no migration', async () => {
@@ -157,6 +160,20 @@ describe('economy store routes (Postgres, fail-loud)', () => {
     expect(good.status).toBe(201);
   });
 
+  async function withStubEnv<T>(fn: () => Promise<T>): Promise<T> {
+    const savedNode = process.env.NODE_ENV;
+    const savedFlag = process.env.IAP_ALLOW_STUB;
+    process.env.NODE_ENV = 'development';
+    process.env.IAP_ALLOW_STUB = 'true';
+    try {
+      return await fn();
+    } finally {
+      process.env.NODE_ENV = savedNode;
+      if (savedFlag === undefined) delete process.env.IAP_ALLOW_STUB;
+      else process.env.IAP_ALLOW_STUB = savedFlag;
+    }
+  }
+
   it('verify fails closed without the stub flag and grants nothing', async () => {
     const { row, token } = await createUser();
     const res = await app.request('/iap/verify', { method: 'POST',
@@ -168,9 +185,30 @@ describe('economy store routes (Postgres, fail-loud)', () => {
     expect(row.id).toBeTruthy();
   });
 
-  it('verify grants with the explicit stub flag and acknowledges', async () => {
+  it('verify stays closed in production even with the flag set', async () => {
     process.env.IAP_ALLOW_STUB = 'true';
     try {
+      const { token } = await createUser();
+      const res = await app.request('/iap/verify', { method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ purchaseToken: 'closed-2', sku: 'pro_pack_small' }) });
+      expect(res.status).toBe(503);
+      expect(await database.select().from(schema.iapPurchases)).toHaveLength(0);
+    } finally {
+      delete process.env.IAP_ALLOW_STUB;
+    }
+  });
+
+  it('webhook stays closed in production even with a valid secret', async () => {
+    const res = await app.request('/iap/webhook', { method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer wh-secret' },
+      body: JSON.stringify({ messageType: 'voidedPurchase', purchaseToken: 'x' }) });
+    expect(res.status).toBe(503);
+    expect(await database.select().from(schema.pointTransactions)).toHaveLength(0);
+  });
+
+  it('verify grants with the explicit stub flag and acknowledges', async () => {
+    await withStubEnv(async () => {
       const { row, token } = await createUser();
       const res = await app.request('/iap/verify', { method: 'POST',
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
@@ -185,23 +223,23 @@ describe('economy store routes (Postgres, fail-loud)', () => {
         body: JSON.stringify({ purchaseToken: 'open-1', sku: 'pro_pack_small' }) });
       expect((await again.json()).replayed).toBe(true);
       expect(row.id).toBeTruthy();
-    } finally {
-      delete process.env.IAP_ALLOW_STUB;
-    }
+    });
   });
 
-  it('webhook without a configured secret rejects everything with 401', async () => {
-    const saved = process.env.IAP_WEBHOOK_SECRET;
-    delete process.env.IAP_WEBHOOK_SECRET;
-    try {
-      const res = await app.request('/iap/webhook', { method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer wh-secret' },
-        body: JSON.stringify({ messageType: 'voidedPurchase', purchaseToken: 'x' }) });
-      expect(res.status).toBe(401);
-      expect(await database.select().from(schema.pointTransactions)).toHaveLength(0);
-    } finally {
-      process.env.IAP_WEBHOOK_SECRET = saved;
-    }
+  it('webhook without a configured secret rejects with 401', async () => {
+    await withStubEnv(async () => {
+      const saved = process.env.IAP_WEBHOOK_SECRET;
+      delete process.env.IAP_WEBHOOK_SECRET;
+      try {
+        const res = await app.request('/iap/webhook', { method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: 'Bearer wh-secret' },
+          body: JSON.stringify({ messageType: 'voidedPurchase', purchaseToken: 'x' }) });
+        expect(res.status).toBe(401);
+        expect(await database.select().from(schema.pointTransactions)).toHaveLength(0);
+      } finally {
+        process.env.IAP_WEBHOOK_SECRET = saved;
+      }
+    });
   });
 
   it('admin patches price and active flag, rejects bad metadata and unknown ids', async () => {
@@ -239,15 +277,18 @@ describe('economy store routes (Postgres, fail-loud)', () => {
   });
 
   it('refund uses stored pointsGranted, not current package config', async () => {
-    const { row } = await createUser();
-    await database.insert(schema.iapPurchases).values({ purchaseToken: 'w2', userId: row.id, sku: 'pro_pack_small', pointsGranted: 999, currency: 'pro', status: 'granted' });
-    await fund(row.id, 999, 'pro', 'iap:w2');
-    const res = await app.request('/iap/webhook', { method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer wh-secret' },
-      body: JSON.stringify({ messageType: 'voidedPurchase', purchaseToken: 'w2' }) });
-    expect(res.status).toBe(200);
-    const legs = await database.select().from(schema.pointTransactions).then((r) => r.filter((t) => t.type === 'refund' && t.referenceId === 'w2'));
-    expect(legs).toHaveLength(1);
-    expect(legs[0].amount).toBe(-999);
+    await withStubEnv(async () => {
+      const { row } = await createUser();
+      await database.insert(schema.iapPurchases).values({ purchaseToken: 'w2', userId: row.id, sku: 'pro_pack_small', pointsGranted: 999, currency: 'pro', status: 'granted' });
+      await fund(row.id, 999, 'pro', 'iap:w2');
+      const res = await app.request('/iap/webhook', { method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer wh-secret' },
+        body: JSON.stringify({ messageType: 'voidedPurchase', purchaseToken: 'w2' }) });
+      expect(res.status).toBe(200);
+      const legs = await database.select().from(schema.pointTransactions).then((r) => r.filter((t) => t.type === 'refund' && t.referenceId === 'w2'));
+      expect(legs).toHaveLength(1);
+      expect(legs[0].amount).toBe(-999);
+      expect(row.id).toBeTruthy();
+    });
   });
 });

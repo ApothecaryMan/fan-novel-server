@@ -230,6 +230,34 @@ describe('PATCH /auth/me — profile decorations', () => {
     expect(row?.profileDecorations).toBeFalsy();
     expect(row?.displayName).not.toBe('Still Works');
   });
+
+  it('treats unchanged decorations as a no-op and applies the other fields', async () => {
+    const { token }: any = await (await loginAs('deco-w8', 'decow8@test.com')).json();
+    fake().rows.find((r) => r.email === 'decow8@test.com')!.profileDecorations = { ...good } as any;
+    const res = await me(token, 'PATCH', { username: 'kept_deco', decorations: { ...good } });
+    expect(res.status).toBe(200);
+    const row = fake().rows.find((r) => r.email === 'decow8@test.com');
+    expect(row?.username).toBe('kept_deco');
+    expect(row?.profileDecorations).toEqual(good);
+  });
+
+  it('rejects when the decorations value differs from the stored one', async () => {
+    const { token }: any = await (await loginAs('deco-w9', 'decow9@test.com')).json();
+    fake().rows.find((r) => r.email === 'decow9@test.com')!.profileDecorations = { ...good } as any;
+    const res = await me(token, 'PATCH', { name: 'Nope', decorations: { avatarFrameKey: 'fan_avatar/other.png' } });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ code: 'decorations_locked' });
+    const row = fake().rows.find((r) => r.email === 'decow9@test.com');
+    expect(row?.displayName).not.toBe('Nope');
+    expect(row?.profileDecorations).toEqual(good);
+  });
+
+  it('treats null decorations on an empty stored value as a no-op', async () => {
+    const { token }: any = await (await loginAs('deco-w10', 'decow10@test.com')).json();
+    const res = await me(token, 'PATCH', { name: 'Null Kept', decorations: null });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as any).user.name).toBe('Null Kept');
+  });
 });
 
 // The weekly reading target rides the same owner-only PATCH. It is a plain
