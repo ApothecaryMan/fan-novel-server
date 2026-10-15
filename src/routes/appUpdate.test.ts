@@ -30,6 +30,11 @@ describe('GET /api/v1/app/version', () => {
     expect(body.data.downloadUrl).toBeNull();
     expect(body.data.force).toBe(false);
     expect(body.data.notes).toEqual([]);
+    expect(body.data.grouped).toEqual({
+      additions: { ar: [], en: [] },
+      fixes: { ar: [], en: [] },
+      changes: { ar: [], en: [] },
+    });
   });
 
   it('reports the configured release and parses the note list', async () => {
@@ -49,7 +54,32 @@ describe('GET /api/v1/app/version', () => {
       downloadUrl: 'https://example.com/app.apk',
       force: true,
       notes: ['ميزة جديدة', 'إصلاح خطأ'],
+      grouped: {
+        additions: { ar: ['ميزة جديدة', 'إصلاح خطأ'], en: [] },
+        fixes: { ar: [], en: [] },
+        changes: { ar: [], en: [] },
+      },
       apkSha256: 'abc123',
+    });
+  });
+
+  it('keeps notes grouped per category while the flat list stays the Arabic union', async () => {
+    const res = await app({
+      APP_LATEST_VERSION: '0.4.3',
+      APP_UPDATE_NOTES: 'إضافة|إضافة ثانية',
+      APP_UPDATE_NOTES_EN: 'An addition',
+      APP_UPDATE_FIXES: 'إصلاح',
+      APP_UPDATE_FIXES_EN: 'A fix',
+      APP_UPDATE_CHANGES: 'تغيير',
+      APP_UPDATE_CHANGES_EN: 'A change',
+    }).request('/api/v1/app/version');
+
+    const body = await res.json();
+    expect(body.data.notes).toEqual(['إضافة', 'إضافة ثانية', 'إصلاح', 'تغيير']);
+    expect(body.data.grouped).toEqual({
+      additions: { ar: ['إضافة', 'إضافة ثانية'], en: ['An addition'] },
+      fixes: { ar: ['إصلاح'], en: ['A fix'] },
+      changes: { ar: ['تغيير'], en: ['A change'] },
     });
   });
 

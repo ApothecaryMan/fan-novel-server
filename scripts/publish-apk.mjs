@@ -12,16 +12,27 @@ const LIVE_VERSION_URL = 'https://fan-novel-server.mohamed1232003.workers.dev/ap
 
 function usage() {
   console.error(
-    'Usage: node scripts/publish-apk.mjs <apk-file> --version <x.y.z> [--min-version <v>] [--notes "a|b"] [--force] [--dry-run]',
+    'Usage: node scripts/publish-apk.mjs <apk-file> --version <x.y.z> [--min-version <v>] [--notes "a|b"] [--notes-en "a|b"] [--fixes "a|b"] [--fixes-en "a|b"] [--changes "a|b"] [--changes-en "a|b"] [--force] [--dry-run]',
   );
   process.exit(1);
 }
+
+const VALUE_FLAGS = [
+  'version',
+  'min-version',
+  'notes',
+  'notes-en',
+  'fixes',
+  'fixes-en',
+  'changes',
+  'changes-en',
+];
 
 const positional = [];
 const flags = {};
 for (let i = 0; i < process.argv.length; i++) {
   const arg = process.argv[i];
-  if (arg === '--version' || arg === '--min-version' || arg === '--notes') {
+  if (arg.startsWith('--') && VALUE_FLAGS.includes(arg.slice(2))) {
     flags[arg.slice(2)] = process.argv[++i];
   } else if (arg === '--force' || arg === '--dry-run') {
     flags[arg.slice(2)] = true;
@@ -33,6 +44,16 @@ for (let i = 0; i < process.argv.length; i++) {
 const apkPath = positional[0];
 const version = flags.version;
 if (!apkPath || !version || !existsSync(apkPath)) usage();
+
+// var name in wrangler.toml → CLI flag that overrides it
+const NOTE_VARS = {
+  APP_UPDATE_NOTES: 'notes',
+  APP_UPDATE_NOTES_EN: 'notes-en',
+  APP_UPDATE_FIXES: 'fixes',
+  APP_UPDATE_FIXES_EN: 'fixes-en',
+  APP_UPDATE_CHANGES: 'changes',
+  APP_UPDATE_CHANGES_EN: 'changes-en',
+};
 
 function sha256File(path) {
   return new Promise((resolve, reject) => {
@@ -66,7 +87,9 @@ let toml = readFileSync(TOML_PATH, 'utf8');
 toml = setTomlVar(toml, 'APP_LATEST_VERSION', version);
 toml = setTomlVar(toml, 'APP_APK_SHA256', sha256);
 if (flags['min-version'] !== undefined) toml = setTomlVar(toml, 'APP_MIN_VERSION', flags['min-version']);
-if (flags.notes !== undefined) toml = setTomlVar(toml, 'APP_UPDATE_NOTES', flags.notes);
+for (const [varName, flagName] of Object.entries(NOTE_VARS)) {
+  if (flags[flagName] !== undefined) toml = setTomlVar(toml, varName, flags[flagName]);
+}
 if (flags.force) toml = setTomlVar(toml, 'APP_UPDATE_FORCE', 'true');
 
 if (flags['dry-run']) {
