@@ -34,6 +34,12 @@ function parseFrameKeys(text, arrayName) {
   return [...body.matchAll(/key:\s*'([^']+)'/g)].map((m) => m[1]);
 }
 
+function parseFrameEntries(text, arrayName) {
+  const body = arrayBody(text, `export const ${arrayName}`);
+  if (!body) return [];
+  return [...body.matchAll(/\{[^{}]*name:\s*'([^']+)'[^{}]*key:\s*'([^']+)'[^}]*\}/g)].map((m) => ({ name: m[1], key: m[2] }));
+}
+
 const slug = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 80);
 
 async function main() {
@@ -41,10 +47,14 @@ async function main() {
   const explicit = process.argv.slice(2).filter((a) => a.startsWith('--manifest=')).map((a) => a.slice('--manifest='.length));
   const manifests = explicit.length ? explicit : [
     '../Fan Novel/src/features/decorations/decorationManifests.ts',
-    '../Fan Novel/src/features/decorations/devAvatarFrames.manifest.ts',
-    '../Fan Novel/src/features/decorations/devProfileFrames.manifest.ts',
-    '../Fan Novel/src/features/decorations/devProfileEffects.manifest.ts',
   ];
+  if (args['--include-dev'] === 'true' && !explicit.length) {
+    manifests.push(
+      '../Fan Novel/src/features/decorations/devAvatarFrames.manifest.ts',
+      '../Fan Novel/src/features/decorations/devProfileFrames.manifest.ts',
+      '../Fan Novel/src/features/decorations/devProfileEffects.manifest.ts',
+    );
+  }
   const price = Number(args['--price'] ?? 100);
   const currency = args['--currency'] ?? 'free';
   if (!Number.isInteger(price) || price <= 0) throw new Error('--price must be a positive integer');
@@ -54,14 +64,27 @@ async function main() {
   const text = manifests.map((f) => { try { return readFileSync(f, 'utf8'); } catch { return ''; } }).join('\n');
   if (!text.trim()) throw new Error('no manifest content found');
   const items = [];
+  const seenAvatar = new Set();
   for (const key of [...parseArray(text, 'FAN_AVATAR_FRAME_KEYS'), ...parseArray(text, 'DEV_AVATAR_FRAME_KEYS')]) {
+    if (seenAvatar.has(key)) continue;
+    seenAvatar.add(key);
     items.push({ sku: `frame-avatar-${slug(key)}`, type: 'avatar', name: key.split('/').pop(), metadata: { frameKey: key, proExclusive: false } });
   }
+  const frameRows = new Map();
   for (const key of [...parseArray(text, 'FAN_PROFILE_FRAME_KEYS'), ...parseFrameKeys(text, 'DEV_PROFILE_FRAMES')]) {
-    items.push({ sku: `frame-profile-${slug(key)}`, type: 'frame', name: key.split('/').pop(), metadata: { frameKey: key, proExclusive: false } });
+    if (!frameRows.has(key)) frameRows.set(key, { key, name: key.split('/').pop() });
   }
+  for (const e of [...parseFrameEntries(text, 'FAN_PROFILE_FRAMES')]) {
+    if (frameRows.has(e.key)) frameRows.get(e.key).name = e.name;
+  }
+  for (const { key, name } of frameRows.values()) {
+    items.push({ sku: `frame-profile-${slug(key)}`, type: 'frame', name, metadata: { frameKey: key, proExclusive: false } });
+  }
+  const seenEffect = new Set();
   for (const name of [...parseEffectNames(text, 'FAN_PROFILE_EFFECTS'), ...parseEffectNames(text, 'DEV_PROFILE_EFFECTS')]) {
-    items.push({ sku: `effect-${slug(name)}`, type: 'name_effect', name, metadata: { styleId: name, proExclusive: false } });
+    if (seenEffect.has(name)) continue;
+    seenEffect.add(name);
+    items.push({ sku: `effect-${slug(name)}`, type: 'profile_effect', name, metadata: { styleId: name, proExclusive: false } });
   }
   const pool = new pg.Pool({ connectionString: url, max: 5 });
   try {

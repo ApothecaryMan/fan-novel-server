@@ -1,8 +1,6 @@
 #!/usr/bin/env node
-import { createHash } from 'node:crypto';
 import pg from 'pg';
 
-const sha8 = (s) => createHash('sha256').update(s).digest('hex').slice(0, 8);
 const esc = (s) => s.replace(/[^a-z0-9-]/gi, '').slice(0, 60) || 'legacy';
 
 async function main() {
@@ -26,20 +24,11 @@ async function main() {
         const sku = `legacy-frame-${esc(d.profileFrameKey)}`;
         items.push({ sku, type: 'frame', name: `Legacy profile frame`, metadata: { frameKey: d.profileFrameKey, proExclusive: false }, slot: 'frame' });
       }
-      if (d.nameStyle && typeof d.nameStyle === 'object') {
-        const sku = `legacy-name-${sha8(JSON.stringify(d.nameStyle))}`;
-        items.push({ sku, type: 'name_effect', name: `Legacy name style`, metadata: { styleId: sku, proExclusive: false }, slot: 'name_effect' });
-      }
-      if (typeof d.profileEffectName === 'string' && d.profileEffectName && !d.nameStyle) {
+      // Studio customs (nameStyle, bannerGradient) need no ownership: they stay
+      // in the profile_decorations cache untouched, managed via custom slots.
+      if (typeof d.profileEffectName === 'string' && d.profileEffectName) {
         const sku = `legacy-effect-${esc(d.profileEffectName)}`;
-        items.push({ sku, type: 'name_effect', name: `Legacy effect`, metadata: { styleId: d.profileEffectName, proExclusive: false }, slot: 'name_effect' });
-      }
-      if (d.bannerGradient && typeof d.bannerGradient === 'object') {
-        const sku = `legacy-banner-${sha8(JSON.stringify(d.bannerGradient))}`;
-        items.push({ sku, type: 'badge', name: `Legacy banner`, metadata: { badgeKey: sku, proExclusive: false }, slot: 'badge' });
-      } else if (typeof d.profileEffectName === 'string' && d.profileEffectName && d.nameStyle) {
-        const sku = `legacy-effect-${esc(d.profileEffectName)}`;
-        items.push({ sku, type: 'badge', name: `Legacy effect`, metadata: { badgeKey: d.profileEffectName, proExclusive: false }, slot: null });
+        items.push({ sku, type: 'profile_effect', name: `Legacy effect`, metadata: { styleId: d.profileEffectName, proExclusive: false }, slot: 'profile_effect' });
       }
       const known = ['avatarFrameKey', 'profileFrameKey', 'nameStyle', 'bannerGradient', 'profileEffectName'];
       for (const k of Object.keys(d)) {

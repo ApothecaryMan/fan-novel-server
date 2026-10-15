@@ -117,12 +117,12 @@ export function decorationsFromEquipped(equipped: Array<{ slot: string; metadata
   for (const row of equipped) {
     if (row.slot === 'avatar' && row.metadata?.frameKey) out.avatarFrameKey = row.metadata.frameKey;
     else if (row.slot === 'frame' && row.metadata?.frameKey) out.profileFrameKey = row.metadata.frameKey;
-    else if (row.slot === 'name_effect' && row.metadata?.styleId) out.profileEffectName = row.metadata.styleId;
+    else if (row.slot === 'profile_effect' && row.metadata?.styleId) out.profileEffectName = row.metadata.styleId;
   }
   return Object.keys(out).length ? out : null;
 }
 
-export const OWNED_SLOTS = ['avatar', 'name_effect', 'frame', 'badge'] as const;
+export const OWNED_SLOTS = ['avatar', 'profile_effect', 'frame', 'badge'] as const;
 export const CUSTOM_SLOTS = ['name_style', 'banner'] as const;
 
 function mergedDecorations(owned: Record<string, unknown> | null, customs: { nameStyle?: unknown; bannerGradient?: unknown }): Record<string, unknown> | null {
@@ -178,7 +178,7 @@ export async function equipItem(db: any, opts: { userId: string; slot: string; i
       const [item] = await tx.select().from(storeItems).where(eq(storeItems.id, opts.itemId)).limit(1);
       if (!item) throw new PurchaseError('item_unavailable', 404);
       if (!item.isActive) throw new PurchaseError('item_inactive', 410);
-      const [slotFor] = [item.type === 'avatar' ? 'avatar' : item.type === 'name_effect' ? 'name_effect' : item.type === 'frame' ? 'frame' : 'badge'];
+      const [slotFor] = [item.type === 'avatar' ? 'avatar' : item.type === 'profile_effect' ? 'profile_effect' : item.type === 'frame' ? 'frame' : 'badge'];
       if (slotFor !== opts.slot) throw new PurchaseError('type_slot_mismatch', 400);
       const owned = await tx.select({ id: userInventory.id }).from(userInventory)
         .where(and(eq(userInventory.userId, opts.userId), eq(userInventory.itemId, item.id))).limit(1);

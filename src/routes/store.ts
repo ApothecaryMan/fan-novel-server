@@ -71,7 +71,7 @@ storeRouter.post('/purchase', requireAuth, async (c) => {
 });
 
 const equipSchema = z.union([
-  z.object({ slot: z.enum(['avatar', 'name_effect', 'frame', 'badge']), itemId: z.string().uuid().nullable() }),
+  z.object({ slot: z.enum(['avatar', 'profile_effect', 'frame', 'badge']), itemId: z.string().uuid().nullable() }),
   z.object({ slot: z.enum(['name_style', 'banner']), value: z.unknown() }),
 ]);
 storeRouter.put('/equip', requireAuth, async (c) => {
