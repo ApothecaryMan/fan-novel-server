@@ -276,6 +276,28 @@ describe('economy store routes (Postgres, fail-loud)', () => {
     expect(row.id).toBeTruthy();
   });
 
+  it('admin grant requires a reason, caps the amount, and never goes negative', async () => {
+    const { token } = await createUser('admin');
+    const { row: target } = await createUser();
+    const auth = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+    const base = { userId: target.id, amount: 50, currency: 'free' };
+    const noReason = await app.request('/admin/store/grant', { method: 'POST', headers: auth, body: JSON.stringify(base) });
+    expect(noReason.status).toBe(400);
+    const negative = await app.request('/admin/store/grant', { method: 'POST', headers: auth,
+      body: JSON.stringify({ ...base, amount: -50, reason: 'clawback attempt' }) });
+    expect(negative.status).toBe(400);
+    const overCap = await app.request('/admin/store/grant', { method: 'POST', headers: auth,
+      body: JSON.stringify({ ...base, amount: 1000001, reason: 'too much' }) });
+    expect(overCap.status).toBe(400);
+    const ok = await app.request('/admin/store/grant', { method: 'POST', headers: auth,
+      body: JSON.stringify({ ...base, reason: 'support credit' }) });
+    expect(ok.status).toBe(200);
+    const legs = await database.select().from(schema.pointTransactions).where(eq(schema.pointTransactions.userId, target.id));
+    expect(legs).toHaveLength(1);
+    expect(legs[0]).toMatchObject({ amount: 50, type: 'admin_adjust', reason: 'support credit' });
+    expect(legs[0].actorId).toBeTruthy();
+  });
+
   it('refund uses stored pointsGranted, not current package config', async () => {
     await withStubEnv(async () => {
       const { row } = await createUser();
