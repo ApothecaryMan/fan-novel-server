@@ -1,5 +1,5 @@
 import { sql } from 'drizzle-orm';
-import { pgTable, varchar, text, integer, smallint, real, boolean, timestamp, uuid, jsonb, bigint, uniqueIndex, index, check } from 'drizzle-orm/pg-core';
+import { pgTable, varchar, text, integer, smallint, real, boolean, timestamp, uuid, jsonb, bigint, uniqueIndex, index, check, primaryKey, foreignKey } from 'drizzle-orm/pg-core';
 import type { ProfileDecorations } from '../domain/profileDecorations.js';
 
 // 1. جدول المستخدمين (Users Table)
@@ -323,4 +323,97 @@ export const chapterViewDedup = pgTable('chapter_view_dedup', {
 }, (t) => ({
   chapterViewDedupPk: uniqueIndex('chapter_view_dedup_pk').on(t.novelId, t.chapterNumber, t.viewerKey),
   chapterViewDedupRecentIdx: index('chapter_view_dedup_recent_idx').on(t.lastViewedAt),
+}));
+
+// 14. Store catalog (open types via code registry, not DB enum).
+export const storeItems = pgTable('store_items', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  sku: varchar('sku', { length: 100 }).notNull().unique(),
+  type: varchar('type', { length: 32 }).notNull(),
+  name: varchar('name', { length: 200 }).notNull(),
+  pricePoints: integer('price_points').notNull(),
+  currency: varchar('currency', { length: 16 }).default('free').notNull(),
+  rarity: varchar('rarity', { length: 32 }),
+  metadata: jsonb('metadata').$type<Record<string, unknown>>().default({}).notNull(),
+  isActive: boolean('is_active').default(true).notNull(),
+  availableFrom: timestamp('available_from', { withTimezone: true }),
+  availableUntil: timestamp('available_until', { withTimezone: true }),
+  version: integer('version').default(1).notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+}, (t) => ({
+  pricePositive: check('store_items_price_positive', sql`${t.pricePoints} > 0`),
+  currencyCheck: check('store_items_currency', sql`${t.currency} in ('free','pro')`),
+}));
+
+// 15. Points ledger (append-only via trigger, source of truth).
+export const pointTransactions = pgTable('point_transactions', {
+  id: bigint('id', { mode: 'number' }).generatedAlwaysAsIdentity().primaryKey(),
+  userId: uuid('user_id').references(() => users.id, { onDelete: 'restrict' }).notNull(),
+  amount: integer('amount').notNull(),
+  balanceAfter: integer('balance_after').notNull(),
+  currency: varchar('currency', { length: 16 }).default('free').notNull(),
+  type: varchar('type', { length: 32 }).notNull(),
+  referenceType: varchar('reference_type', { length: 64 }),
+  referenceId: varchar('reference_id', { length: 128 }),
+  idempotencyKey: varchar('idempotency_key', { length: 128 }).notNull(),
+  reason: varchar('reason', { length: 500 }),
+  actorId: uuid('actor_id').references(() => users.id, { onDelete: 'set null' }),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+}, (t) => ({
+  userIdemUq: uniqueIndex('ptx_user_idem_uq').on(t.userId, t.idempotencyKey),
+  userCreatedIdx: index('ptx_user_created_idx').on(t.userId, t.createdAt),
+  amountNonzero: check('ptx_amount_nonzero', sql`${t.amount} <> 0`),
+  currencyCheck: check('ptx_currency', sql`${t.currency} in ('free','pro')`),
+  typeCheck: check('ptx_type_check', sql`${t.type} in ('reward','iap_purchase','spend','refund','admin_adjust')`),
+}));
+
+// 16. Cached balances (lock rows for FOR UPDATE).
+export const userCoinBalances = pgTable('user_coin_balances', {
+  userId: uuid('user_id').references(() => users.id, { onDelete: 'restrict' }).notNull(),
+  currency: varchar('currency', { length: 16 }).notNull(),
+  balance: integer('balance').default(0).notNull(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+}, (t) => [
+  primaryKey({ columns: [t.userId, t.currency] }),
+  check('ucb_currency', sql`${t.currency} in ('free','pro')`),
+]);
+
+// 17. Owned items (one row per user+item).
+export const userInventory = pgTable('user_inventory', {
+  id: bigint('id', { mode: 'number' }).generatedAlwaysAsIdentity().primaryKey(),
+  userId: uuid('user_id').references(() => users.id, { onDelete: 'restrict' }).notNull(),
+  itemId: uuid('item_id').references(() => storeItems.id, { onDelete: 'restrict' }).notNull(),
+  source: varchar('source', { length: 32 }).notNull(),
+  pricePaid: integer('price_paid').notNull(),
+  currency: varchar('currency', { length: 16 }).notNull(),
+  acquiredAt: timestamp('acquired_at', { withTimezone: true }).defaultNow().notNull(),
+}, (t) => [
+  uniqueIndex('inv_user_item_uq').on(t.userId, t.itemId),
+  check('inv_currency', sql`${t.currency} in ('free','pro')`),
+]);
+
+// 18. Equipped slots (source of truth, cache in users.profile_decorations).
+export const userEquipped = pgTable('user_equipped', {
+  userId: uuid('user_id').notNull(),
+  slot: varchar('slot', { length: 32 }).notNull(),
+  itemId: uuid('item_id').notNull(),
+  equippedAt: timestamp('equipped_at', { withTimezone: true }).defaultNow().notNull(),
+}, (t) => [
+  primaryKey({ columns: [t.userId, t.slot] }),
+  foreignKey({ columns: [t.userId, t.itemId], foreignColumns: [userInventory.userId, userInventory.itemId] }),
+]);
+
+// 19. IAP purchases (server-verified, token dedup).
+export const iapPurchases = pgTable('iap_purchases', {
+  purchaseToken: varchar('purchase_token', { length: 255 }).primaryKey(),
+  userId: uuid('user_id').references(() => users.id, { onDelete: 'restrict' }).notNull(),
+  sku: varchar('sku', { length: 100 }).notNull(),
+  pointsGranted: integer('points_granted').notNull(),
+  currency: varchar('currency', { length: 16 }).notNull(),
+  status: varchar('status', { length: 20 }).default('granted').notNull(),
+  refundedAt: timestamp('refunded_at', { withTimezone: true }),
+  acknowledgedAt: timestamp('acknowledged_at', { withTimezone: true }),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+}, (t) => ({
+  currencyCheck: check('iap_currency', sql`${t.currency} in ('free','pro')`),
 }));

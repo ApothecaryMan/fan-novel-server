@@ -195,6 +195,9 @@ authRouter.patch('/me', requireAuth, async (c) => {
   const sub = payload.sub ?? '';
   const parsed = profilePatchSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return c.json({ error: 'بيانات الملف الشخصي غير صالحة', issues: parsed.error.issues }, 400);
+  if (parsed.data.decorations !== undefined) {
+    return c.json({ error: 'decorations are managed via PUT /api/v1/store/equip', code: 'decorations_locked' }, 400);
+  }
   const { name, username, bio, status, avatarUrl, bannerUrl, decorations, weeklyReadingGoalHours } = parsed.data;
   const bioInput = bio !== undefined ? bio : status;
   if (name === undefined && username === undefined && bioInput === undefined && avatarUrl === undefined

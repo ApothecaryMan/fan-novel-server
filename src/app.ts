@@ -15,6 +15,8 @@ import { authorKeysRouter } from './routes/authorKeys.js';
 import { syncRouter } from './routes/sync.js';
 import { authorRouter } from './routes/author.js';
 import { adminRouter } from './routes/admin.js';
+import { storeRouter, storeAdminRouter } from './routes/store.js';
+import { iapRouter } from './routes/iap.js';
 import { appUpdateRouter } from './routes/appUpdate.js';
 import { rateLimit } from './middleware/rateLimit.js';
 import { edgeCacheComments } from './middleware/edgeCache.js';
@@ -46,6 +48,8 @@ export function createApp() {
   app.use('/api/v1/sync/*', rateLimit(60));
   app.use('/api/v1/novels/*/comments*', rateLimit(60));
   app.use('/api/v1/comments/*', rateLimit(60));
+  app.use('/api/v1/store/*', rateLimit(60));
+  app.use('/api/v1/iap/*', rateLimit(60));
 
   // Edge cache for anonymous reads. Must run BEFORE the routes so a
   // public read can be served without touching Neon at all. It self-disables
@@ -131,6 +135,9 @@ export function createApp() {
   app.route('/api/v1/sync', syncRouter);
   app.route('/api/v1/author', authorRouter);
   app.route('/api/v1/admin', adminRouter);
+  app.route('/api/v1/store', storeRouter);
+  app.route('/api/v1/admin/store', storeAdminRouter);
+  app.route('/api/v1/iap', iapRouter);
   app.route('/api/v1/novels', novelsRouter);
   app.route('/api/v1/novels', chaptersRouter);
   app.route('/api/v1/novels', commentsNovelsRouter);

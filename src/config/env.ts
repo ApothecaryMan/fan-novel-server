@@ -26,6 +26,7 @@ const envSchema = z.object({
   APP_UPDATE_NOTES: z.string().default(''),
   APP_UPDATE_FORCE: z.enum(['true', 'false']).default('false'),
   APP_APK_SHA256: z.string().default(''),
+  IAP_WEBHOOK_SECRET: z.string().optional(),
 }).superRefine((value, ctx) => {
   if (value.NODE_ENV !== 'production') return;
   const invalid = (field: string) => ctx.addIssue({ code: z.ZodIssueCode.custom, path: [field], message: 'invalid configuration' });
