@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import pg from 'pg';
 import { Hono } from 'hono';
 import { eq } from 'drizzle-orm';
@@ -48,12 +48,9 @@ describe('economy store routes (Postgres, fail-loud)', () => {
     return row;
   }
   async function fund(userId: string, amount: number, currency = 'free', key = `f-${Math.random().toString(36).slice(2)}`) {
-    await database.insert(schema.pointTransactions).values({
-      userId, amount, balanceAfter: amount, currency, type: 'reward', idempotencyKey: key,
-    } as never);
-    await database.insert(schema.userCoinBalances).values({ userId, currency, balance: amount } as never)
-      .onConflictDoNothing();
-    await pool.query('UPDATE user_coin_balances SET balance = balance + $1 WHERE user_id = $2 AND currency = $3', [amount, userId, currency]);
+    const { grantPoints } = await import('../features/economy/service.js');
+    const res = await grantPoints(database, { userId, amount, currency, type: 'reward', key, source: 'achievement' });
+    expect(res.status).toBe('granted');
   }
 
   beforeAll(async () => {
@@ -82,6 +79,13 @@ describe('economy store routes (Postgres, fail-loud)', () => {
   }, 30_000);
   beforeEach(async () => {
     await pool.query('TRUNCATE users, store_items, point_transactions, user_coin_balances, user_inventory, user_equipped, iap_purchases RESTART IDENTITY CASCADE');
+  });
+  afterEach(async () => {
+    const wallets = await pool.query('SELECT user_id, currency, balance FROM user_coin_balances');
+    for (const w of wallets.rows) {
+      const s = await pool.query('SELECT COALESCE(SUM(amount),0) AS total FROM point_transactions WHERE user_id = $1 AND currency = $2', [w.user_id, w.currency]);
+      expect(Number(s.rows[0].total), `ledger==wallet ${w.currency}`).toBe(w.balance);
+    }
   });
   afterAll(async () => { await closeDb(); await pool?.end(); vi.unstubAllGlobals(); });
 
