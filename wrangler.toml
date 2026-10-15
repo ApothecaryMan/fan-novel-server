@@ -22,12 +22,12 @@ ADMIN_EMAILS = "mohamedrezk.mar@gmail.com"
 # In-app update prompt (GET /api/v1/app/version). Edit these + `wrangler deploy`
 # to announce a new APK. An empty APP_LATEST_VERSION disables the prompt.
 # APP_UPDATE_NOTES is a "|"-separated list of short lines.
-APP_LATEST_VERSION = "0.4.2"
+APP_LATEST_VERSION = "0.4.3"
 APP_MIN_VERSION = ""
 APP_UPDATE_URL = "https://fan-novel-server.mohamed1232003.workers.dev/api/v1/app/download"
-APP_UPDATE_NOTES = "جرس إشعارات لكل رواية مع اشتراك وتنبيهات فصول قابلة للتحكم|إعداد تحديث أسبوعي تلقائي مع أولوية للروايات الجارية|أطلس تفاعلي ومخطط قوة في ورقة تفاصيل الرواية مع توسعة اللور|حفظ أغلفة الروايات للعمل دون إنترنت في كل الشاشات|تهيئة مخزن الإحصائيات عند الإقلاع بعد جاهزية قاعدة البيانات|وحدة موحدة لوسائط البروفايل تحفظ الصورة والبانر عبر كل الشاشات|ورقة هوية النشر في تعليقات truthnovel مع تحسين التعامل مع الكيبورد"
+APP_UPDATE_NOTES = "صفحة اشتراك جديدة داخل التطبيق مع تفعيل Pro|101 إطار بروفايل جديد مصنفة في عائلات|منتقي إطارات افتراضي سريع بعرض عائلي وهندسة مضبوطة|شارات سعر وملكية في خلايا المتجر مع حالة تحميل|إشعارات فصول تسمي الفصل مع روابط عميقة للرواية|تقييد تخصيصات الاستوديو بشارة Pro"
 APP_UPDATE_FORCE = "false"
-APP_APK_SHA256 = "59700f6765d298f089999dd5ebb7050e9a9038a1d57409251af297303f99389e"
+APP_APK_SHA256 = "c9282e0177c7cea94e06c9251b0218714ee6a31fb6f1f92e171b55a442ef750c"
 
 # Required secrets (wrangler secret put):
 #   DATABASE_URL  — Neon pooled connection string (https, no Hyperdrive needed; neon-http driver)
