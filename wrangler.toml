@@ -24,17 +24,17 @@ ADMIN_EMAILS = "mohamedrezk.mar@gmail.com"
 # Each *_NOTES/_FIXES/_CHANGES var is a "|"-separated list of short lines; the
 # Arabic ones are also unioned into the legacy flat `notes` field so older
 # clients still see the whole release.
-APP_LATEST_VERSION = "0.4.3"
+APP_LATEST_VERSION = "0.4.4"
 APP_MIN_VERSION = ""
 APP_UPDATE_URL = "https://fan-novel-server.mohamed1232003.workers.dev/api/v1/app/download"
 APP_UPDATE_NOTES = "صفحة اشتراك جديدة داخل التطبيق مع تفعيل Pro|101 إطار بروفايل جديد مصنفة في عائلات|منتقي إطارات افتراضي سريع بعرض عائلي وهندسة مضبوطة|شارات سعر وملكية في خلايا المتجر مع حالة تحميل|إشعارات فصول تسمي الفصل مع روابط عميقة للرواية|تقييد تخصيصات الاستوديو بشارة Pro"
 APP_UPDATE_NOTES_EN = "New in-app subscription page with Pro activation|101 new profile frames grouped into families|Fast virtualized family frame picker with tuned per-frame geometry|Price and owned badges in store cells with loading state|Chapter-named release notifications with novel deep links|Studio customs gated behind Pro badge"
-APP_UPDATE_FIXES = "رسالة Pro محايدة بدون افتراض التجديد ومطابقة حجم زر القفل|شارات بعرض كامل وخلايا متساوية في الصف الأخير|إصلاح ترتيب الأيقونة في كاروسيل الإطارات للاتجاه الأيسر"
-APP_UPDATE_FIXES_EN = "Neutral Pro-only toast without renew assumption and matched lock size|Full-width badges with equal last-row cells|Icon-first badge order fix in LTR frame carousel"
+APP_UPDATE_FIXES = "إصلاح فشل تنزيل التحديث داخل التطبيق على أندرويد|رسالة Pro محايدة بدون افتراض التجديد ومطابقة حجم زر القفل|شارات بعرض كامل وخلايا متساوية في الصف الأخير|إصلاح ترتيب الأيقونة في كاروسيل الإطارات للاتجاه الأيسر"
+APP_UPDATE_FIXES_EN = "Fixed the in-app update failing to install on Android|Neutral Pro-only toast without renew assumption and matched lock size|Full-width badges with equal last-row cells|Icon-first badge order fix in LTR frame carousel"
 APP_UPDATE_CHANGES = "تحديث واجهات الحساب مع ورقة سفلية متجاوبة مع الكيبورد|تخزين مؤقت لكتالوج المتجر لخمس دقائق|ترحيل تجهيز الزينة إلى PUT مع شارة متجر موحدة"
 APP_UPDATE_CHANGES_EN = "Refreshed account surfaces with keyboard-aware bottom sheet|Five-minute store catalog cache|Decoration equip migrated to PUT with shared store badge"
 APP_UPDATE_FORCE = "false"
-APP_APK_SHA256 = "c9282e0177c7cea94e06c9251b0218714ee6a31fb6f1f92e171b55a442ef750c"
+APP_APK_SHA256 = ""
 
 # Required secrets (wrangler secret put):
 #   DATABASE_URL  — Neon pooled connection string (https, no Hyperdrive needed; neon-http driver)
