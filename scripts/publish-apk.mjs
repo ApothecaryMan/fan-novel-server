@@ -12,7 +12,7 @@ const LIVE_VERSION_URL = 'https://fan-novel-server.mohamed1232003.workers.dev/ap
 
 function usage() {
   console.error(
-    'Usage: node scripts/publish-apk.mjs <apk-file> --version <x.y.z> [--min-version <v>] [--notes "a|b"] [--notes-en "a|b"] [--fixes "a|b"] [--fixes-en "a|b"] [--changes "a|b"] [--changes-en "a|b"] [--force] [--dry-run]',
+    'Usage: node scripts/publish-apk.mjs <apk-file> --version <x.y.z> [--min-version <v>] [--notes "a|b"] [--notes-en "a|b"] [--fixes "a|b"] [--fixes-en "a|b"] [--changes "a|b"] [--changes-en "a|b"] [--force] [--no-checksum] [--dry-run]',
   );
   process.exit(1);
 }
@@ -28,13 +28,15 @@ const VALUE_FLAGS = [
   'changes-en',
 ];
 
+const BOOL_FLAGS = ['force', 'dry-run', 'no-checksum'];
+
 const positional = [];
 const flags = {};
 for (let i = 0; i < process.argv.length; i++) {
   const arg = process.argv[i];
   if (arg.startsWith('--') && VALUE_FLAGS.includes(arg.slice(2))) {
     flags[arg.slice(2)] = process.argv[++i];
-  } else if (arg === '--force' || arg === '--dry-run') {
+  } else if (arg.startsWith('--') && BOOL_FLAGS.includes(arg.slice(2))) {
     flags[arg.slice(2)] = true;
   } else if (i >= 2 && !arg.startsWith('-') && !arg.endsWith('.mjs')) {
     positional.push(arg);
@@ -79,18 +81,27 @@ function run(cmd, args) {
 
 const sha256 = await sha256File(apkPath);
 const size = statSync(apkPath).size;
+const announcedSha = flags['no-checksum'] ? '' : sha256;
 console.log(`apk: ${apkPath} (${size} bytes)`);
-console.log(`sha256: ${sha256}`);
+console.log(`sha256: ${sha256}${flags['no-checksum'] ? ' (withheld: transition release)' : ''}`);
 console.log(`version: ${version}`);
 
 let toml = readFileSync(TOML_PATH, 'utf8');
 toml = setTomlVar(toml, 'APP_LATEST_VERSION', version);
-toml = setTomlVar(toml, 'APP_APK_SHA256', sha256);
+toml = setTomlVar(toml, 'APP_APK_SHA256', announcedSha);
 if (flags['min-version'] !== undefined) toml = setTomlVar(toml, 'APP_MIN_VERSION', flags['min-version']);
 for (const [varName, flagName] of Object.entries(NOTE_VARS)) {
   if (flags[flagName] !== undefined) toml = setTomlVar(toml, varName, flags[flagName]);
 }
 if (flags.force) toml = setTomlVar(toml, 'APP_UPDATE_FORCE', 'true');
+
+// Withholding the checksum unblocks clients older than the fix that hashes the
+// APK without Buffer: they only verify when `apkSha256` is present, so an empty
+// value makes them install instead of throwing. Re-announce with the checksum
+// restored as soon as the fleet is on a fixed build.
+if (flags['no-checksum']) {
+  console.log('WARNING: publishing without a checksum — old clients will not verify the download');
+}
 
 if (flags['dry-run']) {
   console.log('dry-run: wrangler.toml and R2 untouched');
@@ -105,7 +116,12 @@ run('npx', ['wrangler', 'deploy']);
 
 const res = await fetch(LIVE_VERSION_URL);
 const body = await res.json();
-if (body?.data?.latestVersion !== version || body?.data?.apkSha256 !== sha256) {
+const announcedOk = flags['no-checksum'] ? body?.data?.apkSha256 == null : body?.data?.apkSha256 === sha256;
+if (body?.data?.latestVersion !== version || !announcedOk) {
   throw new Error(`live verification failed: ${JSON.stringify(body?.data)}`);
 }
-console.log('live verification ok: version and sha256 match');
+console.log(
+  flags['no-checksum']
+    ? 'live verification ok: version matches, checksum withheld'
+    : 'live verification ok: version and sha256 match',
+);
