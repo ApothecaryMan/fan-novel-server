@@ -36,13 +36,6 @@ interface ByteRange {
   end: number;
 }
 
-/** `|`-separated var → trimmed, non-empty lines. */
-function splitNotes(value: string): string[] {
-  return value
-    ? value.split('|').map((line) => line.trim()).filter(Boolean)
-    : [];
-}
-
 function parseRange(header: string | null, size: number): ByteRange | 'unsatisfiable' | null {
   if (!header) return null;
   const match = /^bytes=(\d*)-(\d*)$/.exec(header.trim());
@@ -75,22 +68,13 @@ function parseRange(header: string | null, size: number): ByteRange | 'unsatisfi
  * An empty APP_LATEST_VERSION means "no update" and the app stays silent.
  *
  * `minVersion` (optional) forces the update: anything below it cannot dismiss
- * the dialog. Notes are `|`-separated lists of short lines, per category and
- * language (APP_UPDATE_NOTES* / APP_UPDATE_FIXES* / APP_UPDATE_CHANGES*).
- *
- * `notes` is the legacy flat field: every Arabic line across all categories,
- * so old clients (which render everything under one badge) still show the
- * full release. New clients prefer `grouped` with per-category bilingual
- * notes and fall back to `notes` only when `grouped` is empty.
+ * the dialog. `notes` is a `|`-separated list of short lines.
  */
 appUpdateRouter.get('/version', (c) => {
   const env = getEnv();
-  const additionsAr = splitNotes(env.APP_UPDATE_NOTES);
-  const additionsEn = splitNotes(env.APP_UPDATE_NOTES_EN);
-  const fixesAr = splitNotes(env.APP_UPDATE_FIXES);
-  const fixesEn = splitNotes(env.APP_UPDATE_FIXES_EN);
-  const changesAr = splitNotes(env.APP_UPDATE_CHANGES);
-  const changesEn = splitNotes(env.APP_UPDATE_CHANGES_EN);
+  const notes = env.APP_UPDATE_NOTES
+    ? env.APP_UPDATE_NOTES.split('|').map((line) => line.trim()).filter(Boolean)
+    : [];
 
   return c.json({
     success: true,
@@ -99,12 +83,7 @@ appUpdateRouter.get('/version', (c) => {
       minVersion: env.APP_MIN_VERSION || null,
       downloadUrl: env.APP_UPDATE_URL || null,
       force: env.APP_UPDATE_FORCE === 'true',
-      notes: [...additionsAr, ...fixesAr, ...changesAr],
-      grouped: {
-        additions: { ar: additionsAr, en: additionsEn },
-        fixes: { ar: fixesAr, en: fixesEn },
-        changes: { ar: changesAr, en: changesEn },
-      },
+      notes,
       apkSha256: env.APP_APK_SHA256 || null,
     },
   });
