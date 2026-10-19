@@ -1,0 +1,84 @@
+import { asc, desc, eq, gt, sql } from 'drizzle-orm';
+import { db } from '../../database/db.js';
+import { readingSessions, users } from '../../database/schema.js';
+import { COMPLETION_THRESHOLD } from './contracts.js';
+import { toPublic } from '../../domain/accountProjection.js';
+
+export type LeaderboardPeriod = 'week' | 'month' | 'all';
+
+export interface LeaderboardEntry {
+  user: ReturnType<typeof toPublic>;
+  chapters: number;
+  trend: number;
+}
+
+interface Window {
+  from: string;
+  to: string;
+  prevFrom: string | null;
+  prevTo: string | null;
+}
+
+function utcDayLabel(offsetDays = 0): string {
+  const d = new Date();
+  d.setUTCDate(d.getUTCDate() + offsetDays);
+  return d.toISOString().slice(0, 10);
+}
+
+export function leaderboardWindow(period: LeaderboardPeriod, today = utcDayLabel()): Window {
+  if (period === 'month') {
+    const from = utcDayLabel(-29);
+    return { from, to: today, prevFrom: utcDayLabel(-59), prevTo: utcDayLabel(-30) };
+  }
+  if (period === 'all') {
+    return { from: '0000-01-01', to: today, prevFrom: null, prevTo: null };
+  }
+  const from = utcDayLabel(-6);
+  return { from, to: today, prevFrom: utcDayLabel(-13), prevTo: utcDayLabel(-7) };
+}
+
+function completedFilter(from: string | null, to: string | null) {
+  const bounds =
+    from === null || to === null
+      ? sql`TRUE`
+      : sql`${readingSessions.readDay} >= ${from} AND ${readingSessions.readDay} <= ${to}`;
+  return sql`${readingSessions.completionSignalPresent} AND ${readingSessions.progressPercent} >= ${COMPLETION_THRESHOLD} AND BTRIM(${readingSessions.novelId}) <> '' AND ${readingSessions.chapterId} > 0 AND ${bounds}`;
+}
+
+export async function loadLeaderboard(
+  period: LeaderboardPeriod,
+  limit = 10,
+): Promise<LeaderboardEntry[]> {
+  const bounded = Math.max(1, Math.min(50, Math.floor(limit) || 10));
+  const window = leaderboardWindow(period);
+  // One grouped pass with two FILTER aggregates (current + previous window).
+  // Explicit AS aliases: unnamed duplicate aggregates collapse in some row
+  // mappings. The outer query filters and orders on the subquery's real
+  // output columns — never on a quoted alias inside HAVING, which Postgres
+  // reads as a (missing) input column.
+  const agg = db
+    .select({
+      userId: readingSessions.userId,
+      chapters: sql<number>`COUNT(DISTINCT (${readingSessions.novelId}, ${readingSessions.chapterId})) FILTER (WHERE ${completedFilter(window.from, window.to)})`.as('chapters'),
+      prevChapters: sql<number>`COUNT(DISTINCT (${readingSessions.novelId}, ${readingSessions.chapterId})) FILTER (WHERE ${completedFilter(window.prevFrom, window.prevTo)})`.as('prev_chapters'),
+    })
+    .from(readingSessions)
+    .groupBy(readingSessions.userId)
+    .as('agg');
+  const rows = await db
+    .select({ user: users, chapters: agg.chapters, prevChapters: agg.prevChapters })
+    .from(agg)
+    .innerJoin(users, eq(users.id, agg.userId))
+    .where(gt(agg.chapters, 0))
+    .orderBy(desc(agg.chapters), asc(agg.userId))
+    .limit(bounded);
+  return rows.map((row) => {
+    const current = Number(row.chapters ?? 0);
+    const previous = Number(row.prevChapters ?? 0);
+    return {
+      user: toPublic(row.user, { includeEmail: false }),
+      chapters: current,
+      trend: current - previous,
+    };
+  });
+}
