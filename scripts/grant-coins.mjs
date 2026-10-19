@@ -42,9 +42,15 @@ if (!process.env.DATABASE_URL) {
   process.exit(2);
 }
 
+// Fail closed: if the compiled config cannot load (stale dist), refuse rather
+// than run without the cap. Rebuild with `npm run build` and retry.
 const econConfig = await import('../dist/features/economy/config.js').catch(() => ({}));
 const ADMIN_GRANT_MAX = econConfig.ADMIN_GRANT_MAX;
-if (ADMIN_GRANT_MAX && amount > ADMIN_GRANT_MAX) {
+if (!Number.isInteger(ADMIN_GRANT_MAX)) {
+  console.error('Could not load ADMIN_GRANT_MAX from dist — run `npm run build` first');
+  process.exit(2);
+}
+if (amount > ADMIN_GRANT_MAX) {
   console.error(`Amount exceeds ADMIN_GRANT_MAX (${ADMIN_GRANT_MAX})`);
   process.exit(2);
 }

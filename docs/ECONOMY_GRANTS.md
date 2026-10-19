@@ -20,8 +20,19 @@ and prints the result plus balances. `--dry-run` prints the plan without writing
   belong to their own flows, not to humans.
 - A fresh idempotency key per run, so a double-invoked command replays
   instead of double-paying. Same key + same user = `replayed`, zero granted.
-- Amount capped at `ADMIN_GRANT_MAX` (`src/features/economy/config.ts`).
+- Amount capped at `ADMIN_GRANT_MAX` (`src/features/economy/config.ts`), and
+  the script refuses to run if the compiled config cannot load (fail closed —
+  rebuild with `npm run build`, do not bypass).
 - `--reason` is required and lands in the ledger row.
+
+## Rules for the human (the script cannot enforce these)
+
+- Production needs an explicit human order, every time. The script cannot
+  tell staging from prod — only `DATABASE_URL` does. Never point it at Neon
+  production because "it looks safe"; wait for the literal go-ahead, same as
+  the migration/backfill rule.
+- Attribute the operator: `actorId` is null for CLI runs, so put who ordered
+  it in `--reason` (e.g. `--reason "top-up per <name>, 2026-10-19"`).
 
 ## Environment gotchas
 
