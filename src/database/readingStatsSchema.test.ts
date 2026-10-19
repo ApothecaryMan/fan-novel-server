@@ -363,6 +363,7 @@ describe('reading statistics database schema', () => {
       sessions_user_novel_chapter_idx: { unique: false, columns: ['user_id', 'novel_id', 'chapter_id'] },
       sessions_user_read_day_idx: { unique: false, columns: ['user_id', 'read_day'] },
       sessions_user_ts_id_idx: { unique: false, columns: ['user_id', 'ts', 'id'] },
+      leaderboard_read_day_idx: { unique: false, columns: ['read_day', 'user_id'] },
     });
     expect(indexesByName(readingNovels)).toEqual({
       reading_novels_user_novel_idx: { unique: true, columns: ['user_id', 'novel_id'] },
