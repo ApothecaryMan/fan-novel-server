@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
-import { isDbAvailable } from '../database/db.js';
+import { getEnv } from '../config/env.js';
+import { isDbAvailable, noteDbFailure } from '../database/db.js';
 import { loadLeaderboard } from '../features/readingSync/leaderboardStore.js';
 
 export const statsRouter = new Hono();
@@ -18,10 +19,18 @@ statsRouter.get('/leaderboard', async (c) => {
   if (!parsed.success) return c.json({ success: false, error: 'period must be week | month | all, limit an integer' }, 400);
   const limit = Math.min(50, Math.max(1, parsed.data.limit));
   const period = parsed.data.period;
-  if (!isDbAvailable()) {
+  if (!getEnv().DATABASE_URL) {
     return c.json({ success: true, data: [], period, limit });
   }
-  const data = await loadLeaderboard(period, limit);
-  c.header('Cache-Control', 'public, max-age=60, stale-while-revalidate=60');
-  return c.json({ success: true, data, period, limit });
+  if (!isDbAvailable()) {
+    return c.json({ success: false, error: 'leaderboard temporarily unavailable', retryable: true }, 503);
+  }
+  try {
+    const data = await loadLeaderboard(period, limit);
+    c.header('Cache-Control', 'public, max-age=60, stale-while-revalidate=60');
+    return c.json({ success: true, data, period, limit });
+  } catch {
+    noteDbFailure();
+    return c.json({ success: false, error: 'leaderboard temporarily unavailable', retryable: true }, 503);
+  }
 });
