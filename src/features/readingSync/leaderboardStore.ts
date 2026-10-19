@@ -9,6 +9,8 @@ export type LeaderboardPeriod = 'week' | 'month' | 'all';
 export interface LeaderboardEntry {
   user: ReturnType<typeof toPublic>;
   chapters: number;
+  /** Real reading seconds in the current window, clamped per row. */
+  seconds: number;
   trend: number;
 }
 
@@ -42,9 +44,12 @@ export function leaderboardWindow(period: LeaderboardPeriod, today = utcDayLabel
   return { from, to: today, prevFrom: utcDayLabel(-13), prevTo: utcDayLabel(-7) };
 }
 
+function dayBounds(from: string, to: string) {
+  return sql`${readingSessions.readDay} >= ${from} AND ${readingSessions.readDay} <= ${to}`;
+}
+
 function completedFilter(from: string, to: string) {
-  const bounds = sql`${readingSessions.readDay} >= ${from} AND ${readingSessions.readDay} <= ${to}`;
-  return sql`${readingSessions.completionSignalPresent} AND ${readingSessions.progressPercent} >= ${COMPLETION_THRESHOLD} AND BTRIM(${readingSessions.novelId}) <> '' AND ${readingSessions.chapterId} > 0 AND ${bounds}`;
+  return sql`${readingSessions.completionSignalPresent} AND ${readingSessions.progressPercent} >= ${COMPLETION_THRESHOLD} AND BTRIM(${readingSessions.novelId}) <> '' AND ${readingSessions.chapterId} > 0 AND ${dayBounds(from, to)}`;
 }
 
 export async function loadLeaderboard(
@@ -63,12 +68,13 @@ export async function loadLeaderboard(
       userId: readingSessions.userId,
       chapters: sql<number>`COUNT(DISTINCT (${readingSessions.novelId}, ${readingSessions.chapterId})) FILTER (WHERE ${completedFilter(window.from, window.to)})`.as('chapters'),
       prevChapters: sql<number>`COUNT(DISTINCT (${readingSessions.novelId}, ${readingSessions.chapterId})) FILTER (WHERE ${completedFilter(window.prevFrom, window.prevTo)})`.as('prev_chapters'),
+      seconds: sql<number>`COALESCE(SUM(GREATEST(${readingSessions.seconds}, 0)) FILTER (WHERE ${dayBounds(window.from, window.to)}), 0)`.as('seconds'),
     })
     .from(readingSessions)
     .groupBy(readingSessions.userId)
     .as('agg');
   const rows = await db
-    .select({ user: users, chapters: agg.chapters, prevChapters: agg.prevChapters })
+    .select({ user: users, chapters: agg.chapters, prevChapters: agg.prevChapters, seconds: agg.seconds })
     .from(agg)
     .innerJoin(users, eq(users.id, agg.userId))
     .where(gt(agg.chapters, 0))
@@ -80,6 +86,7 @@ export async function loadLeaderboard(
     return {
       user: toPublic(row.user, { includeEmail: false }),
       chapters: current,
+      seconds: Number(row.seconds ?? 0),
       trend: current - previous,
     };
   });

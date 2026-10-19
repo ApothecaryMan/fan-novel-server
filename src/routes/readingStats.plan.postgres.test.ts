@@ -8,7 +8,7 @@ import * as schema from '../database/schema.js';
 import { readingSessions, users } from '../database/schema.js';
 import { FREE_STATS_KEYS, MAX_SESSIONS_PER_PUSH, PRO_ONLY_STATS_KEYS, freeReadingSyncPushResponseSchema, proReadingSyncPullResponseSchema } from '../features/readingSync/contracts.js';
 import { calculateFreeStats } from '../features/readingSync/calculations.js';
-import { toFreeScanSession } from '../features/readingSync/freeStore.js';
+import { toFreeScanSession, utcDayFromTs } from '../features/readingSync/freeStore.js';
 import { signToken } from '../middleware/auth.js';
 import { closeDb, initDb } from '../database/db.js';
 
@@ -197,7 +197,7 @@ describe.skipIf(!url)('Free reading plan sync (isolated PostgreSQL)', () => {
         // NOT NULL Pro columns keep safe defaults, never client data.
         words: 0,
         minuteOfDay: 0,
-        readDay: '',
+        readDay: utcDayFromTs(1782470400000),
       });
     }
     expect(rows[0]).toMatchObject({

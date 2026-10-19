@@ -113,13 +113,14 @@ describe.skipIf(!url)('loadLeaderboard (isolated PostgreSQL)', () => {
     const rows = await loadLeaderboard('week', 10);
     const { a, b } = (globalThis as any).__lbUsers;
     expect(rows.map((r) => r.user.id)).toEqual([a.externalId, b.externalId]);
-    expect(rows[0]).toMatchObject({ chapters: 2, trend: 1 });
-    expect(rows[1]).toMatchObject({ chapters: 1, trend: 1 });
+    expect(rows[0]).toMatchObject({ chapters: 2, seconds: 1200, trend: 1 });
+    expect(rows[1]).toMatchObject({ chapters: 1, seconds: 1200, trend: 1 });
   });
 
   it('reports a zero trend for the unbounded all window', async () => {
     const rows = await loadLeaderboard('all', 10);
     expect(rows.map((r) => r.chapters)).toEqual([3, 3, 2]);
+    expect(rows.map((r) => r.seconds)).toEqual([1800, 1800, 1800]);
     expect(rows.map((r) => r.trend)).toEqual([0, 0, 0]);
   });
 
