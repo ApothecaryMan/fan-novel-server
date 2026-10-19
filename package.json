@@ -17,6 +17,7 @@
     "economy:backfill": "node scripts/backfill-economy-legacy.mjs",
     "economy:seed-frames": "node scripts/seed-economy-frames.mjs",
     "economy:reconcile": "node scripts/economy-reconcile.mjs",
+    "economy:grant": "node scripts/grant-coins.mjs",
     "release:apk": "node scripts/publish-apk.mjs",
     "test": "vitest run"
   },
