@@ -174,7 +174,10 @@ export const readingSessions = pgTable('reading_sessions', {
   sessionsUserClientIdx: uniqueIndex('sessions_user_client_idx').on(table.userId, table.clientSessionId),
   sessionsUserNovelChapterIdx: index('sessions_user_novel_chapter_idx').on(table.userId, table.novelId, table.chapterId),
   sessionsUserReadDayIdx: index('sessions_user_read_day_idx').on(table.userId, table.readDay),
-  sessionsUserTsIdIdx: index('sessions_user_ts_id_idx').on(table.userId, table.ts, table.id)
+  sessionsUserTsIdIdx: index('sessions_user_ts_id_idx').on(table.userId, table.ts, table.id),
+  leaderboardReadDayIdx: index('leaderboard_read_day_idx')
+    .on(table.readDay, table.userId)
+    .where(sql`${table.completionSignalPresent} AND ${table.progressPercent} >= 85`)
 }));
 
 // Small per-user metadata cache for local/extension novels and Pro aggregates.

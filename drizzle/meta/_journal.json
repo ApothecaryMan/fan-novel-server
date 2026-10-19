@@ -148,6 +148,13 @@
       "when": 1792061874674,
       "tag": "0020_economy_ledger",
       "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1792407453619,
+      "tag": "0021_big_bloodstrike",
+      "breakpoints": true
     }
   ]
 }

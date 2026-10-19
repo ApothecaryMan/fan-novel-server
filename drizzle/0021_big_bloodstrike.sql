@@ -1,0 +1,1 @@
+CREATE INDEX "leaderboard_read_day_idx" ON "reading_sessions" USING btree ("read_day","user_id") WHERE "reading_sessions"."completion_signal_present" AND "reading_sessions"."progress_percent" >= 85;
