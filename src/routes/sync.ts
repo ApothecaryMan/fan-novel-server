@@ -10,6 +10,7 @@ import {
   FREE_SESSION_SAFE_DEFAULTS,
   loadFreeStatsForUser,
   storeFreeSessions,
+  utcDayFromTs,
 } from '../features/readingSync/freeStore.js';
 import { pullProData, storeProPush } from '../features/readingSync/proStore.js';
 import { buildProPushResponse, parseProV2Pull, parseProV2Push } from '../features/readingSync/proProtocol.js';
@@ -487,7 +488,7 @@ syncRouter.post('/push', async (c) => {
         novelId: String(e.novelId ?? ''),
         chapterId: num(e.chapterId),
         seconds: num(e.seconds),
-        ...(legacyFree ? FREE_SESSION_SAFE_DEFAULTS : {
+        ...(legacyFree ? { ...FREE_SESSION_SAFE_DEFAULTS, readDay: utcDayFromTs(num(e.ts, now)) } : {
           words: num(e.words),
           minuteOfDay: num(e.minuteOfDay),
           readDay: strDef(e.readDay),

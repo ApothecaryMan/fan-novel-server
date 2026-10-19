@@ -39,6 +39,21 @@ export const FREE_SESSION_SAFE_DEFAULTS = {
 } as const;
 
 /**
+ * UTC calendar day ('YYYY-MM-DD') derived from a validated epoch-ms ts.
+ *
+ * Free events carry no day dimension on the wire, but the server holds the
+ * ts, so the day is computed, not invented — the same UTC convention the
+ * windowed aggregates (activityTierWindow, leaderboardWindow) already use.
+ * Without this every Free row stores '' and is invisible to all windows no
+ * matter how complete it is. words/minuteOfDay stay zeroed: the day is a
+ * pure function of the client's own ts, never Pro evidence.
+ */
+export function utcDayFromTs(ts: number): string {
+  if (!Number.isSafeInteger(ts)) return '';
+  return new Date(ts).toISOString().slice(0, 10);
+}
+
+/**
  * `progress_percent` is a float4, so a round-trip is only float-accurate.
  * Compare with a tolerance wider than float4's worst case at 100.0 to avoid
  * reporting a phantom conflict for a value the client already stored.
@@ -214,6 +229,7 @@ function toFreeSessionRow(userId: string, session: FreeSession) {
     completionSignalPresent: true,
     proFieldsPresent: false,
     ...FREE_SESSION_SAFE_DEFAULTS,
+    readDay: utcDayFromTs(session.ts),
     seconds: session.seconds,
     ts: session.ts,
   };
