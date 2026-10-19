@@ -15,8 +15,8 @@ export interface LeaderboardEntry {
 interface Window {
   from: string;
   to: string;
-  prevFrom: string | null;
-  prevTo: string | null;
+  prevFrom: string;
+  prevTo: string;
 }
 
 function utcDayLabel(offsetDays = 0): string {
@@ -31,17 +31,19 @@ export function leaderboardWindow(period: LeaderboardPeriod, today = utcDayLabel
     return { from, to: today, prevFrom: utcDayLabel(-59), prevTo: utcDayLabel(-30) };
   }
   if (period === 'all') {
-    return { from: '0000-01-01', to: today, prevFrom: null, prevTo: null };
+    // Unbounded lifetime: there is no previous baseline, so the previous
+    // range mirrors the current one and the trend is always zero. It must
+    // NOT be left open: legacy rows with an empty read_day label pass an
+    // open filter but fail the '0000-01-01' lower bound, which would forge
+    // a negative trend out of rows the current window never counted.
+    return { from: '0000-01-01', to: today, prevFrom: '0000-01-01', prevTo: today };
   }
   const from = utcDayLabel(-6);
   return { from, to: today, prevFrom: utcDayLabel(-13), prevTo: utcDayLabel(-7) };
 }
 
-function completedFilter(from: string | null, to: string | null) {
-  const bounds =
-    from === null || to === null
-      ? sql`TRUE`
-      : sql`${readingSessions.readDay} >= ${from} AND ${readingSessions.readDay} <= ${to}`;
+function completedFilter(from: string, to: string) {
+  const bounds = sql`${readingSessions.readDay} >= ${from} AND ${readingSessions.readDay} <= ${to}`;
   return sql`${readingSessions.completionSignalPresent} AND ${readingSessions.progressPercent} >= ${COMPLETION_THRESHOLD} AND BTRIM(${readingSessions.novelId}) <> '' AND ${readingSessions.chapterId} > 0 AND ${bounds}`;
 }
 

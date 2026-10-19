@@ -98,6 +98,7 @@ describe.skipIf(!url)('loadLeaderboard (isolated PostgreSQL)', () => {
       sessionRow(c.id, { chapterId: 1, readDay: daysAgo(10) }),
       sessionRow(c.id, { chapterId: 2, readDay: daysAgo(12) }),
       sessionRow(c.id, { chapterId: 3, readDay: daysAgo(13) }),
+      sessionRow(c.id, { chapterId: 9, readDay: '' }),
     ]);
     (globalThis as any).__lbUsers = { a, b, c };
   });
@@ -114,6 +115,12 @@ describe.skipIf(!url)('loadLeaderboard (isolated PostgreSQL)', () => {
     expect(rows.map((r) => r.user.id)).toEqual([a.externalId, b.externalId]);
     expect(rows[0]).toMatchObject({ chapters: 2, trend: 1 });
     expect(rows[1]).toMatchObject({ chapters: 1, trend: 1 });
+  });
+
+  it('reports a zero trend for the unbounded all window', async () => {
+    const rows = await loadLeaderboard('all', 10);
+    expect(rows.map((r) => r.chapters)).toEqual([3, 3, 2]);
+    expect(rows.map((r) => r.trend)).toEqual([0, 0, 0]);
   });
 
   it('never leaks email into the public rows', async () => {
