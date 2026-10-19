@@ -18,6 +18,7 @@ import { adminRouter } from './routes/admin.js';
 import { storeRouter, storeAdminRouter } from './routes/store.js';
 import { iapRouter } from './routes/iap.js';
 import { appUpdateRouter } from './routes/appUpdate.js';
+import { statsRouter } from './routes/stats.js';
 import { rateLimit } from './middleware/rateLimit.js';
 import { edgeCacheComments } from './middleware/edgeCache.js';
 import { checkDb, initDb, isDbAvailable } from './database/db.js';
@@ -50,6 +51,7 @@ export function createApp() {
   app.use('/api/v1/comments/*', rateLimit(60));
   app.use('/api/v1/store/*', rateLimit(60));
   app.use('/api/v1/iap/*', rateLimit(60));
+  app.use('/api/v1/stats/*', rateLimit(60));
 
   // Edge cache for anonymous reads. Must run BEFORE the routes so a
   // public read can be served without touching Neon at all. It self-disables
@@ -147,6 +149,7 @@ export function createApp() {
   app.route('/api/v1/upload', uploadRouter);
   app.route('/api/v1/image', imageResizeRouter);
   app.route('/api/v1/app', appUpdateRouter);
+  app.route('/api/v1/stats', statsRouter);
 
   app.get('/api/v1', (c) => {
     return c.json({
@@ -179,6 +182,7 @@ export function createApp() {
         syncStats: 'POST /api/v1/sync/stats',
         userProfile: 'GET /api/v1/users/me/profile',
         userPublicProfile: 'GET /api/v1/users/:id/profile',
+        readersLeaderboard: 'GET /api/v1/stats/leaderboard?period=week|month|all&limit=10',
       },
     });
   });
