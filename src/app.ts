@@ -18,6 +18,7 @@ import { adminRouter } from './routes/admin.js';
 import { storeRouter, storeAdminRouter } from './routes/store.js';
 import { iapRouter } from './routes/iap.js';
 import { appUpdateRouter } from './routes/appUpdate.js';
+import { appConfigRouter } from './routes/appConfig.js';
 import { statsRouter } from './routes/stats.js';
 import { rateLimit } from './middleware/rateLimit.js';
 import { edgeCacheComments } from './middleware/edgeCache.js';
@@ -149,6 +150,7 @@ export function createApp() {
   app.route('/api/v1/upload', uploadRouter);
   app.route('/api/v1/image', imageResizeRouter);
   app.route('/api/v1/app', appUpdateRouter);
+  app.route('/api/v1/app', appConfigRouter);
   app.route('/api/v1/stats', statsRouter);
 
   app.get('/api/v1', (c) => {

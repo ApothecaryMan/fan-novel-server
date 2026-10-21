@@ -31,6 +31,12 @@ APP_UPDATE_NOTES = ""
 APP_UPDATE_FORCE = "false"
 APP_APK_SHA256 = ""
 
+# Extension catalogue (GET /api/v1/app/config). Set catalogEnabled to "false"
+# to hide the Browse repository tab for every user; point repoUrl at another
+# catalogue signed by the app's bundled key.
+EXTENSIONS_REPO_URL = "https://raw.githubusercontent.com/ApothecaryMan/fan-novel-extensions/main/docs"
+EXTENSIONS_CATALOG_ENABLED = "true"
+
 # Required secrets (wrangler secret put):
 #   DATABASE_URL  — Neon pooled connection string (https, no Hyperdrive needed; neon-http driver)
 #   JWT_SECRET    — long random string

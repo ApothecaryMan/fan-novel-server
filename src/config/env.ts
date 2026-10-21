@@ -26,6 +26,10 @@ const envSchema = z.object({
   APP_UPDATE_NOTES: z.string().default(''),
   APP_UPDATE_FORCE: z.enum(['true', 'false']).default('false'),
   APP_APK_SHA256: z.string().default(''),
+  // Extension catalogue (GET /api/v1/app/config). Change these + deploy to
+  // point the app at another signed repo or hide the Browse tab remotely.
+  EXTENSIONS_REPO_URL: z.string().default(''),
+  EXTENSIONS_CATALOG_ENABLED: z.enum(['true', 'false']).default('true'),
   IAP_WEBHOOK_SECRET: z.string().optional(),
   GOOGLE_PLAY_SERVICE_ACCOUNT: z.string().optional(),
   IAP_ALLOW_STUB: z.enum(['true', 'false']).default('false'),
