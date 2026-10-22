@@ -315,7 +315,7 @@ export const userAchievementUnlocks = pgTable('user_achievement_unlocks', {
 // 13. Global chapter-view dedup (powers public view counters).
 // One row per (novel, chapter, viewer). Counters live on chapters.views_count
 // and novels.views_count; this table only answers "did this viewer already
-// count this chapter inside the revisit window?" so a re-open within 30 min
+// count this chapter inside the revisit window?" so a re-open within 12 hours
 // does not inflate the public counter. viewer_key is `u:<userId>` for signed
 // requests, else `ip:<sha256(ip|ua)>` — no raw IP is stored.
 export const chapterViewDedup = pgTable('chapter_view_dedup', {

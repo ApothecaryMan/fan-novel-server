@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { Hono } from 'hono';
 import { CHAPTERS_STORE, chaptersRouter, qualifiesForView } from './chapters.js';
 import { NOVELS_STORE } from './novels.js';
@@ -62,6 +62,27 @@ describe('POST /novels/:id/chapters/:n/view (memory fallback)', () => {
     expect(await second.json()).toMatchObject({ success: true, counted: false });
     expect(CHAPTERS_STORE.get(novelId)![0].viewsCount).toBe(1);
     expect(NOVELS_STORE.get(novelId)!.viewsCount).toBe(1);
+  });
+
+  it('dedupes a re-open inside 12 hours and counts again after', async () => {
+    seed();
+    vi.useFakeTimers();
+    const start = new Date('2026-01-01T00:00:00Z').getTime();
+    try {
+      vi.setSystemTime(start);
+      const first = await postView({ readSeconds: 20 }, '10.9.0.4');
+      expect(await first.json()).toMatchObject({ success: true, counted: true });
+
+      vi.setSystemTime(start + 11 * 60 * 60 * 1000);
+      const within = await postView({ readSeconds: 20 }, '10.9.0.4');
+      expect(await within.json()).toMatchObject({ success: true, counted: false });
+
+      vi.setSystemTime(start + 12 * 60 * 60 * 1000 + 1);
+      const after = await postView({ readSeconds: 20 }, '10.9.0.4');
+      expect(await after.json()).toMatchObject({ success: true, counted: true });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('exposes the counters on list and content reads', async () => {

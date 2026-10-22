@@ -420,10 +420,10 @@ chaptersRouter.get('/:novelId/chapters/:chapterNumber', async (c) => {
 // Global public view counter. GET never counts (it is CDN-cacheable); the
 // client calls this POST once its local hook qualifies the read (15s active
 // or 25% scroll). Anonymous callers count via an IP+UA hash, signed callers
-// via their user id. Re-opens inside 30 min are deduped, not counted.
+// via their user id. Re-opens inside 12 hours are deduped, not counted.
 export const VIEW_SECONDS = 15;
 export const VIEW_PROGRESS = 0.25;
-export const VIEW_REVISIT_WINDOW_MS = 30 * 60 * 1000;
+export const VIEW_REVISIT_WINDOW_MS = 12 * 60 * 60 * 1000;
 
 export function qualifiesForView(readSeconds: number | undefined, progress: number | undefined): boolean {
   return (readSeconds ?? 0) >= VIEW_SECONDS || (progress ?? 0) >= VIEW_PROGRESS;
@@ -467,7 +467,7 @@ chaptersRouter.post('/:novelId/chapters/:chapterNumber/view', rateLimit(60), asy
       if (!target) return c.json({ success: false, error: 'الفصل غير موجود' }, 404);
       const canonical = target.chapterNumber;
       // Single atomic statement: the row lock on the dedup PK serializes
-      // concurrent hits from the same viewer, so a re-open inside 30 min
+      // concurrent hits from the same viewer, so a re-open inside 12 hours
       // makes every downstream CTE a no-op with no race and one round trip.
       // DB now() is used instead of a JS Date param: the neon-http driver
       // stringifies Dates into a format Postgres rejects as timestamptz.
@@ -477,7 +477,7 @@ chaptersRouter.post('/:novelId/chapters/:chapterNumber/view', rateLimit(60), asy
           VALUES (${novelId}, ${canonical}, ${viewerKey}, now())
           ON CONFLICT ("novel_id", "chapter_number", "viewer_key") DO UPDATE
             SET "last_viewed_at" = now()
-            WHERE "chapter_view_dedup"."last_viewed_at" <= now() - interval '30 minutes'
+            WHERE "chapter_view_dedup"."last_viewed_at" <= now() - interval '12 hours'
           RETURNING 1
         ),
         ch AS (

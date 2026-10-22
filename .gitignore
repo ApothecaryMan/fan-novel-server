@@ -26,3 +26,5 @@ eas.json
 .agents/
 .claude/
 skills-lock.json
+
+.worktrees/
