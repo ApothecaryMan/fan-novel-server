@@ -12,14 +12,20 @@ import { PurchaseError, equipItem, getBalances, grantPoints, purchaseItem } from
 
 export const storeRouter = new Hono();
 
+// 503 contract, shared by every store outage: `retryable: true` mirrors the
+// leaderboard 503s, so a client retries a blip instead of reporting failure.
+function storeUnavailable(c: any) {
+  return c.json({ error: 'store unavailable', retryable: true }, 503);
+}
+
 function err(c: any, e: unknown) {
   if (e instanceof PurchaseError) return c.json({ error: e.code }, e.status);
   noteDbFailure();
-  return c.json({ error: 'store unavailable' }, 503);
+  return storeUnavailable(c);
 }
 
 storeRouter.get('/catalog', async (c) => {
-  if (!isDbAvailable()) return c.json({ error: 'store unavailable' }, 503);
+  if (!isDbAvailable()) return storeUnavailable(c);
   try {
     const now = new Date();
     const rows = await db.select().from(storeItems).where(eq(storeItems.isActive, true));
@@ -28,14 +34,14 @@ storeRouter.get('/catalog', async (c) => {
     return c.json({ items: live.map((r) => ({ id: r.id, sku: r.sku, type: r.type, name: r.name, pricePoints: r.pricePoints, currency: r.currency, rarity: r.rarity, metadata: r.metadata })) });
   } catch {
     noteDbFailure();
-    return c.json({ error: 'store unavailable' }, 503);
+    return storeUnavailable(c);
   }
 });
 
 storeRouter.get('/sync', requireAuth, async (c) => {
   const caller = await getCaller(c);
   if (!caller.row) return c.json({ error: 'unauthorized' }, 401);
-  if (!isDbAvailable()) return c.json({ error: 'store unavailable' }, 503);
+  if (!isDbAvailable()) return storeUnavailable(c);
   try {
     const nowMs = Date.now();
     const isPro = effectiveReadingPlan(caller.row, nowMs) === 'pro';
@@ -60,7 +66,7 @@ storeRouter.get('/sync', requireAuth, async (c) => {
     return c.json({ balances, ownedItemIds: owned.map((o) => o.itemId), equipped, decorations: parseProfileDecorations(fresh?.profileDecorations), serverNow: new Date(nowMs).toISOString() });
   } catch {
     noteDbFailure();
-    return c.json({ error: 'store unavailable' }, 503);
+    return storeUnavailable(c);
   }
 });
 
@@ -70,7 +76,7 @@ storeRouter.post('/purchase', requireAuth, async (c) => {
   if (!caller.row) return c.json({ error: 'unauthorized' }, 401);
   const parsed = purchaseSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return c.json({ error: 'invalid purchase' }, 400);
-  if (!isDbAvailable()) return c.json({ error: 'store unavailable' }, 503);
+  if (!isDbAvailable()) return storeUnavailable(c);
   try {
     const isPro = effectiveReadingPlan(caller.row, Date.now()) === 'pro';
     const key = `client:${caller.row.id}:${parsed.data.idempotencyKey}`;
@@ -88,7 +94,7 @@ storeRouter.put('/equip', requireAuth, async (c) => {
   if (!caller.row) return c.json({ error: 'unauthorized' }, 401);
   const parsed = equipSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return c.json({ error: 'invalid equip' }, 400);
-  if (!isDbAvailable()) return c.json({ error: 'store unavailable' }, 503);
+  if (!isDbAvailable()) return storeUnavailable(c);
   try {
     const nowMs = Date.now();
     const body = parsed.data as { slot: string; itemId?: string | null; value?: unknown };
@@ -122,14 +128,14 @@ storeAdminRouter.post('/items', requireAuth, async (c) => {
   if (!parsed.success) return c.json({ error: 'invalid item' }, 400);
   const meta = validateItemMetadata(parsed.data.type, parsed.data.metadata);
   if (!meta.ok) return c.json({ error: meta.error }, 400);
-  if (!isDbAvailable()) return c.json({ error: 'store unavailable' }, 503);
+  if (!isDbAvailable()) return storeUnavailable(c);
   try {
     const [row] = await db.insert(storeItems).values({ ...parsed.data, metadata: meta.value as any }).returning();
     return c.json({ success: true, item: row }, 201);
   } catch (e: any) {
     if (String(e?.cause?.code ?? e?.code) === '23505') return c.json({ error: 'sku_taken' }, 409);
     noteDbFailure();
-    return c.json({ error: 'store unavailable' }, 503);
+    return storeUnavailable(c);
   }
 });
 
@@ -144,7 +150,7 @@ storeAdminRouter.patch('/items/:id', requireAuth, async (c) => {
   if ('errorResponse' in gate) return gate.errorResponse;
   const parsed = itemPatchSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return c.json({ error: 'invalid item patch' }, 400);
-  if (!isDbAvailable()) return c.json({ error: 'store unavailable' }, 503);
+  if (!isDbAvailable()) return storeUnavailable(c);
   try {
     const [current] = await db.select().from(storeItems).where(eq(storeItems.id, c.req.param('id'))).limit(1);
     if (!current) return c.json({ error: 'item_unavailable' }, 404);
@@ -172,7 +178,7 @@ storeAdminRouter.post('/grant', requireAuth, async (c) => {
   if ('errorResponse' in gate) return gate.errorResponse;
   const parsed = grantSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return c.json({ error: 'invalid grant' }, 400);
-  if (!isDbAvailable()) return c.json({ error: 'store unavailable' }, 503);
+  if (!isDbAvailable()) return storeUnavailable(c);
   try {
     const res = await grantPoints(db, {
       userId: parsed.data.userId, amount: parsed.data.amount, currency: parsed.data.currency,
