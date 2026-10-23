@@ -9,6 +9,7 @@ import { users } from '../database/schema.js';
 import { requireAuth, signToken } from '../middleware/auth.js';
 import { adminEmails, getEnv } from '../config/env.js';
 import { isEmptyDecorations, profileDecorationsSchema } from '../domain/profileDecorations.js';
+import { deleteUploadKey, parseUploadKey } from '../storage/objectStore.js';
 import { toPublic as projectAccount } from '../domain/accountProjection.js';
 
 export const authRouter = new Hono();
@@ -27,6 +28,8 @@ authRouter.delete('/me', requireAuth, async (c) => {
     const row = found[0];
     if (!row) return c.json({ error: 'account not found' }, 401);
     const stub = `deleted_${row.id.slice(0, 8)}`;
+    const prevDelAvatar = row.avatarUrl as string | null | undefined;
+    const prevDelBanner = row.bannerUrl as string | null | undefined;
     const [updated] = await db.update(users).set({
       externalId: `deleted_${row.id}`,
       googleSubject: null,
@@ -41,6 +44,9 @@ authRouter.delete('/me', requireAuth, async (c) => {
       updatedAt: new Date(),
     }).where(eq(users.id, row.id)).returning();
     if (!updated) return c.json({ error: 'account not found' }, 401);
+    for (const key of [...staleUploadKeys(prevDelAvatar, null), ...staleUploadKeys(prevDelBanner, null)]) {
+      await deleteUploadKey(key);
+    }
     return c.json({ success: true });
   } catch (error) {
     return accountError(c, error);
@@ -85,6 +91,13 @@ function toIso(value: unknown): string | null {
 // echoed back a user body without it. One authority now.
 function toPublic(u: any) {
   return projectAccount(u);
+}
+
+function staleUploadKeys(oldUrl: string | null | undefined, newUrl: string | null | undefined): string[] {
+  const oldKey = parseUploadKey(oldUrl);
+  if (!oldKey) return [];
+  if (parseUploadKey(newUrl) === oldKey) return [];
+  return [oldKey];
 }
 
 function accountError(c: import('hono').Context, error: unknown) {
@@ -289,6 +302,8 @@ authRouter.patch('/me', requireAuth, async (c) => {
           return c.json({ error: 'اسم المستخدم محجوز بالفعل', code: 'username_taken', suggestions }, 409);
         }
       }
+      const prevAvatar = row.avatarUrl as string | null | undefined;
+      const prevBanner = row.bannerUrl as string | null | undefined;
       const patch: Record<string, unknown> = { updatedAt: new Date() };
       if (username !== undefined) patch.username = username;
       if (name !== undefined) patch.displayName = name;
@@ -298,6 +313,13 @@ authRouter.patch('/me', requireAuth, async (c) => {
       if (weeklyReadingGoalHours !== undefined) patch.weeklyReadingGoalHours = weeklyReadingGoalHours;
       const [updated] = await db.update(users).set(patch).where(eq(users.id, row.id)).returning();
       if (!updated) return c.json({ error: 'account not found' }, 401);
+      if (avatarUrl !== undefined || bannerUrl !== undefined) {
+        const stale = [
+          ...staleUploadKeys(prevAvatar, avatarUrl === undefined ? prevAvatar : (avatarUrl as string | null)),
+          ...staleUploadKeys(prevBanner, bannerUrl === undefined ? prevBanner : (bannerUrl as string | null)),
+        ];
+        for (const key of stale) await deleteUploadKey(key);
+      }
       return c.json({ success: true, user: toPublic({ ...updated, externalId: row.externalId }) });
     } catch (error) {
       if (isUniqueConflict(error) && username !== undefined) {
@@ -331,8 +353,17 @@ authRouter.patch('/me', requireAuth, async (c) => {
   }
   if (name !== undefined) user.displayName = name;
   if (bioInput !== undefined) user.bio = cleanBio(bioInput);
+  const prevAvatar = user.avatarUrl as string | null | undefined;
+  const prevBanner = user.bannerUrl as string | null | undefined;
   if (avatarUrl !== undefined) user.avatarUrl = avatarUrl === null ? null : cleanMediaUrl(avatarUrl);
   if (bannerUrl !== undefined) user.bannerUrl = bannerUrl === null ? null : cleanMediaUrl(bannerUrl);
+  if (avatarUrl !== undefined || bannerUrl !== undefined) {
+    const stale = [
+      ...staleUploadKeys(prevAvatar, user.avatarUrl),
+      ...staleUploadKeys(prevBanner, user.bannerUrl),
+    ];
+    for (const key of stale) await deleteUploadKey(key);
+  }
   if (weeklyReadingGoalHours !== undefined) user.weeklyReadingGoalHours = weeklyReadingGoalHours;
   return c.json({ success: true, user: toPublic(user) });
 });

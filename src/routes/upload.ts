@@ -1,8 +1,8 @@
 import { Hono } from 'hono';
 import path from 'path';
-import crypto from 'crypto';
 import { requireAuthOrPat } from '../middleware/authorToken.js';
 import { getEnv, getWorkerBinding, isWorkersRuntime } from '../config/env.js';
+import { buildUploadFilename } from '../storage/objectStore.js';
 
 export const uploadRouter = new Hono();
 
@@ -51,8 +51,8 @@ uploadRouter.post('/image', async (c, next) => {
     if (buffer.length > getEnv().UPLOAD_MAX_MB * 1024 * 1024) {
       return c.json({ success: false, error: `حجم الصورة يتجاوز ${getEnv().UPLOAD_MAX_MB}MB` }, 413);
     }
-    const filename = `${Date.now()}_${crypto.randomBytes(6).toString('hex')}${MIME_EXT[file.type]}`;
-    const key = `${folder}/${filename}`;
+    const key = buildUploadFilename(folder, file.type);
+    const filename = key.split('/').pop() ?? key;
     const bound = await putBinding(buffer, key, file.type).catch((err) => {
       console.error('[upload] binding failed', err);
       return null;

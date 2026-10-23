@@ -6,6 +6,7 @@ import { novels } from '../database/schema.js';
 import { requireAuthOrPat } from '../middleware/authorToken.js';
 import { ensureNovelOwner, getCaller } from '../middleware/ownership.js';
 import { getEnv } from '../config/env.js';
+import { deleteUploadKey, parseUploadKey } from '../storage/objectStore.js';
 import { parseTranslationRank, TRANSLATION_RANKS, type TranslationRank } from '../domain/translationRank.js';
 
 export const novelsRouter = new Hono();
@@ -281,6 +282,7 @@ novelsRouter.put('/:id', prodGuard(requireAuthOrPat, ensureNovelOwner()), async 
     try {
       const rows = await db.select().from(novels).where(eq(novels.id, id)).limit(1);
       if (!rows[0]) return c.json({ success: false, error: 'الرواية غير موجودة للتعديل' }, 404);
+      const prevCover = rows[0].coverUrl as string | null | undefined;
       await db.update(novels).set({
         title: body.title ?? undefined,
         originalTitle: body.originalTitle ?? undefined,
@@ -298,6 +300,10 @@ novelsRouter.put('/:id', prodGuard(requireAuthOrPat, ensureNovelOwner()), async 
         updatedAt: new Date(),
       }).where(eq(novels.id, id));
       const updated = await db.select().from(novels).where(eq(novels.id, id)).limit(1);
+      if (body.coverUrl !== undefined && body.coverUrl !== prevCover) {
+        const oldKey = parseUploadKey(prevCover);
+        if (oldKey && oldKey !== parseUploadKey(body.coverUrl)) await deleteUploadKey(oldKey);
+      }
       return c.json({ success: true, message: 'تم تعديل بيانات الرواية بنجاح', data: toApi(updated[0]) });
     } catch (err) {
       console.error('[novels] db update failed', err); noteDbFailure();
@@ -306,6 +312,7 @@ novelsRouter.put('/:id', prodGuard(requireAuthOrPat, ensureNovelOwner()), async 
 
   const existing = NOVELS_STORE.get(id);
   if (!existing) return c.json({ success: false, error: 'الرواية غير موجودة للتعديل' }, 404);
+  const prevMemCover = existing.coverUrl;
   const updated: NovelData = {
     ...existing,
     ...body,
@@ -314,6 +321,10 @@ novelsRouter.put('/:id', prodGuard(requireAuthOrPat, ensureNovelOwner()), async 
     updatedAt: new Date().toISOString(),
   };
   NOVELS_STORE.set(id, updated);
+  if (body.coverUrl !== undefined && body.coverUrl !== prevMemCover) {
+    const oldKey = parseUploadKey(prevMemCover);
+    if (oldKey && oldKey !== parseUploadKey(body.coverUrl)) await deleteUploadKey(oldKey);
+  }
   return c.json({ success: true, message: 'تم تعديل بيانات الرواية بنجاح', data: updated });
 });
 
