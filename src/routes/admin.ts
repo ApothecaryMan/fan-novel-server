@@ -4,7 +4,7 @@ import { and, count, desc, eq, ilike, inArray, or, sql } from 'drizzle-orm';
 import { db, isDbAvailable, noteDbFailure } from '../database/db.js';
 import { novels, roleRequests, subscriptionEvents, users } from '../database/schema.js';
 import { requireAuth } from '../middleware/auth.js';
-import { getCaller } from '../middleware/ownership.js';
+import { getCaller, requireAdminCaller } from '../middleware/ownership.js';
 import { effectiveReadingPlan } from '../features/readingSync/freeStore.js';
 import { parseAdminUserRoles } from './adminUserFilters.js';
 import { escapeLikePattern } from './adminUserSearch.js';
@@ -14,13 +14,7 @@ export const adminRouter = new Hono();
 
 // Every /admin/* route requires admin role.
 adminRouter.use('*', requireAuth);
-adminRouter.use('*', async (c, next) => {
-  const caller = await getCaller(c);
-  if (!caller.row) return c.json({ error: 'غير مصرح' }, 401);
-  if (!caller.isAdmin) return c.json({ error: 'غير مسموح: للإدارة فقط' }, 403);
-  c.set('caller', caller);
-  await next();
-});
+adminRouter.use('*', requireAdminCaller);
 
 /**
  * `count(*) over()` returns int8 (OID 20). BOTH drivers hand int8 back as a

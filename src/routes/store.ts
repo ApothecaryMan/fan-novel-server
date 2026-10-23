@@ -40,7 +40,7 @@ storeRouter.get('/catalog', async (c) => {
 
 storeRouter.get('/sync', requireAuth, async (c) => {
   const caller = await getCaller(c);
-  if (!caller.row) return c.json({ error: 'unauthorized' }, 401);
+  if (!caller.row) return caller.dbUnavailable ? storeUnavailable(c) : c.json({ error: 'unauthorized' }, 401);
   if (!isDbAvailable()) return storeUnavailable(c);
   try {
     const nowMs = Date.now();
@@ -73,7 +73,7 @@ storeRouter.get('/sync', requireAuth, async (c) => {
 const purchaseSchema = z.object({ sku: z.string().min(1).max(100), idempotencyKey: z.string().min(8).max(128) });
 storeRouter.post('/purchase', requireAuth, async (c) => {
   const caller = await getCaller(c);
-  if (!caller.row) return c.json({ error: 'unauthorized' }, 401);
+  if (!caller.row) return caller.dbUnavailable ? storeUnavailable(c) : c.json({ error: 'unauthorized' }, 401);
   const parsed = purchaseSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return c.json({ error: 'invalid purchase' }, 400);
   if (!isDbAvailable()) return storeUnavailable(c);
@@ -91,7 +91,7 @@ const equipSchema = z.union([
 ]);
 storeRouter.put('/equip', requireAuth, async (c) => {
   const caller = await getCaller(c);
-  if (!caller.row) return c.json({ error: 'unauthorized' }, 401);
+  if (!caller.row) return caller.dbUnavailable ? storeUnavailable(c) : c.json({ error: 'unauthorized' }, 401);
   const parsed = equipSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return c.json({ error: 'invalid equip' }, 400);
   if (!isDbAvailable()) return storeUnavailable(c);
@@ -109,7 +109,7 @@ storeRouter.put('/equip', requireAuth, async (c) => {
 
 async function requireAdmin(c: any): Promise<{ caller: Awaited<ReturnType<typeof getCaller>> } | { errorResponse: Response }> {
   const caller = await getCaller(c);
-  if (!caller.row) return { errorResponse: c.json({ error: 'unauthorized' }, 401) };
+  if (!caller.row) return { errorResponse: caller.dbUnavailable ? storeUnavailable(c) : c.json({ error: 'unauthorized' }, 401) };
   if (!caller.isAdmin) return { errorResponse: c.json({ error: 'forbidden' }, 403) };
   return { caller };
 }

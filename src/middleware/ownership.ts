@@ -7,6 +7,9 @@ export interface Caller {
   row: typeof users.$inferSelect | null;
   isAdmin: boolean;
   canWrite: boolean; // author, translator, or admin
+  /** True when the lookup itself failed (connection/timeout), not when the
+   *  account is missing. Guards answer 503 for this, never 401. */
+  dbUnavailable?: boolean;
 }
 
 /** Resolve the Bearer caller to its DB row. Token sub is the stable externalId. */
@@ -15,7 +18,7 @@ export async function getCaller(c: Context): Promise<Caller> {
   if (cached) return cached;
   const payload = c.get('authUser') as { sub?: string } | undefined;
   const sub = payload?.sub ?? '';
-  const empty: Caller = { row: null, isAdmin: false, canWrite: false };
+  const empty: Caller = { row: null, isAdmin: false, canWrite: false, dbUnavailable: false };
   if (!sub || !isDbAvailable()) return empty;
   try {
     const found = await db.select().from(users).where(eq(users.externalId, sub)).limit(1);
@@ -24,15 +27,32 @@ export async function getCaller(c: Context): Promise<Caller> {
     const isAdmin = row.role === 'admin';
     return { row, isAdmin, canWrite: isAdmin || Boolean(row.isAuthor) || Boolean(row.isTranslator) };
   } catch {
-    return empty;
+    // A dead connection is not a deleted account. Marking it keeps the answer
+    // honest: 503 "try again", never 401 "sign in".
+    return { row: null, isAdmin: false, canWrite: false, dbUnavailable: true };
   }
 }
+
+/** Admin guard: 401 only for a genuinely unknown caller, 503 for a db blip. */
+export const requireAdminCaller: MiddlewareHandler = async (c, next) => {
+  const caller = await getCaller(c);
+  if (!caller.row) {
+    if (caller.dbUnavailable) return c.json({ error: 'database unavailable' }, 503);
+    return c.json({ error: 'غير مصرح' }, 401);
+  }
+  if (!caller.isAdmin) return c.json({ error: 'غير مسموح: للإدارة فقط' }, 403);
+  c.set('caller', caller);
+  await next();
+};
 
 /** Require a logged-in user with author/translator/admin grant (any novel). */
 export function requireCreator(kind: 'author' | 'translator'): MiddlewareHandler {
   return async (c, next) => {
     const caller = await getCaller(c);
-    if (!caller.row) return c.json({ error: 'غير مصرح: مطلوب تسجيل الدخول' }, 401);
+    if (!caller.row) {
+      if (caller.dbUnavailable) return c.json({ error: 'database unavailable' }, 503);
+      return c.json({ error: 'غير مصرح: مطلوب تسجيل الدخول' }, 401);
+    }
     const ok =
       caller.isAdmin || (kind === 'author' ? Boolean(caller.row.isAuthor) : Boolean(caller.row.isTranslator));
     if (!ok) return c.json({ error: 'غير مسموح: تحتاج إذن ' + (kind === 'author' ? 'التأليف' : 'الترجمة') }, 403);
@@ -48,7 +68,10 @@ export function requireCreator(kind: 'author' | 'translator'): MiddlewareHandler
 export function ensureNovelOwner(): MiddlewareHandler {
   return async (c, next) => {
     const caller = await getCaller(c);
-    if (!caller.row) return c.json({ error: 'غير مصرح: مطلوب تسجيل الدخول' }, 401);
+    if (!caller.row) {
+      if (caller.dbUnavailable) return c.json({ error: 'database unavailable' }, 503);
+      return c.json({ error: 'غير مصرح: مطلوب تسجيل الدخول' }, 401);
+    }
     const novelId = c.req.param('id') ?? c.req.param('novelId');
     if (!novelId) return c.json({ error: 'الرواية غير محددة' }, 400);
 
