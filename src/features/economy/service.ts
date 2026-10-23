@@ -44,6 +44,8 @@ export async function grantPoints(db: any, opts: {
   userId: string; amount: number; currency: string; type: string; key: string;
   source: string; referenceType?: string; referenceId?: string; reason?: string; actorId?: string; nowMs?: number;
 }): Promise<{ status: 'granted' | 'capped' | 'replayed'; granted: number; balance: number }> {
+  // The daily cap is enforced inside a transaction with a row lock; a
+  // single-statement rewrite let concurrent rewards overshoot it.
   return db.transaction(async (tx: any) => {
     const wallet = await lockedWallet(tx, opts.userId, opts.currency);
     if (await idempotencyHit(tx, opts.userId, opts.key)) return { status: 'replayed' as const, granted: 0, balance: wallet.balance };
@@ -73,43 +75,56 @@ export async function grantPoints(db: any, opts: {
 }
 
 export async function purchaseItem(db: any, opts: { userId: string; sku: string; idempotencyKey: string; isPro: boolean }) {
-  return db.transaction(async (tx: any) => {
-    const [item] = await tx.select().from(storeItems).where(eq(storeItems.sku, opts.sku)).limit(1);
-    if (!item || !item.isActive) throw new PurchaseError('item_unavailable', 404);
-    const now = new Date();
-    if ((item.availableFrom && item.availableFrom > now) || (item.availableUntil && item.availableUntil < now)) {
-      throw new PurchaseError('item_unavailable', 404);
-    }
-    const wallet = await lockedWallet(tx, opts.userId, item.currency);
-    if (await idempotencyHit(tx, opts.userId, opts.idempotencyKey)) return { replayed: true, balance: wallet.balance };
-    const owned = await tx.select({ id: userInventory.id }).from(userInventory)
-      .where(and(eq(userInventory.userId, opts.userId), eq(userInventory.itemId, item.id))).limit(1);
-    if (owned.length) throw new PurchaseError('already_owned', 409);
-    const price = applyProDiscount(item.pricePoints, opts.isPro);
-    if (wallet.balance < price) throw new PurchaseError('insufficient_balance', 402);
-    const balanceAfter = wallet.balance - price;
-    await tx.insert(pointTransactions).values({
-      userId: opts.userId, amount: -price, balanceAfter, currency: item.currency, type: 'spend',
-      referenceType: 'store_item', referenceId: item.id, idempotencyKey: opts.idempotencyKey,
-    });
-    await tx.update(userCoinBalances).set({ balance: balanceAfter, updatedAt: now })
-      .where(and(eq(userCoinBalances.userId, opts.userId), eq(userCoinBalances.currency, item.currency)));
-    try {
-      const [inv] = await tx.insert(userInventory).values({
-        userId: opts.userId, itemId: item.id, source: 'purchase', pricePaid: price, currency: item.currency,
-      }).returning();
-      return { replayed: false, balance: balanceAfter, itemId: item.id, inventoryId: inv.id };
-    } catch (e: any) {
-      if (String(e?.cause?.code ?? e?.code) === '23505') throw new PurchaseError('already_owned', 409);
-      throw e;
-    }
-  }).catch((e: any) => {
+  // One atomic statement: neon-http cannot run interactive transactions, so
+  // the debit, the inventory insert and the ledger row travel together in a
+  // single CTE. An empty result means the wallet could not cover the price.
+  const [item] = await db.select().from(storeItems).where(eq(storeItems.sku, opts.sku)).limit(1);
+  if (!item || !item.isActive) throw new PurchaseError('item_unavailable', 404);
+  const now = new Date();
+  if ((item.availableFrom && item.availableFrom > now) || (item.availableUntil && item.availableUntil < now)) {
+    throw new PurchaseError('item_unavailable', 404);
+  }
+  const wallet = await lockedWallet(db, opts.userId, item.currency);
+  if (await idempotencyHit(db, opts.userId, opts.idempotencyKey)) return { replayed: true, balance: wallet.balance };
+  const owned = await db.select({ id: userInventory.id }).from(userInventory)
+    .where(and(eq(userInventory.userId, opts.userId), eq(userInventory.itemId, item.id))).limit(1);
+  if (owned.length) throw new PurchaseError('already_owned', 409);
+  const price = applyProDiscount(item.pricePoints, opts.isPro);
+  if (wallet.balance < price) throw new PurchaseError('insufficient_balance', 402);
+  try {
+    const result: any = await db.execute(sql`
+      WITH debited AS (
+        UPDATE user_coin_balances
+           SET balance = balance - ${price}, updated_at = now()
+         WHERE user_id = ${opts.userId}::uuid AND currency = ${item.currency} AND balance >= ${price}
+        RETURNING balance
+      ), inv AS (
+        INSERT INTO user_inventory (user_id, item_id, source, price_paid, currency)
+        SELECT ${opts.userId}::uuid, ${item.id}::uuid, 'purchase', ${price}, ${item.currency} FROM debited
+        RETURNING id
+      ), ledger AS (
+        INSERT INTO point_transactions (user_id, amount, balance_after, currency, type, reference_type, reference_id, idempotency_key)
+        SELECT ${opts.userId}::uuid, ${-price}, balance, ${item.currency}, 'spend', 'store_item', ${item.id}::uuid, ${opts.idempotencyKey}
+        FROM debited
+      )
+      SELECT balance, (SELECT id FROM inv) AS inventory_id FROM debited
+    `);
+    const rows = Array.isArray(result) ? result : (result?.rows ?? []);
+    const row = rows[0];
+    if (!row) throw new PurchaseError('insufficient_balance', 402);
+    const left = Number(row.balance);
+    if (!row.inventory_id) throw new PurchaseError('already_owned', 409);
+    return { replayed: false, balance: left, itemId: item.id, inventoryId: row.inventory_id };
+  } catch (e: any) {
     if (e instanceof PurchaseError) throw e;
-    if (String(e?.cause?.code ?? e?.code) === '23505' && String(e?.cause?.constraint ?? e?.constraint ?? '').includes('ptx_user_idem')) {
+    if (String(e?.cause?.code ?? e?.code) === '23505') {
+      if (String(e?.cause?.constraint ?? e?.constraint ?? '').includes('ptx_user_idem')) {
+        throw new PurchaseError('already_owned', 409);
+      }
       throw new PurchaseError('already_owned', 409);
     }
     throw e;
-  });
+  }
 }
 
 export function decorationsFromEquipped(equipped: Array<{ slot: string; metadata: any }>): Record<string, unknown> | null {
@@ -154,7 +169,12 @@ async function writeMergedCache(tx: any, userId: string, customsOverride?: { nam
 }
 
 export async function equipItem(db: any, opts: { userId: string; slot: string; itemId?: string | null; value?: unknown; isPro: boolean; graceUntilMs: number | null; nowMs?: number }) {
-  return db.transaction(async (tx: any) => {
+  // Sequential statements instead of db.transaction(): neon-http (the Workers
+  // driver) rejects interactive transactions outright. Every step is a single
+  // idempotent statement and the decorations cache is derived from the rows,
+  // so a mid-way failure self-heals on the next equip or sync.
+  const tx = db;
+  {
     if ((CUSTOM_SLOTS as readonly string[]).includes(opts.slot)) {
       const { nameStyleSchema, bannerGradientSchema } = await import('../../domain/profileDecorations.js');
       const schema = opts.slot === 'name_style' ? nameStyleSchema : bannerGradientSchema;
@@ -193,7 +213,7 @@ export async function equipItem(db: any, opts: { userId: string; slot: string; i
         .onConflictDoUpdate({ target: [userEquipped.userId, userEquipped.slot], set: { itemId: item.id, equippedAt: new Date() } });
     }
     return writeMergedCache(tx, opts.userId);
-  });
+  }
 }
 
 export async function refundPurchase(db: any, opts: { purchaseToken: string }) {
