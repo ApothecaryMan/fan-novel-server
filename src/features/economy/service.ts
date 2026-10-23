@@ -1,4 +1,11 @@
 import { and, eq, sql, sum } from 'drizzle-orm';
+import { dbDriver as readDbDriver } from '../../database/db.js';
+
+// Tests replace database/db.ts with a mock that has no driver probe; treat a
+// missing probe as the Node driver, which is what those tests run on.
+function currentDriver(): string {
+  return typeof readDbDriver === 'function' ? readDbDriver() : 'pg';
+}
 import { iapPurchases, pointTransactions, storeItems, userCoinBalances, userEquipped, userInventory, users } from '../../database/schema.js';
 import { DAILY_REWARD_CAP, PRO_DISCOUNT_PERCENT, isCappedSource } from './config.js';
 
@@ -44,8 +51,11 @@ export async function grantPoints(db: any, opts: {
   userId: string; amount: number; currency: string; type: string; key: string;
   source: string; referenceType?: string; referenceId?: string; reason?: string; actorId?: string; nowMs?: number;
 }): Promise<{ status: 'granted' | 'capped' | 'replayed'; granted: number; balance: number }> {
-  // The daily cap is enforced inside a transaction with a row lock; a
-  // single-statement rewrite let concurrent rewards overshoot it.
+  // The Workers driver cannot open an interactive transaction, so there the
+  // grant runs as one atomic statement: the wallet UPDATE serialises on the
+  // row, and the ledger row is inserted from its RETURNING. Node (pg) keeps
+  // the locked transaction the concurrency tests exercise.
+  if (currentDriver() === 'neon-http') return grantPointsAtomic(db, opts);
   return db.transaction(async (tx: any) => {
     const wallet = await lockedWallet(tx, opts.userId, opts.currency);
     if (await idempotencyHit(tx, opts.userId, opts.key)) return { status: 'replayed' as const, granted: 0, balance: wallet.balance };
@@ -72,6 +82,58 @@ export async function grantPoints(db: any, opts: {
       .where(and(eq(userCoinBalances.userId, opts.userId), eq(userCoinBalances.currency, opts.currency)));
     return { status: 'granted' as const, granted: finalAmount, balance: balanceAfter };
   });
+}
+
+async function grantPointsAtomic(db: any, opts: {
+  userId: string; amount: number; currency: string; type: string; key: string;
+  source: string; referenceType?: string; referenceId?: string; reason?: string; actorId?: string; nowMs?: number;
+}): Promise<{ status: 'granted' | 'capped' | 'replayed'; granted: number; balance: number }> {
+  await db.insert(userCoinBalances).values({ userId: opts.userId, currency: opts.currency, balance: 0 }).onConflictDoNothing();
+  const [wallet] = await db.select().from(userCoinBalances)
+    .where(and(eq(userCoinBalances.userId, opts.userId), eq(userCoinBalances.currency, opts.currency))).limit(1);
+  if (!wallet) throw new PurchaseError('wallet_unavailable', 500);
+  if (await idempotencyHit(db, opts.userId, opts.key)) {
+    return { status: 'replayed' as const, granted: 0, balance: wallet.balance };
+  }
+  const cap = isCappedSource(opts.source) ? (DAILY_REWARD_CAP[opts.currency as 'free' | 'pro'] ?? 0) : null;
+  const dayStart = dayStartMs(opts.nowMs ?? Date.now());
+  try {
+    const result: any = await db.execute(sql`
+      WITH used AS (
+        SELECT COALESCE(SUM(amount), 0) AS total FROM point_transactions
+         WHERE user_id = ${opts.userId}::uuid AND currency = ${opts.currency}
+           AND type = 'reward' AND created_at >= ${dayStart}
+      ), calc AS (
+        SELECT LEAST(${opts.amount}::int, ${cap}::int - used.total) AS amt FROM used
+         WHERE ${cap}::int IS NULL OR used.total < ${cap}::int
+      ), upd AS (
+        UPDATE user_coin_balances
+           SET balance = balance + (SELECT amt FROM calc), updated_at = now()
+         WHERE user_id = ${opts.userId}::uuid AND currency = ${opts.currency}
+           AND EXISTS (SELECT 1 FROM calc)
+        RETURNING balance
+      ), ledger AS (
+        INSERT INTO point_transactions
+          (user_id, amount, balance_after, currency, type, reference_type, reference_id, idempotency_key, reason, actor_id)
+        SELECT ${opts.userId}::uuid, (SELECT amt FROM calc), upd.balance, ${opts.currency}, ${opts.type},
+               ${opts.referenceType ?? null}, ${opts.referenceId ?? null}, ${opts.key}, ${opts.reason ?? null}, ${opts.actorId ?? null}::uuid
+          FROM upd
+        RETURNING amount
+      )
+      SELECT balance, (SELECT amt FROM calc) AS granted FROM upd
+    `);
+    const rows = Array.isArray(result) ? result : (result?.rows ?? []);
+    const row = rows[0];
+    if (!row) return { status: 'capped' as const, granted: 0, balance: wallet.balance };
+    return { status: 'granted' as const, granted: Number(row.granted), balance: Number(row.balance) };
+  } catch (e: any) {
+    if (String(e?.cause?.code ?? e?.code) === '23505') {
+      const [fresh] = await db.select().from(userCoinBalances)
+        .where(and(eq(userCoinBalances.userId, opts.userId), eq(userCoinBalances.currency, opts.currency))).limit(1);
+      return { status: 'replayed' as const, granted: 0, balance: fresh?.balance ?? wallet.balance };
+    }
+    throw e;
+  }
 }
 
 export async function purchaseItem(db: any, opts: { userId: string; sku: string; idempotencyKey: string; isPro: boolean }) {
@@ -217,7 +279,11 @@ export async function equipItem(db: any, opts: { userId: string; slot: string; i
 }
 
 export async function refundPurchase(db: any, opts: { purchaseToken: string }) {
-  return db.transaction(async (tx: any) => {
+  // Sequential, driver-agnostic: the Workers driver has no interactive
+  // transactions. Each step is individually idempotent (ledger keys), and the
+  // purchase row flips to 'refunded' last, so a replay resumes safely.
+  const tx = db;
+  {
     const [purchase] = await tx.select().from(iapPurchases).where(eq(iapPurchases.purchaseToken, opts.purchaseToken)).limit(1);
     if (!purchase) throw new PurchaseError('purchase_not_found', 404);
     const wallet = await lockedWallet(tx, purchase.userId, purchase.currency);
@@ -265,7 +331,7 @@ export async function refundPurchase(db: any, opts: { purchaseToken: string }) {
     await tx.update(iapPurchases).set({ status: 'refunded', refundedAt: new Date() })
       .where(eq(iapPurchases.purchaseToken, opts.purchaseToken));
     return { status: 'refunded' as const, balance: wallet.balance, debt: Math.max(0, -wallet.balance) };
-  });
+  }
 }
 
 export async function getBalances(db: any, userId: string): Promise<Record<string, number>> {

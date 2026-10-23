@@ -64,6 +64,12 @@ export const db = new Proxy({} as AnyDb, {
 });
 export type Db = AnyDb;
 
+/** Which driver is live. Workers get neon-http, whose interactive transactions
+ *  throw; callers that need atomicity must pick a single-statement form there. */
+export function dbDriver(): 'pg' | 'neon-http' | 'none' {
+  return cached?.driver ?? 'none';
+}
+
 export function isDbAvailable(): boolean {
   const env = getEnv();
   if (!env.DATABASE_URL) return false;

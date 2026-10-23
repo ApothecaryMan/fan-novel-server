@@ -33,24 +33,19 @@ iapRouter.post('/verify', requireAuth, async (c) => {
   if (!pack) return c.json({ error: 'unknown sku' }, 400);
   if (!isDbAvailable()) return c.json({ error: 'store unavailable' }, 503);
   try {
-    const res = await db.transaction(async (tx: any) => {
-      const existing = await tx.select().from(iapPurchases).where(eq(iapPurchases.purchaseToken, parsed.data.purchaseToken)).limit(1);
-      if (existing.length) return { replayed: true };
-      await tx.insert(iapPurchases).values({
-        purchaseToken: parsed.data.purchaseToken, userId: caller.row!.id, sku: parsed.data.sku,
-        pointsGranted: pack.points, currency: pack.currency, status: 'granted',
-      });
-      await grantPoints(tx, {
-        userId: caller.row!.id, amount: pack.points, currency: pack.currency, type: 'iap_purchase',
-        key: `iap:${parsed.data.purchaseToken}`, source: 'iap', referenceType: 'iap', referenceId: parsed.data.purchaseToken,
-      });
-      return { replayed: false };
+    const existing = await db.select().from(iapPurchases).where(eq(iapPurchases.purchaseToken, parsed.data.purchaseToken)).limit(1);
+    if (existing.length) return c.json({ success: true, verification: 'stubbed', replayed: true });
+    await db.insert(iapPurchases).values({
+      purchaseToken: parsed.data.purchaseToken, userId: caller.row!.id, sku: parsed.data.sku,
+      pointsGranted: pack.points, currency: pack.currency, status: 'granted',
     });
-    if (!res.replayed) {
-      await db.update(iapPurchases).set({ acknowledgedAt: new Date() })
-        .where(eq(iapPurchases.purchaseToken, parsed.data.purchaseToken)).catch(() => null);
-    }
-    return c.json({ success: true, verification: 'stubbed', ...res });
+    await grantPoints(db, {
+      userId: caller.row!.id, amount: pack.points, currency: pack.currency, type: 'iap_purchase',
+      key: `iap:${parsed.data.purchaseToken}`, source: 'iap', referenceType: 'iap', referenceId: parsed.data.purchaseToken,
+    });
+    await db.update(iapPurchases).set({ acknowledgedAt: new Date() })
+      .where(eq(iapPurchases.purchaseToken, parsed.data.purchaseToken)).catch(() => null);
+    return c.json({ success: true, verification: 'stubbed', replayed: false });
   } catch (e: any) {
     if (String(e?.cause?.code ?? e?.code) === '23505') return c.json({ success: true, replayed: true });
     if (e instanceof PurchaseError) return c.json({ error: e.code }, e.status);

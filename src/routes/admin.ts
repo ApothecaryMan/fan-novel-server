@@ -5,6 +5,13 @@ import { db, isDbAvailable, noteDbFailure } from '../database/db.js';
 import { novels, roleRequests, subscriptionEvents, users } from '../database/schema.js';
 import { requireAuth } from '../middleware/auth.js';
 import { getCaller, requireAdminCaller } from '../middleware/ownership.js';
+import { dbDriver } from '../database/db.js';
+
+function isHttpDriver(): boolean {
+  // Test mocks replace database/db.ts without the driver probe; they run on
+  // the Node driver, where transactions are available.
+  return typeof dbDriver === 'function' && dbDriver() === 'neon-http';
+}
 import { effectiveReadingPlan } from '../features/readingSync/freeStore.js';
 import { parseAdminUserRoles } from './adminUserFilters.js';
 import { escapeLikePattern } from './adminUserSearch.js';
@@ -171,17 +178,17 @@ adminRouter.put('/users/:id', async (c) => {
       // Cost note: `where role = 'admin' for update` is a range lock over the
       // admin set, so concurrent demotions serialise. That is free at the
       // current admin count; revisit only if that set grows large.
-      const demoted = await db.transaction(async (tx) => {
-        await tx.execute(sql`select id from ${users} where role = 'admin' for update`);
-        const counted = await tx.select({ n: count() }).from(users).where(eq(users.role, 'admin'));
-        if (Number(counted[0]?.n ?? 0) <= 1) return null;
-        const [row] = await tx.update(users)
-          .set({ role: 'reader', updatedAt: new Date() })
-          .where(eq(users.id, id))
-          .returning();
-        return row ?? null;
-      });
-      if (!demoted) return c.json({ error: 'لا يمكن إزالة آخر أدمن' }, 409);
+      // Workers cannot open an interactive transaction, so the guard runs as a
+      // read followed by the update. Two simultaneous demotions could both see
+      // two admins; the window is the length of one round trip and the action
+      // is human-driven, so it is accepted rather than locked.
+      const counted = await db.select({ n: count() }).from(users).where(eq(users.role, 'admin'));
+      if (Number(counted[0]?.n ?? 0) <= 1) return c.json({ error: 'لا يمكن إزالة آخر أدمن' }, 409);
+      const [demoted] = await db.update(users)
+        .set({ role: 'reader', updatedAt: new Date() })
+        .where(eq(users.id, id))
+        .returning();
+      if (!demoted) return c.json({ error: 'المستخدم غير موجود' }, 404);
       // Early return: the demotion is complete, so this must not fall through
       // to the generic update below and issue a second write.
       return c.json({ success: true, data: publicUser(demoted) });
@@ -302,8 +309,8 @@ adminRouter.post('/users/:id/reading-plan', async (c) => {
   const durationMs = durationDays * 86_400_000;
   const reason = parsed.data.reason;
   try {
-    const result = await db.transaction(async (tx) => {
-      const locked = await tx.select().from(users).where(eq(users.id, id)).for('update').limit(1);
+    const runPlan = async (tx: any) => {
+      const locked = await tx.select().from(users).where(eq(users.id, id)).limit(1);
       const target = locked[0] as typeof users.$inferSelect | undefined;
       if (!target) return null;
       if (parsed.data.plan === 'free') {
@@ -362,7 +369,8 @@ adminRouter.post('/users/:id/reading-plan', async (c) => {
         occurredAt: now,
       });
       return { updated, eventType, expiresAt };
-    });
+    };
+    const result = isHttpDriver() ? await runPlan(db) : await db.transaction(runPlan);
     if (!result) return c.json({ error: 'المستخدم غير موجود' }, 404);
     const effectivePlan = effectiveReadingPlan(result.updated, Date.now());
     console.log(JSON.stringify({
