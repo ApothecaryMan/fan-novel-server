@@ -74,8 +74,9 @@ export function isDbAvailable(): boolean {
 }
 
 /** 30s of total blackout after one query error turned every blip into a
- *  site-wide outage; a short window lets the next request try again. */
-export function noteDbFailure(cooldownMs = 3_000): void {
+ *  site-wide outage. Short enough that the shipped client's 800ms retry lands
+ *  outside it and recovers on the second attempt. */
+export function noteDbFailure(cooldownMs = 500): void {
   dbDownUntil = Date.now() + cooldownMs;
 }
 
