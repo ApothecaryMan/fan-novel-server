@@ -20,7 +20,8 @@
     "economy:reconcile": "node scripts/economy-reconcile.mjs",
     "economy:grant": "node scripts/grant-coins.mjs",
     "release:apk": "node scripts/publish-apk.mjs",
-    "test": "vitest run"
+    "test": "vitest run",
+    "economy:seed-like-animations": "node scripts/seed-like-animations.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1131.0",
