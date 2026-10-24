@@ -89,6 +89,16 @@ export const bannerGradientSchema = z.object({
   extent: z.enum(BANNER_EXTENTS),
 }).strict();
 
+export const COMMENT_LIKE_ANIMATION_NAMES = ['burst', 'wave', 'fountain', 'explode', 'storm'] as const;
+export type CommentLikeAnimationName = (typeof COMMENT_LIKE_ANIMATION_NAMES)[number];
+
+export const commentLikeAnimationSchema = z.union([
+  z.number().int().min(1).max(12),
+  z.enum(COMMENT_LIKE_ANIMATION_NAMES),
+]);
+
+export type CommentLikeAnimation = z.infer<typeof commentLikeAnimationSchema>;
+
 export const profileDecorationsSchema = z.object({
   nameStyle: nameStyleSchema.optional(),
   bannerGradient: bannerGradientSchema.optional(),
@@ -106,6 +116,7 @@ export const profileDecorationsSchema = z.object({
    * client's own effect-name bound.
    */
   profileEffectName: z.string().min(1).max(100).optional(),
+  commentLikeAnimation: commentLikeAnimationSchema.optional(),
 }).strict();
 
 export type ProfileDecorations = z.infer<typeof profileDecorationsSchema>;
@@ -117,16 +128,30 @@ export type ProfileDecorations = z.infer<typeof profileDecorationsSchema>;
  * by a newer client, or JSON that drifted. A visitor then sees a plain card
  * rather than a half-rendered one, which is the same degradation the client's own
  * normalizers produce.
+ *
+ * Fail-soft for `commentLikeAnimation` only: an out-of-range int or unknown name
+ * is dropped while the other keys survive, so one bad anim never wipes an avatar
+ * frame. Every other invalid shape still degrades the whole value to null.
  */
 export function parseProfileDecorations(raw: unknown): ProfileDecorations | null {
   if (raw === null || raw === undefined) return null;
   const parsed = profileDecorationsSchema.safeParse(raw);
-  return parsed.success ? parsed.data : null;
+  if (parsed.success) return parsed.data;
+  if (typeof raw === 'object' && raw !== null && !Array.isArray(raw) && 'commentLikeAnimation' in raw) {
+    const { commentLikeAnimation: _dropped, ...rest } = raw as Record<string, unknown>;
+    void _dropped;
+    const retry = profileDecorationsSchema.safeParse(rest);
+    if (retry.success) {
+      if (Object.keys(retry.data).length === 0) return null;
+      return retry.data;
+    }
+  }
+  return null;
 }
 
 /** True when the value carries nothing a renderer would draw. */
 export function isEmptyDecorations(value: ProfileDecorations | null): boolean {
-  return !value || (!value.nameStyle && !value.bannerGradient && !value.avatarFrameKey && !value.profileFrameKey && !value.profileEffectName);
+  return !value || (!value.nameStyle && !value.bannerGradient && !value.avatarFrameKey && !value.profileFrameKey && !value.profileEffectName && value.commentLikeAnimation === undefined);
 }
 
 /**

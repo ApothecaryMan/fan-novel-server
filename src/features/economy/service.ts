@@ -201,31 +201,37 @@ export function decorationsFromEquipped(equipped: Array<{ slot: string; metadata
 
 export const OWNED_SLOTS = ['avatar', 'profile_effect', 'frame', 'badge'] as const;
 export const CUSTOM_SLOTS = ['name_style', 'banner'] as const;
+export const LIKE_ANIMATION_SLOT = 'like_animation' as const;
 
-function mergedDecorations(owned: Record<string, unknown> | null, customs: { nameStyle?: unknown; bannerGradient?: unknown }): Record<string, unknown> | null {
+type Customs = { nameStyle?: unknown; bannerGradient?: unknown; commentLikeAnimation?: unknown };
+
+function mergedDecorations(owned: Record<string, unknown> | null, customs: Customs): Record<string, unknown> | null {
   const out: Record<string, unknown> = { ...(owned ?? {}) };
   if (customs.nameStyle !== undefined) out.nameStyle = customs.nameStyle as never;
   if (customs.bannerGradient !== undefined) out.bannerGradient = customs.bannerGradient as never;
+  if (customs.commentLikeAnimation !== undefined) out.commentLikeAnimation = customs.commentLikeAnimation as never;
   return Object.keys(out).length ? out : null;
 }
 
-async function currentCustoms(tx: any, userId: string): Promise<{ nameStyle?: unknown; bannerGradient?: unknown }> {
+async function currentCustoms(tx: any, userId: string): Promise<Customs> {
   const [row] = await tx.select({ profileDecorations: users.profileDecorations }).from(users).where(eq(users.id, userId)).limit(1);
   const d = (row?.profileDecorations ?? {}) as Record<string, unknown>;
-  const customs: { nameStyle?: unknown; bannerGradient?: unknown } = {};
+  const customs: Customs = {};
   if (d.nameStyle !== undefined) customs.nameStyle = d.nameStyle;
   if (d.bannerGradient !== undefined) customs.bannerGradient = d.bannerGradient;
+  if (d.commentLikeAnimation !== undefined) customs.commentLikeAnimation = d.commentLikeAnimation;
   return customs;
 }
 
-async function writeMergedCache(tx: any, userId: string, customsOverride?: { nameStyle?: unknown; bannerGradient?: unknown; clearNameStyle?: boolean; clearBanner?: boolean }) {
+async function writeMergedCache(tx: any, userId: string, customsOverride?: Customs & { clearNameStyle?: boolean; clearBanner?: boolean; clearLikeAnimation?: boolean }) {
   const rows = await tx.select({ slot: userEquipped.slot, metadata: storeItems.metadata })
     .from(userEquipped).innerJoin(storeItems, eq(storeItems.id, userEquipped.itemId))
     .where(eq(userEquipped.userId, userId));
   const customs = customsOverride ? { ...customsOverride } : await currentCustoms(tx, userId);
   const nameStyle = (customs as any).clearNameStyle ? undefined : (customs as any).nameStyle;
   const bannerGradient = (customs as any).clearBanner ? undefined : (customs as any).bannerGradient;
-  const decorations = mergedDecorations(decorationsFromEquipped(rows as any), { nameStyle, bannerGradient });
+  const commentLikeAnimation = (customs as any).clearLikeAnimation ? undefined : (customs as any).commentLikeAnimation;
+  const decorations = mergedDecorations(decorationsFromEquipped(rows as any), { nameStyle, bannerGradient, commentLikeAnimation });
   await tx.update(users).set({ profileDecorations: decorations as any, updatedAt: new Date() }).where(eq(users.id, userId));
   return { equipped: rows.map((r: any) => ({ slot: r.slot })), decorations };
 }
@@ -237,6 +243,19 @@ export async function equipItem(db: any, opts: { userId: string; slot: string; i
   // so a mid-way failure self-heals on the next equip or sync.
   const tx = db;
   {
+    if (opts.slot === LIKE_ANIMATION_SLOT) {
+      const { commentLikeAnimationSchema } = await import('../../domain/profileDecorations.js');
+      const clearing = opts.value === null || opts.value === undefined;
+      if (!clearing) {
+        const parsed = commentLikeAnimationSchema.safeParse(opts.value);
+        if (!parsed.success) throw new PurchaseError('invalid_custom_value', 400);
+      }
+      const customs = await currentCustoms(tx, opts.userId);
+      if (clearing) {
+        return writeMergedCache(tx, opts.userId, { ...customs, clearLikeAnimation: true });
+      }
+      return writeMergedCache(tx, opts.userId, { ...customs, commentLikeAnimation: opts.value });
+    }
     if ((CUSTOM_SLOTS as readonly string[]).includes(opts.slot)) {
       const { nameStyleSchema, bannerGradientSchema } = await import('../../domain/profileDecorations.js');
       const schema = opts.slot === 'name_style' ? nameStyleSchema : bannerGradientSchema;

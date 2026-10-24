@@ -12,7 +12,7 @@
  * `/:id/profile` body must not (see toPublicSafe in routes/profile.ts).
  */
 
-import { parseProfileDecorations, stripGatedCustoms } from './profileDecorations.js';
+import { parseProfileDecorations, stripGatedCustoms, isEmptyDecorations } from './profileDecorations.js';
 import { effectiveReadingPlan } from '../features/readingSync/freeStore.js';
 
 export function toIso(value: unknown): string | null {
@@ -26,6 +26,11 @@ export function toIso(value: unknown): string | null {
 
 export function toPublic(u: any, options: { includeEmail?: boolean } = {}) {
   const joined = toIso(u.createdAt);
+  const _dec = stripGatedCustoms(
+    parseProfileDecorations(u.profileDecorations),
+    effectiveReadingPlan(u, Date.now()) === 'pro',
+  );
+  const decorations = !_dec || isEmptyDecorations(_dec) ? null : _dec;
   const base = {
     id: u.externalId ?? u.id,
     externalId: u.externalId ?? u.id,
@@ -42,11 +47,8 @@ export function toPublic(u: any, options: { includeEmail?: boolean } = {}) {
     // further out, so an unknown kind is safe at both ends.
     // Gated customs (studio nameStyle/bannerGradient) are Pro-only and end with
     // the subscription: any reader without an active Pro reads them as absent,
-    // immediately, on every surface. Owned slots are untouched.
-    decorations: stripGatedCustoms(
-      parseProfileDecorations(u.profileDecorations),
-      effectiveReadingPlan(u, Date.now()) === 'pro',
-    ),
+    // immediately, on every surface. Owned slots and like_animation pass through.
+    decorations,
     role: u.role ?? 'reader',
     isAuthor: Boolean(u.isAuthor),
     isTranslator: Boolean(u.isTranslator),

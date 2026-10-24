@@ -8,7 +8,7 @@ import { requireAuth, optionalAuth } from '../middleware/auth.js';
 import { getCaller } from '../middleware/ownership.js';
 import { rateLimit } from '../middleware/rateLimit.js';
 import { getEnv } from '../config/env.js';
-import { parseProfileDecorations, stripGatedCustoms, type ProfileDecorations } from '../domain/profileDecorations.js';
+import { parseProfileDecorations, stripGatedCustoms, isEmptyDecorations, type ProfileDecorations } from '../domain/profileDecorations.js';
 import { effectiveReadingPlan } from '../features/readingSync/freeStore.js';
 
 // Native comments for app-native novels only (sourceId 'internal:published').
@@ -224,7 +224,7 @@ export function toApiAuthor(id: string, card: AuthorCard | undefined): ApiAuthor
     ...(username ? { username } : {}),
     ...(bannerUrl ? { bannerUrl } : {}),
     ...(createdAt ? { createdAt } : {}),
-    ...(decorations ? { decorations } : {}),
+    ...(decorations && !isEmptyDecorations(decorations) ? { decorations } : {}),
   };
 }
 
@@ -248,16 +248,17 @@ export async function buildAuthorLookup(userIds: string[]): Promise<Map<string, 
   if (!uniq.length) return lookup;
   const urows = await db.select().from(users).where(inArray(users.id, uniq));
   for (const u of urows) {
+    const dec = stripGatedCustoms(
+      parseProfileDecorations(u.profileDecorations),
+      effectiveReadingPlan(u, Date.now()) === 'pro',
+    );
     lookup.set(u.id, {
       name: u.displayName || u.username || 'مستخدم',
       avatarUrl: u.avatarUrl ?? undefined,
       username: u.username ?? undefined,
       bannerUrl: u.bannerUrl ?? undefined,
       createdAt: toIsoStamp(u.createdAt),
-      decorations: stripGatedCustoms(
-        parseProfileDecorations(u.profileDecorations),
-        effectiveReadingPlan(u, Date.now()) === 'pro',
-      ) ?? undefined,
+      decorations: !dec || isEmptyDecorations(dec) ? undefined : dec,
     });
   }
   return lookup;

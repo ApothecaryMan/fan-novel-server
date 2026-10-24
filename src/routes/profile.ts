@@ -7,10 +7,12 @@ import { requireAuth, optionalAuth } from '../middleware/auth.js';
 import { getEnv } from '../config/env.js';
 import { findMemoryUser } from './auth.js';
 import { buildAuthorLookup, encodeCursor, decodeCursor, toApi, type RootsCursor, type ApiAuthor } from './comments.js';
+import { parseProfileDecorations, stripGatedCustoms, isEmptyDecorations } from '../domain/profileDecorations.js';
 import { getCaller } from '../middleware/ownership.js';
 import { effectivePlanExpiry, effectiveReadingPlan, loadFreeStatsForUser } from '../features/readingSync/freeStore.js';
 import { freeProjection } from '../features/readingSync/freeProtocol.js';
-import { proProjection } from '../features/readingSync/contracts.js';
+import { COMPLETION_THRESHOLD, proProjection } from '../features/readingSync/contracts.js';
+import { leaderboardWindow } from '../features/readingSync/leaderboardStore.js';
 import { loadProStats } from '../features/readingSync/proStore.js';
 import { getLevelFromSeconds, activityTierFromWindowTotals, activityTierWindow, type LevelInfo as CanonicalLevelInfo } from '../features/readingSync/calculations.js';
 import { toIso, toPublic as projectAccount } from '../domain/accountProjection.js';
@@ -410,7 +412,7 @@ profileRouter.get('/:id/profile', async (c) => {
     // sessions, which is the same answer the DB branch gives for an empty
     // window (tier 0, no seal). A key that appears only on one branch teaches
     // the client two shapes for one card.
-    return c.json({ success: true, user: toPublicSafe(mem), stats: { commentsCount: 0, likesReceived: 0 }, level: 1, isPro: false, activityTier: 0 });
+    return c.json({ success: true, user: toPublicSafe(mem), stats: { commentsCount: 0, likesReceived: 0, totalChapters: 0, totalSeconds: 0, totalNovels: 0 }, level: 1, isPro: false, activityTier: 0 });
   }
   try {
     // UUID-first: comment author chips carry the users.id UUID (dominant tap path).
@@ -432,8 +434,15 @@ profileRouter.get('/:id/profile', async (c) => {
     // point: the seal has to be here for any visitor, not behind a second call.
     // Both sums come out of ONE pass with FILTER rather than two subqueries, so
     // the extra work is one 7-day index range over a single reader's rows.
+    // The all-time totals ride along in the same statement too: totalChapters
+    // reuses the board's 'all' day bound with its completion rule, totalSeconds
+    // reuses the same bound with the per-row clamp, and totalNovels counts
+    // finished library rows (>= 90% progress, live only). Only the published
+    // level number is exposed — never minutes, progress, or remaining time.
     const window = activityTierWindow();
     const inWindow = sql`"reading_sessions"."read_day" >= ${window.startDay} AND "reading_sessions"."read_day" <= ${window.endDay}`;
+    const allWindow = leaderboardWindow('all');
+    const inAllWindow = sql`"reading_sessions"."read_day" >= ${allWindow.from} AND "reading_sessions"."read_day" <= ${allWindow.to}`;
     // FILTER binds to the aggregate call DIRECTLY — `COALESCE(SUM(x) FILTER
     // (...), 0)` is a syntax error (42601), so the filtered aggregate is
     // parenthesized first and the empty-group NULL is coalesced outside it.
@@ -446,9 +455,15 @@ profileRouter.get('/:id/profile', async (c) => {
       likesReceived: sql<number>`(SELECT COALESCE(SUM("comments"."likes_count"), 0) FROM "comments" WHERE "comments"."user_id" = "users"."id" AND "comments"."status" = 'visible')`,
       seconds: sql<number>`(SELECT COALESCE(SUM(GREATEST("reading_sessions"."seconds", 0)), 0) FROM "reading_sessions" WHERE "reading_sessions"."user_id" = "users"."id")`,
       activityWindow: sql<unknown>`(SELECT jsonb_build_object('s', ${windowedSum('seconds')}, 'w', ${windowedSum('words')}) FROM "reading_sessions" WHERE "reading_sessions"."user_id" = "users"."id")`,
+      totalChapters: sql<number>`(SELECT COUNT(DISTINCT ("reading_sessions"."novel_id", "reading_sessions"."chapter_id")) FROM "reading_sessions" WHERE "reading_sessions"."user_id" = "users"."id" AND "reading_sessions"."completion_signal_present" AND "reading_sessions"."progress_percent" >= ${COMPLETION_THRESHOLD} AND BTRIM("reading_sessions"."novel_id") <> '' AND "reading_sessions"."chapter_id" > 0 AND ${inAllWindow})`,
+      totalSeconds: sql<number>`(SELECT COALESCE(SUM(GREATEST("reading_sessions"."seconds", 0)), 0) FROM "reading_sessions" WHERE "reading_sessions"."user_id" = "users"."id" AND ${inAllWindow})`,
+      totalNovels: sql<number>`(SELECT COUNT(*) FROM "user_library" WHERE "user_library"."user_id" = "users"."id" AND "user_library"."deleted_at" IS NULL AND "user_library"."progress_percent" >= 90)`,
     }).from(users).where(eq(users.id, row.id));
     const commentsCount = Number(pub?.commentsCount ?? 0);
     const likesReceived = Number(pub?.likesReceived ?? 0);
+    const totalChapters = Number(pub?.totalChapters ?? 0);
+    const totalSeconds = Number(pub?.totalSeconds ?? 0);
+    const totalNovels = Number(pub?.totalNovels ?? 0);
     const level = getLevelFromSeconds(Number(pub?.seconds ?? 0)).level;
     // The seal the app draws on the card. The ladder itself is NOT restated
     // here — activityTierFromWindowTotals owns it, and this route only reports
@@ -466,7 +481,7 @@ profileRouter.get('/:id/profile', async (c) => {
     // seal at most ~2 minutes stale under stale-while-revalidate, the same
     // freshness the level and the Pro flag already accepted.
     c.header('Cache-Control', 'public, max-age=60, stale-while-revalidate=60');
-    return c.json({ success: true, user: toPublicSafe(row), stats: { commentsCount, likesReceived }, level, isPro, activityTier });
+    return c.json({ success: true, user: toPublicSafe(row), stats: { commentsCount, likesReceived, totalChapters, totalSeconds, totalNovels }, level, isPro, activityTier });
   } catch (error) {
     // Read-only route: see the note on /me/profile — a failed read must not
     // trip the write-side breaker.
@@ -574,6 +589,11 @@ profileRouter.get('/:id/comments', optionalAuth, async (c) => {
     // mirror what buildAuthorLookup puts on a comments row (comments.ts), so
     // the commenter sheet gets the same first-paint data whichever route fed
     // the list. Absent keys are omitted rather than nulled, same as there.
+    const _dec = stripGatedCustoms(
+      parseProfileDecorations((row as any).profileDecorations),
+      effectiveReadingPlan(row as any, Date.now()) === 'pro',
+    );
+    const authorDecorations = _dec && !isEmptyDecorations(_dec) ? _dec : undefined;
     const author: ApiAuthor = {
       id: String(row.id),
       name: row.displayName || row.username || 'مستخدم',
@@ -581,6 +601,7 @@ profileRouter.get('/:id/comments', optionalAuth, async (c) => {
       ...(row.username ? { username: row.username } : {}),
       ...(row.bannerUrl ? { bannerUrl: row.bannerUrl } : {}),
       ...(createdAt ? { createdAt } : {}),
+      ...(authorDecorations ? { decorations: authorDecorations } : {}),
     };
 
     // Liked-by-me batch, so a card the reader already voted on renders filled
