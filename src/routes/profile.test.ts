@@ -314,9 +314,9 @@ describe('GET /users/:id/profile (public)', () => {
       { userId: B_UUID, status: 'hidden', likesCount: 7 },
     ]);
     const a: any = await (await app.request(`/users/${A1_UUID}/profile`)).json();
-    expect(a.stats).toEqual({ commentsCount: 2, likesReceived: 8 });
+    expect(a.stats).toEqual({ commentsCount: 2, likesReceived: 8, totalChapters: 0, totalSeconds: 0, totalNovels: 0 });
     const b: any = await (await app.request(`/users/${B_UUID}/profile`)).json();
-    expect(b.stats).toEqual({ commentsCount: 0, likesReceived: 0 });
+    expect(b.stats).toEqual({ commentsCount: 0, likesReceived: 0, totalChapters: 0, totalSeconds: 0, totalNovels: 0 });
   });
 
   it('exposes the reading level from session seconds, scoped to the resolved user', async () => {
@@ -579,7 +579,7 @@ it('never exposes email (key absent, address absent from serialized body)', asyn
       const res = await app.request('/users/dev_mem@test.com/profile');
       expect(res.status).toBe(200);
       const body: any = await res.json();
-      expect(body).toMatchObject({ success: true, stats: { commentsCount: 0, likesReceived: 0 } });
+      expect(body.stats).toEqual({ commentsCount: 0, likesReceived: 0, totalChapters: 0, totalSeconds: 0, totalNovels: 0 });
       expect(body.user).not.toHaveProperty('email');
       expect(body.user.externalId).toBe('dev_mem@test.com');
       expect(res.headers.get('Cache-Control')).toBe('public, max-age=60, stale-while-revalidate=60');

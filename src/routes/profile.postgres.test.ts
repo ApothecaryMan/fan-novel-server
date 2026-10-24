@@ -231,6 +231,101 @@ describe.skipIf(!url)('Profile aggregates (isolated PostgreSQL)', () => {
     });
   });
 
+  // The published all-time totals ride in the SAME correlated statement as the
+  // comments aggregates, with the leaderboard 'all' semantics: the day bound
+  // comes from leaderboardWindow('all') (read_day >= '0000-01-01' AND <=
+  // today), the chapter rule mirrors the board's completion filter, seconds
+  // are clamped per row, and finished novels read progress_percent >= 90.
+  // The fake answers the shape from fixtures and never parses the SQL, so
+  // only these assertions can catch a dropped bound, a missing GREATEST, or
+  // a bare identifier that binds to the wrong table.
+  describe('public reading totals (real SQL)', () => {
+    const iso = (ago: number) => {
+      const d = new Date();
+      d.setUTCDate(d.getUTCDate() - ago);
+      return d.toISOString().slice(0, 10);
+    };
+
+    /** A board-completed chapter: signal present, >= 85%, named novel, chapter > 0. */
+    const completedRow = (userId: string, overrides: Record<string, unknown> = {}) =>
+      sessionRow(userId, {
+        completionSignalPresent: true,
+        progressPercent: 95,
+        completed: true,
+        readDay: iso(0),
+        ...overrides,
+      });
+
+    it('publishes all-time totals for a reader with sessions', async () => {
+      const { row } = await createUser('pro');
+      await database.insert(readingSessions).values([
+        completedRow(row.id, { novelId: 'n1', chapterId: 1, seconds: 600 }),
+        completedRow(row.id, { novelId: 'n1', chapterId: 2, seconds: 900 }),
+        // Same chapter twice: DISTINCT counts it once, seconds count twice.
+        completedRow(row.id, { novelId: 'n1', chapterId: 2, seconds: 300 }),
+        // Started but not completed: seconds count, chapters do not.
+        sessionRow(row.id, { novelId: 'n1', chapterId: 9, seconds: 100, readDay: iso(0) }),
+      ]);
+      const base = Date.now();
+      await database.insert(schema.userLibrary).values([
+        { userId: row.id, novelId: 'n1', progressPercent: 95, updatedAt: base, receivedAt: new Date(base) },
+        { userId: row.id, novelId: 'n2', progressPercent: 100, updatedAt: base, receivedAt: new Date(base) },
+        { userId: row.id, novelId: 'n3', progressPercent: 50, updatedAt: base, receivedAt: new Date(base) },
+      ]);
+      const { body } = await pub(row.id);
+      expect(body.stats.totalChapters).toBe(2);
+      expect(body.stats.totalSeconds).toBe(1900);
+      expect(body.stats.totalNovels).toBe(2);
+    });
+
+    it('applies the all-window bounds, so empty and future read days stay excluded', async () => {
+      const { row } = await createUser('pro');
+      await database.insert(readingSessions).values([
+        completedRow(row.id, { novelId: 'n1', chapterId: 1, seconds: 600 }),
+        // Legacy Free-origin row: empty read_day fails the '0000-01-01' lower
+        // bound, exactly like the board.
+        completedRow(row.id, { novelId: 'n1', chapterId: 2, seconds: 600, readDay: '' }),
+        // Future row: fails the today upper bound, exactly like the board.
+        completedRow(row.id, { novelId: 'n1', chapterId: 3, seconds: 600, readDay: iso(-1) }),
+      ]);
+      const { body } = await pub(row.id);
+      expect(body.stats.totalChapters).toBe(1);
+      expect(body.stats.totalSeconds).toBe(600);
+    });
+
+    it('clamps negative seconds per row in the published total', async () => {
+      const { row } = await createUser('pro');
+      await database.insert(readingSessions).values([
+        completedRow(row.id, { novelId: 'n1', chapterId: 1, seconds: 600 }),
+        sessionRow(row.id, { novelId: 'n1', chapterId: 9, seconds: -500, readDay: iso(0) }),
+      ]);
+      const { body } = await pub(row.id);
+      expect(body.stats.totalSeconds).toBe(600);
+    });
+
+    it('reports zeros, not nulls, for a reader with no rows', async () => {
+      const { row } = await createUser('free');
+      const { body } = await pub(row.id);
+      expect(body.stats).toMatchObject({ totalChapters: 0, totalSeconds: 0, totalNovels: 0 });
+      expect(typeof body.stats.totalChapters).toBe('number');
+      expect(typeof body.stats.totalSeconds).toBe('number');
+      expect(typeof body.stats.totalNovels).toBe('number');
+    });
+
+    it('excludes soft-deleted and unfinished library rows from totalNovels', async () => {
+      const { row } = await createUser('pro');
+      const base = Date.now();
+      await database.insert(schema.userLibrary).values([
+        { userId: row.id, novelId: 'a', progressPercent: 95, updatedAt: base, receivedAt: new Date(base) },
+        { userId: row.id, novelId: 'b', progressPercent: 90, updatedAt: base, receivedAt: new Date(base) },
+        { userId: row.id, novelId: 'c', progressPercent: 89.9, updatedAt: base, receivedAt: new Date(base) },
+        { userId: row.id, novelId: 'd', progressPercent: 100, updatedAt: base, deletedAt: base, receivedAt: new Date(base) },
+      ]);
+      const { body } = await pub(row.id);
+      expect(body.stats.totalNovels).toBe(2);
+    });
+  });
+
   // Each of these pins one predicate in the hand-written subquery. The fake
   // cannot fail them; a renamed column or a dropped predicate breaks here.
   it('excludes soft-deleted library rows and counts live ones', async () => {    const { row, token } = await createUser('pro');
@@ -332,7 +427,7 @@ describe.skipIf(!url)('Profile aggregates (isolated PostgreSQL)', () => {
     await database.insert(readingSessions).values([sessionRow(row.id, { seconds: 10800, readDay: '2026-09-28' })]);
     const { status, body } = await pub(row.id);
     expect(status).toBe(200);
-    expect(body.stats).toEqual({ commentsCount: 2, likesReceived: 8 });
+    expect(body.stats).toEqual({ commentsCount: 2, likesReceived: 8, totalChapters: 0, totalSeconds: 10800, totalNovels: 0 });
     expect(body.level).toBe(3);
     expect(body.isPro).toBe(true);
   });
