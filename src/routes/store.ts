@@ -86,9 +86,8 @@ storeRouter.post('/purchase', requireAuth, async (c) => {
 });
 
 const equipSchema = z.union([
-  z.object({ slot: z.enum(['avatar', 'profile_effect', 'frame', 'badge']), itemId: z.string().uuid().nullable() }),
+  z.object({ slot: z.enum(['avatar', 'profile_effect', 'frame', 'badge', 'like_animation']), itemId: z.string().uuid().nullable() }),
   z.object({ slot: z.enum(['name_style', 'banner']), value: z.unknown() }),
-  z.object({ slot: z.literal('like_animation'), value: z.unknown().optional().nullable() }),
 ]);
 storeRouter.put('/equip', requireAuth, async (c) => {
   const caller = await getCaller(c);

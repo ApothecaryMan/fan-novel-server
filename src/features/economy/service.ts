@@ -195,21 +195,26 @@ export function decorationsFromEquipped(equipped: Array<{ slot: string; metadata
     if (row.slot === 'avatar' && row.metadata?.frameKey) out.avatarFrameKey = row.metadata.frameKey;
     else if (row.slot === 'frame' && row.metadata?.frameKey) out.profileFrameKey = row.metadata.frameKey;
     else if (row.slot === 'profile_effect' && row.metadata?.styleId) out.profileEffectName = row.metadata.styleId;
+    else if (row.slot === 'like_animation' && row.metadata?.animationKey) out.commentLikeAnimation = animationValueFromKey(row.metadata.animationKey);
   }
   return Object.keys(out).length ? out : null;
 }
 
-export const OWNED_SLOTS = ['avatar', 'profile_effect', 'frame', 'badge'] as const;
-export const CUSTOM_SLOTS = ['name_style', 'banner'] as const;
-export const LIKE_ANIMATION_SLOT = 'like_animation' as const;
+/** Catalog animationKey back to an equippable value: numeric strings become ints. */
+function animationValueFromKey(key: unknown): unknown {
+  if (typeof key === 'string' && /^\d+$/.test(key)) return Number(key);
+  return key;
+}
 
-type Customs = { nameStyle?: unknown; bannerGradient?: unknown; commentLikeAnimation?: unknown };
+export const OWNED_SLOTS = ['avatar', 'profile_effect', 'frame', 'badge', 'like_animation'] as const;
+export const CUSTOM_SLOTS = ['name_style', 'banner'] as const;
+
+type Customs = { nameStyle?: unknown; bannerGradient?: unknown };
 
 function mergedDecorations(owned: Record<string, unknown> | null, customs: Customs): Record<string, unknown> | null {
   const out: Record<string, unknown> = { ...(owned ?? {}) };
   if (customs.nameStyle !== undefined) out.nameStyle = customs.nameStyle as never;
   if (customs.bannerGradient !== undefined) out.bannerGradient = customs.bannerGradient as never;
-  if (customs.commentLikeAnimation !== undefined) out.commentLikeAnimation = customs.commentLikeAnimation as never;
   return Object.keys(out).length ? out : null;
 }
 
@@ -219,19 +224,17 @@ async function currentCustoms(tx: any, userId: string): Promise<Customs> {
   const customs: Customs = {};
   if (d.nameStyle !== undefined) customs.nameStyle = d.nameStyle;
   if (d.bannerGradient !== undefined) customs.bannerGradient = d.bannerGradient;
-  if (d.commentLikeAnimation !== undefined) customs.commentLikeAnimation = d.commentLikeAnimation;
   return customs;
 }
 
-async function writeMergedCache(tx: any, userId: string, customsOverride?: Customs & { clearNameStyle?: boolean; clearBanner?: boolean; clearLikeAnimation?: boolean }) {
+async function writeMergedCache(tx: any, userId: string, customsOverride?: Customs & { clearNameStyle?: boolean; clearBanner?: boolean }) {
   const rows = await tx.select({ slot: userEquipped.slot, metadata: storeItems.metadata })
     .from(userEquipped).innerJoin(storeItems, eq(storeItems.id, userEquipped.itemId))
     .where(eq(userEquipped.userId, userId));
   const customs = customsOverride ? { ...customsOverride } : await currentCustoms(tx, userId);
   const nameStyle = (customs as any).clearNameStyle ? undefined : (customs as any).nameStyle;
   const bannerGradient = (customs as any).clearBanner ? undefined : (customs as any).bannerGradient;
-  const commentLikeAnimation = (customs as any).clearLikeAnimation ? undefined : (customs as any).commentLikeAnimation;
-  const decorations = mergedDecorations(decorationsFromEquipped(rows as any), { nameStyle, bannerGradient, commentLikeAnimation });
+  const decorations = mergedDecorations(decorationsFromEquipped(rows as any), { nameStyle, bannerGradient });
   await tx.update(users).set({ profileDecorations: decorations as any, updatedAt: new Date() }).where(eq(users.id, userId));
   return { equipped: rows.map((r: any) => ({ slot: r.slot })), decorations };
 }
@@ -243,19 +246,6 @@ export async function equipItem(db: any, opts: { userId: string; slot: string; i
   // so a mid-way failure self-heals on the next equip or sync.
   const tx = db;
   {
-    if (opts.slot === LIKE_ANIMATION_SLOT) {
-      const { commentLikeAnimationSchema } = await import('../../domain/profileDecorations.js');
-      const clearing = opts.value === null || opts.value === undefined;
-      if (!clearing) {
-        const parsed = commentLikeAnimationSchema.safeParse(opts.value);
-        if (!parsed.success) throw new PurchaseError('invalid_custom_value', 400);
-      }
-      const customs = await currentCustoms(tx, opts.userId);
-      if (clearing) {
-        return writeMergedCache(tx, opts.userId, { ...customs, clearLikeAnimation: true });
-      }
-      return writeMergedCache(tx, opts.userId, { ...customs, commentLikeAnimation: opts.value });
-    }
     if ((CUSTOM_SLOTS as readonly string[]).includes(opts.slot)) {
       const { nameStyleSchema, bannerGradientSchema } = await import('../../domain/profileDecorations.js');
       const schema = opts.slot === 'name_style' ? nameStyleSchema : bannerGradientSchema;
@@ -281,7 +271,7 @@ export async function equipItem(db: any, opts: { userId: string; slot: string; i
       const [item] = await tx.select().from(storeItems).where(eq(storeItems.id, opts.itemId)).limit(1);
       if (!item) throw new PurchaseError('item_unavailable', 404);
       if (!item.isActive) throw new PurchaseError('item_inactive', 410);
-      const [slotFor] = [item.type === 'avatar' ? 'avatar' : item.type === 'profile_effect' ? 'profile_effect' : item.type === 'frame' ? 'frame' : 'badge'];
+      const [slotFor] = [item.type === 'avatar' ? 'avatar' : item.type === 'profile_effect' ? 'profile_effect' : item.type === 'frame' ? 'frame' : item.type === 'like_animation' ? 'like_animation' : 'badge'];
       if (slotFor !== opts.slot) throw new PurchaseError('type_slot_mismatch', 400);
       const owned = await tx.select({ id: userInventory.id }).from(userInventory)
         .where(and(eq(userInventory.userId, opts.userId), eq(userInventory.itemId, item.id))).limit(1);

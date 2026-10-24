@@ -6,11 +6,12 @@ export const avatarMetadataSchema = base.extend({ frameKey: z.string().min(1).ma
 export const nameEffectMetadataSchema = base.extend({ styleId: z.string().min(1).max(100) }).strict();
 export const frameMetadataSchema = base.extend({ frameKey: z.string().min(1).max(200) }).strict();
 export const badgeMetadataSchema = base.extend({ badgeKey: z.string().min(1).max(100) }).strict();
+export const likeAnimationMetadataSchema = base.extend({ animationKey: z.string().min(1).max(100) }).strict();
 
-export const ITEM_TYPES = ['avatar', 'profile_effect', 'frame', 'badge'] as const;
+export const ITEM_TYPES = ['avatar', 'profile_effect', 'frame', 'badge', 'like_animation'] as const;
 export type ItemType = (typeof ITEM_TYPES)[number];
 
-const REGISTRY = { avatar: avatarMetadataSchema, profile_effect: nameEffectMetadataSchema, frame: frameMetadataSchema, badge: badgeMetadataSchema } as const;
+const REGISTRY = { avatar: avatarMetadataSchema, profile_effect: nameEffectMetadataSchema, frame: frameMetadataSchema, badge: badgeMetadataSchema, like_animation: likeAnimationMetadataSchema } as const;
 
 export function validateItemMetadata(type: string, metadata: unknown) {
   const schema = (REGISTRY as Record<string, z.ZodTypeAny>)[type];
@@ -19,4 +20,4 @@ export function validateItemMetadata(type: string, metadata: unknown) {
   return parsed.success ? { ok: true as const, value: parsed.data } : { ok: false as const, error: 'invalid_metadata', issues: parsed.error.issues };
 }
 
-export const SLOT_FOR_TYPE: Record<string, string> = { avatar: 'avatar', profile_effect: 'profile_effect', frame: 'frame', badge: 'badge' };
+export const SLOT_FOR_TYPE: Record<string, string> = { avatar: 'avatar', profile_effect: 'profile_effect', frame: 'frame', badge: 'badge', like_animation: 'like_animation' };
