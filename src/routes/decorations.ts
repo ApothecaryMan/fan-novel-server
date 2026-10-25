@@ -9,12 +9,13 @@ export const SIGN_TTL_SECONDS = 300;
 const AVATAR_RE = /^fan_avatar\/[^/]{1,100}\.png$/i;
 const FRAME_RE = /^profile_frames\/[^/]{1,100}\.png$/i;
 const EFFECT_RE = /^profile_effects\/[^/]{1,100}\/[^/]{1,100}\.(png|webp|gif)$/i;
+const MANIFEST_RE = /^(fan_avatar|profile_frames|profile_effects)\/manifest\.json$/i;
 
 export function isDecorationKey(key: unknown): key is string {
   if (typeof key !== 'string') return false;
   if (key.length < 1 || key.length > 200) return false;
   if (key.includes('..')) return false;
-  return AVATAR_RE.test(key) || FRAME_RE.test(key) || EFFECT_RE.test(key);
+  return AVATAR_RE.test(key) || FRAME_RE.test(key) || EFFECT_RE.test(key) || MANIFEST_RE.test(key);
 }
 
 function getSecret(): string | null {
