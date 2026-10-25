@@ -57,6 +57,13 @@ bucket_name = "fan-novel-covers"
 binding = "RELEASES"
 bucket_name = "fan-novel-releases"
 
+# Private bucket for decoration assets (fan_avatar/, profile_frames/,
+# profile_effects/). Served ONLY via GET /api/v1/decorations/file with a
+# short-lived HMAC signature. Dashboard public r2.dev access must stay OFF.
+[[r2_buckets]]
+binding = "DECORATIONS"
+bucket_name = "fan-novel-assets"
+
 # Workers rate limiting. The middleware prefers this binding and falls back to
 # an in-isolate map when it is absent, so adding it here is what makes the limit
 # count across every isolate rather than per instance.

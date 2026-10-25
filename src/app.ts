@@ -8,6 +8,7 @@ import { novelsRouter } from './routes/novels.js';
 import { chaptersRouter, chaptersTimelineRouter } from './routes/chapters.js';
 import { commentsNovelsRouter, commentsRouter, adminCommentsRouter } from './routes/comments.js';
 import { uploadRouter } from './routes/upload.js';
+import { decorationsRouter } from './routes/decorations.js';
 import { imageResizeRouter } from './routes/imageResize.js';
 import { authRouter } from './routes/auth.js';
 import { profileRouter } from './routes/profile.js';
@@ -148,6 +149,7 @@ export function createApp() {
   app.route('/api/v1/admin/comments', adminCommentsRouter);
   app.route('/api/v1/chapters', chaptersTimelineRouter);
   app.route('/api/v1/upload', uploadRouter);
+  app.route('/api/v1/decorations', decorationsRouter);
   app.route('/api/v1/image', imageResizeRouter);
   app.route('/api/v1/app', appUpdateRouter);
   app.route('/api/v1/app', appConfigRouter);

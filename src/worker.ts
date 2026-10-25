@@ -14,6 +14,7 @@ export interface WorkerBindings {
   R2_PUBLIC_URL?: string;
   COVERS?: unknown;
   RELEASES?: unknown;
+  DECORATIONS?: unknown;
   RATE_LIMITER?: unknown;
 }
 
