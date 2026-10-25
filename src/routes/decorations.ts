@@ -44,7 +44,7 @@ interface BucketLike {
 
 export const decorationsRouter = new Hono();
 
-decorationsRouter.get('/sign', rateLimit(30), requireAuth, async (c) => {
+decorationsRouter.get('/sign', requireAuth, rateLimit(30), async (c) => {
   const secret = getSecret();
   if (!secret) return c.json({ error: 'signer unavailable' }, 503);
   const key = (c.req.query('key') ?? '').trim();

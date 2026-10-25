@@ -28,10 +28,12 @@ function prune(now: number): void {
   }
 }
 
-export function rateLimit(max = 60, windowMs = 60_000): MiddlewareHandler {
+export function rateLimit(max = 60, windowMs = 60_000, keyFn?: (c: any) => string): MiddlewareHandler {
   return async (c, next) => {
     const ip = c.req.header('x-forwarded-for')?.split(',')[0]?.trim() || 'local';
-    const key = `${ip}:${c.req.path}`;
+    const sub = (c.get as any)?.('authUser')?.sub;
+    const base = typeof keyFn === 'function' ? keyFn(c) : (typeof sub === 'string' && sub ? `user:${sub}` : `ip:${ip}`);
+    const key = `${base}:${c.req.path}`;
 
     // Cloudflare's binding counts across every isolate, which the map below
     // cannot. It is preferred when bound; the map stays as the fallback for

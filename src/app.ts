@@ -32,8 +32,9 @@ export function createApp() {
 
   app.use('*', requestId());
   app.use('*', logger());
+  const corsAllowlist = env.CORS_ORIGIN === '*' ? [] : env.CORS_ORIGIN.split(',').map((s) => s.trim()).filter(Boolean);
   app.use('*', cors({
-    origin: env.CORS_ORIGIN === '*' ? '*' : env.CORS_ORIGIN.split(',').map((s) => s.trim()),
+    origin: env.isProd ? corsAllowlist : '*',
     allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowHeaders: ['Content-Type', 'Authorization'],
   }));
