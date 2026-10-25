@@ -55,6 +55,19 @@ decorationsRouter.get('/sign', requireAuth, rateLimit(30), async (c) => {
   return c.json({ success: true, url, expiresIn: SIGN_TTL_SECONDS, exp });
 });
 
+decorationsRouter.get('/thumb', rateLimit(120), async (c) => {
+  const key = (c.req.query('key') ?? '').trim();
+  if (!isDecorationKey(key)) return c.json({ error: 'invalid key' }, 400);
+  const bucket = getWorkerBinding<BucketLike>('DECORATIONS');
+  if (!bucket) return c.json({ error: 'storage unavailable' }, 503);
+  const obj = await bucket.get(key).catch(() => null);
+  if (!obj || !obj.body) return c.json({ error: 'not found' }, 404);
+  const type = obj.httpMetadata?.contentType ?? 'image/png';
+  return new Response(obj.body as ReadableStream, {
+    headers: { 'Content-Type': type, 'Cache-Control': 'public, max-age=3600' },
+  });
+});
+
 decorationsRouter.get('/file', rateLimit(120), async (c) => {
   const secret = getSecret();
   if (!secret) return c.json({ error: 'signer unavailable' }, 503);
