@@ -27,10 +27,60 @@
  *
  * Anonymous, cacheable, and read-only: it fetches images and returns bytes.
  * It never accepts a body and never mutates anything.
+ *
+ * Resizing: when the Cloudflare Images binding (`IMAGES`) is present and the
+ * client asked for a width (`?w=`), the fetched bytes are resized down and
+ * converted to WebP before serving; otherwise (local dev, tests, or a
+ * transform failure) the original bytes are proxied unchanged.
  */
 import { Hono } from 'hono';
+import { getWorkerBinding } from '../config/env.js';
 
 export const imageResizeRouter = new Hono();
+
+/** Minimal shape of the Cloudflare Images binding used here. */
+interface ImagesBinding {
+  input(body: ReadableStream<Uint8Array>): {
+    transform(opts: { width?: number; fit?: string }): {
+      output(opts: { format?: string; quality?: number }): {
+        response(): Response | Promise<Response>;
+      } | Promise<{ response(): Response | Promise<Response> }>;
+    };
+  };
+}
+
+/**
+ * Resize + convert to WebP via the Images binding. Returns null when the
+ * binding is missing or the transform fails, so the caller can fall back to
+ * the original bytes. Never throws.
+ */
+async function tryTransform(
+  binding: unknown,
+  body: ArrayBuffer,
+  width: number,
+): Promise<{ bytes: ArrayBuffer; type: string } | null> {
+  try {
+    const b = binding as ImagesBinding | null;
+    if (!b || typeof b.input !== 'function') return null;
+    // The Images binding consumes a stream, not a buffer: passing the
+    // ArrayBuffer directly throws in production and would silently fall back
+    // to the original bytes on every request.
+    const stream = new Response(body).body;
+    if (!stream) return null;
+    const chained = await b.input(stream).transform({ width, fit: 'scale-down' }).output({ format: 'image/webp', quality: 75 });
+    const res = typeof (chained as { response?: unknown }).response === 'function'
+      ? await (chained as { response(): Response | Promise<Response> }).response()
+      : null;
+    if (!res || typeof (res as Response).arrayBuffer !== 'function') return null;
+    const out = res as Response;
+    const bytes = await out.arrayBuffer();
+    const type = (out.headers?.get?.('content-type') ?? 'image/webp').split(';')[0].trim().toLowerCase() || 'image/webp';
+    return { bytes, type };
+  } catch (err) {
+    console.warn('[image] transform failed', err);
+    return null;
+  }
+}
 
 /** Hosts we are willing to fetch from. Keep in sync with extensions-repo. */
 const ALLOWED_HOSTS = [
@@ -136,14 +186,10 @@ async function safeFetch(url: URL, depth = 0): Promise<
 }
 
 /** GET /api/v1/image/resize?url=<absolute>&w=<px>
- *  Streams the original bytes with a long cache lifetime.
- *
- *  NOTE ON RESIZING: a Worker cannot resize an image without an image-processing
- *  binding (Cloudflare Images / Image Resizing), so this endpoint currently
- *  proxies bytes only. That is still a large win — it removes the third-party
- *  dependency and lets the client cache the original once instead of failing —
- *  but it does NOT shrink the payload. Wiring R2/Image Resizing later is the
- *  follow-up that turns 2.8 MB into ~30 KB.
+ *  Fetches the upstream image, resizes it to `w` via the Images binding when
+ *  one is configured, and serves the (edge-cached) result with a long cache
+ *  lifetime. Without the binding, or when the transform fails, the original
+ *  bytes are proxied exactly as fetched.
  */
 imageResizeRouter.get('/resize', async (c) => {
   const raw = c.req.query('url');
@@ -154,12 +200,16 @@ imageResizeRouter.get('/resize', async (c) => {
     return c.json({ success: false, code: parsed.code, error: parsed.error }, parsed.status as 400 | 403);
   }
 
-  const width = Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, Number(c.req.query('w') ?? 0) || 0));
+  const requestedW = Number(c.req.query('w') ?? 0) || 0;
+  const width = Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, requestedW));
+  const wantTransform = requestedW > 0;
 
   // Cloudflare does NOT cache Worker responses just because they carry
   // Cache-Control, so the Cache API has to be used explicitly — otherwise every
   // image view re-fetches a 2.8MB original from the source site (3-25s each).
-  // `caches` is a global, not an env binding.
+  // `caches` is a global, not an env binding. The cache key is the full
+  // request URL, so it already includes `w`: different widths never collide,
+  // and the stored entry is whatever was served (transformed or original).
   const edgeCache = (globalThis as unknown as { caches?: { default?: Cache } }).caches;
   const cache = edgeCache?.default;
   const cacheKey = new Request(c.req.url, { method: 'GET' });
@@ -205,8 +255,21 @@ imageResizeRouter.get('/resize', async (c) => {
     return c.json({ success: false, code: 'too_large', error: 'image too large to proxy' }, 413);
   }
 
+  // Resize AFTER every security check above (allowlist, redirect
+  // re-validation, size limits, content-type). A transform failure must never
+  // fail the request: fall back to the original bytes exactly as fetched.
+  let outBytes: ArrayBuffer = body;
+  let outType = type;
+  if (wantTransform) {
+    const transformed = await tryTransform(getWorkerBinding('IMAGES'), body, width);
+    if (transformed) {
+      outBytes = transformed.bytes;
+      outType = transformed.type.startsWith('image/') ? transformed.type : 'image/webp';
+    }
+  }
+
   const headers: Record<string, string> = {
-    'Content-Type': type,
+    'Content-Type': outType,
     // Immutable enough for a content-addressed upstream path, and explicitly
     // NOT shared with any authenticated response.
     'Cache-Control': `public, max-age=${CACHE_TTL_SECONDS}, immutable`,
@@ -223,11 +286,11 @@ imageResizeRouter.get('/resize', async (c) => {
   // put must never break the response, so it is guarded.
   if (cache) {
     try {
-      await cache.put(cacheKey, new Response(body, { status: 200, headers: { ...headers, 'X-Image-Cache': 'MISS' } }));
+      await cache.put(cacheKey, new Response(outBytes, { status: 200, headers: { ...headers, 'X-Image-Cache': 'MISS' } }));
     } catch {
       /* cache quota/size exceeded — serve uncached rather than fail */
     }
   }
 
-  return new Response(body, { status: 200, headers });
+  return new Response(outBytes, { status: 200, headers });
 });

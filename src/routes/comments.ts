@@ -559,9 +559,6 @@ commentsNovelsRouter.get('/:novelId/comments', optionalAuth, async (c) => {
   }
 
   try {
-    const novelCheck = await novelExists(novelId);
-    if (novelCheck === 'missing') return c.json({ success: false, code: 'novel_not_found', error: 'الرواية غير موجودة' }, 404);
-    if (novelCheck === 'unknown') return c.json({ success: false, code: 'novel_not_found', error: 'تعذر التحقق' }, 503);
     const statusCond = visibleOnly ? eq(comments.status, 'visible') : wantStatus ? eq(comments.status, wantStatus) : undefined;
     const chapterCond = chapter !== undefined ? eq(comments.chapterNumber, chapter) : sql`${comments.chapterNumber} IS NULL`;
     const base = and(eq(comments.novelId, novelId), sql`${comments.parentId} IS NULL`, chapterCond, statusCond);
@@ -581,15 +578,30 @@ commentsNovelsRouter.get('/:novelId/comments', optionalAuth, async (c) => {
         )
         : byTime;
     }
-    // Rows and first-page count are independent statements; neon-http pays one
-    // HTTPS round trip per query, so fire both together instead of serially.
-    const countP = !cursor
+    // First wave: novel existence, caller identity, and the page+count reads
+    // are independent statements; neon-http pays one HTTPS round trip per
+    // query, so fire all of them together instead of serially. The page/count
+    // queries are speculative: when the novel is missing/unknown their results
+    // (including failures) are discarded and the same 404/503 as before wins.
+    const countThenable = !cursor
       ? db.select({ n: sql<number>`count(*)::int` }).from(comments).where(base)
       : Promise.resolve(null);
-    const [rows, countRes] = await Promise.all([
-      db.select().from(comments).where(cursorCond ? and(base, cursorCond) : base).orderBy(...order).limit(limit + 1),
-      countP,
+    const rowsThenable =
+      db.select().from(comments).where(cursorCond ? and(base, cursorCond) : base).orderBy(...order).limit(limit + 1);
+    const [novelSettled, rowsSettled, countSettled, callerSettled] = await Promise.allSettled([
+      novelExists(novelId),
+      rowsThenable,
+      countThenable,
+      getEnv().syncOpen ? Promise.resolve(null) : getCaller(c),
     ]);
+    const novelCheck = novelSettled.status === 'fulfilled' ? novelSettled.value : 'unknown';
+    if (novelCheck === 'missing') return c.json({ success: false, code: 'novel_not_found', error: 'الرواية غير موجودة' }, 404);
+    if (novelCheck === 'unknown') return c.json({ success: false, code: 'novel_not_found', error: 'تعذر التحقق' }, 503);
+    if (rowsSettled.status === 'rejected') throw rowsSettled.reason;
+    if (countSettled.status === 'rejected') throw countSettled.reason;
+    const rows = rowsSettled.value as Awaited<typeof rowsThenable>;
+    const countRes = countSettled.value as Awaited<typeof countThenable>;
+    const callerForVotes = callerSettled.status === 'fulfilled' ? callerSettled.value : null;
     const hasMore = rows.length > limit;
     const page = hasMore ? rows.slice(0, limit) : rows;
 
@@ -598,11 +610,11 @@ commentsNovelsRouter.get('/:novelId/comments', optionalAuth, async (c) => {
     // count endpoint. Saves 1 HTTPS round trip per scroll page on neon-http.
     const rootTotal: number | null = countRes ? Number(countRes[0]?.n ?? page.length) : null;
 
-    // liked-by-me batch + reply preview run concurrently (independent
-    // statements over the same page ids — one HTTPS trip each on neon-http,
-    // so parallel halves the added latency versus serial awaits).
-    // Single getCaller for the whole route: it costs a users lookup per call.
-    const callerForVotes = getEnv().syncOpen ? null : await getCaller(c);
+    // Second wave: liked-by-me batch + reply preview + page authors run
+    // concurrently (independent statements — one HTTPS trip each on
+    // neon-http, so parallel halves the added latency versus serial awaits).
+    // getCaller already ran in the first wave above (and is cached per
+    // request, so the moderator check earlier costs no second lookup).
     const votesP = (callerForVotes?.row && page.length)
       ? db.select({ commentId: commentVotes.commentId }).from(commentVotes)
         .where(and(eq(commentVotes.userId, callerForVotes.row.id), inArray(commentVotes.commentId, page.map((r) => r.id))))
@@ -661,9 +673,12 @@ commentsNovelsRouter.get('/:novelId/comments', optionalAuth, async (c) => {
         ORDER BY "created_at" ASC, "id" ASC
       `);
     }
-    const [vrows, previewResult] = await Promise.all([
+    const [vrows, previewResult, pageLookup] = await Promise.all([
       votesP,
       previewP ?? Promise.resolve(null),
+      // Page-row authors overlap with the preview CTE round trip instead of
+      // waiting for it; only preview-only user ids need a small follow-up.
+      buildAuthorLookup(page.map((r) => r.userId).filter(Boolean) as string[]),
     ]);
     const liked = new Set<number>();
     for (const v of vrows) liked.add(v.commentId);
@@ -699,9 +714,16 @@ commentsNovelsRouter.get('/:novelId/comments', optionalAuth, async (c) => {
         if (rk != null && previews.has(rk)) previews.get(rk)!.push(k);
       }
     }
-    // authors batch: roots ∪ previews union
+    // Authors: page rows were already looked up in parallel with the preview
+    // CTE above; fetch only preview user ids not already covered. Same union
+    // of ids as before, so the response shape is unchanged.
     const previewUids = [...previews.values()].flat().map((k) => k.userId).filter(Boolean) as string[];
-    const lookup = await buildAuthorLookup([...page.map((r) => r.userId).filter(Boolean) as string[], ...previewUids]);
+    const missingPreviewUids = [...new Set(previewUids)].filter((id) => !pageLookup.has(id));
+    let lookup = pageLookup;
+    if (missingPreviewUids.length) {
+      const extra = await buildAuthorLookup(missingPreviewUids);
+      lookup = new Map([...pageLookup, ...extra]);
+    }
     const data = page.map((r) => ({
       ...toApi(r, authorOf(r.userId, lookup), (liked.has(r.id) ? 1 : 0) as 1 | -1 | 0),
       // The window selected the NEWEST 2 plus their ancestor chain; render the

@@ -192,3 +192,99 @@ describe('image resize: will not relay non-images', () => {
     expect(res.status).toBe(413);
   });
 });
+
+// ---- Images binding transform ----
+describe('image resize: Images binding transform', () => {
+  afterEach(() => { delete (globalThis as unknown as { __WORKER_BINDINGS__?: unknown }).__WORKER_BINDINGS__; });
+
+  function fakeImages(seen: { width?: unknown; isStream?: unknown }, body = new Uint8Array([1, 2, 3]), type = 'image/webp') {
+    return {
+      input: (b: unknown) => ({
+        transform: (opts: any) => {
+          seen.width = opts?.width;
+          seen.isStream = b instanceof ReadableStream;
+          return {
+            output: (_o: any) => ({
+              response: () => new Response(body, { status: 200, headers: { 'content-type': type } }),
+            }),
+          };
+        },
+      }),
+    };
+  }
+
+  it('uses the transform when the binding exists and a width was requested', async () => {
+    const seen: { width?: unknown; isStream?: unknown } = {};
+    (globalThis as unknown as { __WORKER_BINDINGS__?: unknown }).__WORKER_BINDINGS__ = { IMAGES: fakeImages(seen) };
+    vi.stubGlobal('fetch', vi.fn(async () => img()));
+    const res = await get(`url=${encodeURIComponent(ALLOWED)}&w=800`);
+    expect(res.status).toBe(200);
+    expect(seen.width).toBe(800);
+    expect(seen.isStream).toBe(true);
+    expect(res.headers.get('content-type')).toBe('image/webp');
+    expect([...new Uint8Array(await res.arrayBuffer())]).toEqual([1, 2, 3]);
+  });
+
+  it('falls back to the original bytes when the binding is absent', async () => {
+    delete (globalThis as unknown as { __WORKER_BINDINGS__?: unknown }).__WORKER_BINDINGS__;
+    vi.stubGlobal('fetch', vi.fn(async () => img()));
+    const res = await get(`url=${encodeURIComponent(ALLOWED)}&w=800`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toBe('image/jpeg');
+    expect([...new Uint8Array(await res.arrayBuffer())]).toEqual([0xff, 0xd8, 0xff]);
+  });
+
+  it('falls back to the original bytes when the transform throws', async () => {
+    (globalThis as unknown as { __WORKER_BINDINGS__?: unknown }).__WORKER_BINDINGS__ = {
+      IMAGES: { input: () => { throw new Error('transform down'); } },
+    };
+    vi.stubGlobal('fetch', vi.fn(async () => img()));
+    const res = await get(`url=${encodeURIComponent(ALLOWED)}&w=800`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toBe('image/jpeg');
+    expect([...new Uint8Array(await res.arrayBuffer())]).toEqual([0xff, 0xd8, 0xff]);
+  });
+
+  it('does not transform when no width was requested', async () => {
+    const seen: { width?: unknown } = {};
+    (globalThis as unknown as { __WORKER_BINDINGS__?: unknown }).__WORKER_BINDINGS__ = { IMAGES: fakeImages(seen) };
+    vi.stubGlobal('fetch', vi.fn(async () => img()));
+    const res = await get(`url=${encodeURIComponent(ALLOWED)}`);
+    expect(res.status).toBe(200);
+    expect(seen.width).toBeUndefined();
+    expect(res.headers.get('content-type')).toBe('image/jpeg');
+  });
+
+  it('caches different widths separately', async () => {
+    const store = new Map<string, { body: ArrayBuffer; headers: Headers }>();
+    (globalThis as unknown as { caches?: unknown }).caches = {
+      default: {
+        async match(r: Request) {
+          const e = store.get(r.url);
+          return e ? new Response(e.body, { status: 200, headers: e.headers }) : undefined;
+        },
+        async put(r: Request, res: Response) {
+          store.set(r.url, { body: await res.arrayBuffer(), headers: new Headers(res.headers) });
+        },
+      } as unknown as Cache,
+    };
+    try {
+      const seen: { width?: unknown } = {};
+      (globalThis as unknown as { __WORKER_BINDINGS__?: unknown }).__WORKER_BINDINGS__ = { IMAGES: fakeImages(seen) };
+      const origin = vi.fn(async () => img());
+      vi.stubGlobal('fetch', origin);
+      const first800 = await get(`url=${encodeURIComponent(ALLOWED)}&w=800`);
+      expect(first800.headers.get('X-Image-Cache')).toBe('MISS');
+      expect(first800.headers.get('content-type')).toBe('image/webp');
+      const first400 = await get(`url=${encodeURIComponent(ALLOWED)}&w=400`);
+      expect(first400.headers.get('X-Image-Cache')).toBe('MISS');
+      expect(origin).toHaveBeenCalledTimes(2);
+      const second800 = await get(`url=${encodeURIComponent(ALLOWED)}&w=800`);
+      expect(second800.headers.get('X-Image-Cache')).toBe('HIT');
+      expect(second800.headers.get('content-type')).toBe('image/webp');
+      expect(origin).toHaveBeenCalledTimes(2);
+    } finally {
+      delete (globalThis as unknown as { caches?: unknown }).caches;
+    }
+  });
+});

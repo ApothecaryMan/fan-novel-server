@@ -16,13 +16,16 @@ export interface WorkerBindings {
   RELEASES?: unknown;
   DECORATIONS?: unknown;
   RATE_LIMITER?: unknown;
+  IMAGES?: unknown;
 }
+
+let app: ReturnType<typeof createApp> | null = null;
 
 export default {
   async fetch(request: Request, bindings: WorkerBindings): Promise<Response> {
     setWorkerEnv(bindings as unknown as Record<string, unknown>);
     (globalThis as any).__WORKER_BINDINGS__ = bindings;
-    const app = createApp();
+    if (!app) app = createApp();
     return app.fetch(request, bindings);
   },
 };

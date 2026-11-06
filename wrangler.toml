@@ -72,3 +72,7 @@ bucket_name = "fan-novel-assets"
 name = "RATE_LIMITER"
 namespace_id = "1001"
 simple = { limit = 60, period = 60 }
+
+# Cloudflare Images transformation binding for GET /api/v1/image/resize.
+[images]
+binding = "IMAGES"

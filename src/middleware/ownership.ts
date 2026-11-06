@@ -19,13 +19,21 @@ export async function getCaller(c: Context): Promise<Caller> {
   const payload = c.get('authUser') as { sub?: string } | undefined;
   const sub = payload?.sub ?? '';
   const empty: Caller = { row: null, isAdmin: false, canWrite: false, dbUnavailable: false };
-  if (!sub || !isDbAvailable()) return empty;
+  if (!sub || !isDbAvailable()) {
+    c.set('caller', empty);
+    return empty;
+  }
   try {
     const found = await db.select().from(users).where(eq(users.externalId, sub)).limit(1);
     const row = found[0] ?? null;
-    if (!row) return empty;
+    if (!row) {
+      c.set('caller', empty);
+      return empty;
+    }
     const isAdmin = row.role === 'admin';
-    return { row, isAdmin, canWrite: isAdmin || Boolean(row.isAuthor) || Boolean(row.isTranslator) };
+    const caller: Caller = { row, isAdmin, canWrite: isAdmin || Boolean(row.isAuthor) || Boolean(row.isTranslator) };
+    c.set('caller', caller);
+    return caller;
   } catch {
     // A dead connection is not a deleted account. Marking it keeps the answer
     // honest: 503 "try again", never 401 "sign in".
