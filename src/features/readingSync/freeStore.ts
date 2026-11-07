@@ -1,10 +1,19 @@
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import { db } from '../../database/db.js';
-import { readingSessions } from '../../database/schema.js';
+import { readingNovelTombstones, readingSessions, users } from '../../database/schema.js';
 import {
   calculateFreeStatsFromTotals,
+  calculateStreaks,
+  dayNumberFromLabel,
+  utcDayNumberFromTs,
   type FreeCalculationSession,
 } from './calculations.js';
+import {
+  isValidTimeZone,
+  isValidTzOffsetMinutes,
+  todayLabelForOffset,
+  todayLabelInTz,
+} from './timezone.js';
 import { COMPLETION_THRESHOLD, type FreeSession, type FreeStats, type ReadingPlan } from './contracts.js';
 
 // ==========================================
@@ -251,16 +260,106 @@ function toFreeSessionRow(userId: string, session: FreeSession) {
  * is bounded by the batch (MAX_SESSIONS_PER_PUSH) and keeps the retry a
  * duplicate acknowledgement or a 409 — never an overwrite.
  */
+export interface DeletionGate {
+  resetAt: number | null;
+  tombstones: Map<string, number>;
+}
+
+/**
+ * Tolerance for a reader's clock running behind the server's. A session whose
+ * ts falls inside this window before a reset/tombstone marker is treated as
+ * concurrent rather than pre-delete, so a device a few minutes slow is not
+ * punished for a reset it could not yet have observed. Shared by the v2 push
+ * paths, the legacy v1 writer, and both delete flows.
+ */
+export const READING_CLOCK_SKEW_MS = 5 * 60 * 1000;
+
+export function normalizeResetAt(value: unknown): number | null {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+/** Load the deletion gate: the reset marker plus tombstones for the batch's novels. */
+export async function loadDeletionGate(
+  userId: string,
+  novelIds: readonly string[],
+): Promise<DeletionGate> {
+  const [[userRow], tombRows] = await Promise.all([
+    db.select({ statsResetAt: users.statsResetAt }).from(users).where(eq(users.id, userId)).limit(1),
+    novelIds.length === 0
+      ? Promise.resolve([])
+      : db.select({ novelId: readingNovelTombstones.novelId, deletedAt: readingNovelTombstones.deletedAt })
+        .from(readingNovelTombstones)
+        .where(and(eq(readingNovelTombstones.userId, userId), inArray(readingNovelTombstones.novelId, [...new Set(novelIds)]))),
+  ]);
+  const resetAt = normalizeResetAt((userRow as { statsResetAt?: unknown } | undefined)?.statsResetAt);
+  const tombstones = new Map<string, number>();
+  for (const row of tombRows) {
+    const deletedAt = normalizeResetAt((row as { deletedAt?: unknown }).deletedAt);
+    if (deletedAt !== null) tombstones.set(String((row as { novelId?: unknown }).novelId), deletedAt);
+  }
+  return { resetAt, tombstones };
+}
+// Best-effort note (reset-vs-push race): callers read the gate once and then
+// insert. A reset (or novel tombstone) that commits between that read and the
+// insert can still slip pre-reset rows in — closing it would need a shared
+// lock around gate+insert on every push, deliberately avoided as too costly
+// for the hot path (and impossible on Workers, where neon-http has no
+// interactive transactions). The window is tiny; a following reset/delete
+// removes any strays while its gate-first order keeps late pushes dropped.
+
+export function isLateSession(
+  session: { ts: number; novelId: string },
+  gate: DeletionGate,
+  skewMs: number = READING_CLOCK_SKEW_MS,
+): boolean {
+  if (typeof session.ts !== 'number' || !Number.isSafeInteger(session.ts)) return false;
+  const skew = typeof skewMs === 'number' && Number.isFinite(skewMs) && skewMs >= 0 ? Math.floor(skewMs) : 0;
+  if (gate.resetAt !== null && session.ts + skew < gate.resetAt) return true;
+  const tombstoneAt = gate.tombstones.get(String(session.novelId));
+  if (tombstoneAt !== undefined && session.ts + skew < tombstoneAt) return true;
+  return false;
+}
+
+/**
+ * Split a batch into storable sessions and late ids to acknowledge-but-drop.
+ * An id present in both halves keeps its storable copy: a retry that carries a
+ * fresh event under a previously-late id must still store it.
+ */
+export function partitionLateSessions<T extends { clientSessionId: string; novelId: string; ts: number }>(
+  sessions: readonly T[],
+  gate: DeletionGate,
+  skewMs: number = READING_CLOCK_SKEW_MS,
+): { kept: T[]; droppedIds: string[] } {
+  if (gate.resetAt === null && gate.tombstones.size === 0) return { kept: [...sessions], droppedIds: [] };
+  const dropped = new Set<string>();
+  const remaining: T[] = [];
+  for (const session of sessions) {
+    if (isLateSession(session, gate, skewMs)) dropped.add(session.clientSessionId);
+    else remaining.push(session);
+  }
+  const keptIds = new Set(remaining.map((s) => s.clientSessionId));
+  return { kept: remaining, droppedIds: [...dropped].filter((id) => !keptIds.has(id)) };
+}
+
 export async function storeFreeSessions(
   userId: string,
   sessions: readonly FreeSession[],
 ): Promise<FreeSessionWriteResult> {
-  const { unique, inconsistentSessionIds } = collapseByClientSessionId(sessions);
+  // Gate partition FIRST so reporting stays stable: late ids are acknowledged
+  // even when the rest of the batch is rejected below.
+  const earlyGate = await loadDeletionGate(
+    userId,
+    [...new Set(sessions.map((s) => String(s.novelId ?? '')))].filter((id) => id.length > 0),
+  );
+  const early = partitionLateSessions(sessions, earlyGate);
+  let droppedIds = early.droppedIds;
+  const kept = early.kept;
+  const { unique, inconsistentSessionIds } = collapseByClientSessionId(kept);
   if (inconsistentSessionIds.length > 0) {
-    return { applied: 0, acceptedSessionIds: [], conflictingSessionIds: inconsistentSessionIds };
+    return { applied: 0, acceptedSessionIds: droppedIds, conflictingSessionIds: inconsistentSessionIds };
   }
   if (unique.length === 0) {
-    return { applied: 0, acceptedSessionIds: [], conflictingSessionIds: [] };
+    return { applied: 0, acceptedSessionIds: droppedIds, conflictingSessionIds: [] };
   }
 
   const stored = await readStoredSessions(userId, unique.map((session) => session.clientSessionId));
@@ -281,11 +380,11 @@ export async function storeFreeSessions(
     .map((session) => session.clientSessionId)
     .filter((id) => outcome.get(id) === kind);
   if (conflictsIn('conflict').length > 0) {
-    return { applied: 0, acceptedSessionIds: [], conflictingSessionIds: conflictsIn('conflict') };
+    return { applied: 0, acceptedSessionIds: droppedIds, conflictingSessionIds: conflictsIn('conflict') };
   }
 
   if (pending.length === 0) {
-    return { applied: 0, acceptedSessionIds: conflictsIn('accepted'), conflictingSessionIds: [] };
+    return { applied: 0, acceptedSessionIds: [...conflictsIn('accepted'), ...droppedIds], conflictingSessionIds: [] };
   }
 
   const inserted = await db
@@ -320,7 +419,7 @@ export async function storeFreeSessions(
 
   return {
     applied: insertedIds.size,
-    acceptedSessionIds: conflictsIn('accepted'),
+    acceptedSessionIds: [...conflictsIn('accepted'), ...droppedIds],
     conflictingSessionIds: conflictsIn('conflict'),
   };
 }
@@ -375,7 +474,34 @@ export function toFreeScanSession(row: {
  * calculateFreeStatsFromTotals(), which keeps calculations.ts the single
  * authority for level and progress.
  */
-export async function loadFreeStatsForUser(userId: string): Promise<FreeStats> {
+export interface FreeStatsQueryOptions {
+  tz?: string | null;
+  tzOffsetMinutes?: number | null;
+  asOfDay?: string;
+  /**
+   * Explicit opt-in for `currentStreakDays`/`longestStreakDays`
+   * (`readingStatsFreeStreaks`). Shipped clients validate the Free aggregate
+   * with an exact 4-key allowlist, so without this flag the response must stay
+   * byte-for-byte the old 4-key shape — and the second DISTINCT-day query is
+   * skipped entirely.
+   */
+  includeStreaks?: boolean;
+}
+
+/**
+ * Derive the Free projection for one user without streaming their session rows.
+ *
+ * Totals are aggregated in SQL; streaks (opt-in only) come from a second
+ * DISTINCT-day query served by the (user_id, read_day) index in legacy mode,
+ * or by a tz-day expression over (user_id, ts) in viewer-timezone mode. The
+ * level ladder is NOT re-derived here: totals + streaks go to
+ * calculateFreeStatsFromTotals(), which keeps calculations.ts the single
+ * authority for level and progress.
+ */
+export async function loadFreeStatsForUser(
+  userId: string,
+  options?: FreeStatsQueryOptions,
+): Promise<FreeStats> {
   const [row] = await db
     .select({
       totalSeconds: sql<number>`COALESCE(SUM(GREATEST(${readingSessions.seconds}, 0)), 0)`,
@@ -383,10 +509,63 @@ export async function loadFreeStatsForUser(userId: string): Promise<FreeStats> {
     })
     .from(readingSessions)
     .where(eq(readingSessions.userId, userId));
-  return calculateFreeStatsFromTotals({
-    // int8 aggregates arrive as strings on node-postgres, and a non-numeric or
-    // negative value is normalized by the calculation boundary.
+
+  // int8 aggregates arrive as strings on node-postgres, and a non-numeric or
+  // negative value is normalized by the calculation boundary.
+  const totals = {
     totalSeconds: Number(row?.totalSeconds ?? 0),
     uniqueInAppCompletedChapters: Number(row?.completedChapters ?? 0),
+  };
+  if (options?.includeStreaks !== true) return calculateFreeStatsFromTotals(totals);
+
+  const tzParam = typeof options?.tz === 'string' ? options.tz.trim() : null;
+  const offsetParam = typeof options?.tzOffsetMinutes === 'number' ? options.tzOffsetMinutes : null;
+  const useTz = (tzParam !== null && isValidTimeZone(tzParam)) || isValidTzOffsetMinutes(offsetParam);
+  const tz = tzParam !== null && isValidTimeZone(tzParam) ? tzParam : null;
+  const offset = isValidTzOffsetMinutes(offsetParam) ? offsetParam : null;
+
+  const explicitAsOf = typeof options?.asOfDay === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(options.asOfDay)
+    ? options.asOfDay
+    : null;
+  const asOfLabel = explicitAsOf
+    ?? (tz !== null ? todayLabelInTz(tz) : offset !== null ? todayLabelForOffset(offset) : new Date().toISOString().slice(0, 10));
+  const asOfDayNumber = dayNumberFromLabel(asOfLabel) ?? utcDayNumberFromTs(Date.now()) ?? 0;
+
+  let dayLabels: string[] = [];
+  if (!useTz) {
+    const days = await db
+      .selectDistinct({ day: readingSessions.readDay })
+      .from(readingSessions)
+      .where(and(eq(readingSessions.userId, userId), sql`${readingSessions.readDay} <> ''`));
+    dayLabels = days.map((r) => String((r as { day?: unknown }).day ?? '')).filter((d) => d.length > 0);
+  } else if (tz !== null) {
+    const days = await db
+      .selectDistinct({
+        day: sql<string>`to_char((to_timestamp(${readingSessions.ts} / 1000.0) AT TIME ZONE ${tz}), 'YYYY-MM-DD')`,
+      })
+      .from(readingSessions)
+      .where(eq(readingSessions.userId, userId));
+    dayLabels = days.map((r) => String((r as { day?: unknown }).day ?? '')).filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d));
+  } else if (offset !== null) {
+    const days = await db
+      .selectDistinct({
+        day: sql<string>`to_char(((to_timestamp(${readingSessions.ts} / 1000.0) AT TIME ZONE 'UTC') + ${offset} * interval '1 minute'), 'YYYY-MM-DD')`,
+      })
+      .from(readingSessions)
+      .where(eq(readingSessions.userId, userId));
+    dayLabels = days.map((r) => String((r as { day?: unknown }).day ?? '')).filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d));
+  }
+
+  const dayNumbers = new Set<number>();
+  for (const label of dayLabels) {
+    const n = dayNumberFromLabel(label);
+    if (n !== null) dayNumbers.add(n);
+  }
+  const streak = calculateStreaks(dayNumbers, asOfDayNumber);
+
+  return calculateFreeStatsFromTotals({
+    ...totals,
+    currentStreakDays: streak.current,
+    longestStreakDays: streak.longest,
   });
 }

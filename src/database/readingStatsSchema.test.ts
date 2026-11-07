@@ -154,6 +154,7 @@ describe('reading statistics database schema', () => {
       reading_stats_plan_status: column('varchar(20)', true, { hasDefault: true, default: 'free' }),
       reading_stats_renewal_count: column('integer', true, { hasDefault: true, default: 0 }),
       reading_stats_total_subscribed_ms: column('bigint', true, { hasDefault: true, default: 0 }),
+      stats_reset_at: column('bigint', false),
       is_author: column('boolean', true, { hasDefault: true, default: false }),
       is_translator: column('boolean', true, { hasDefault: true, default: false }),
       created_at: column('timestamp', true, { hasDefault: true }),

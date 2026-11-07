@@ -14,6 +14,7 @@ import { freeProjection } from '../features/readingSync/freeProtocol.js';
 import { COMPLETION_THRESHOLD, proProjection } from '../features/readingSync/contracts.js';
 import { leaderboardWindow } from '../features/readingSync/leaderboardStore.js';
 import { loadProStats } from '../features/readingSync/proStore.js';
+import { parseFreeStreaksQuery, parseReadingTzQuery } from '../features/readingSync/readingTzQuery.js';
 import { getLevelFromSeconds, activityTierFromWindowTotals, activityTierWindow, type LevelInfo as CanonicalLevelInfo } from '../features/readingSync/calculations.js';
 import { toIso, toPublic as projectAccount } from '../domain/accountProjection.js';
 
@@ -249,6 +250,10 @@ profileRouter.get('/me/profile', async (c, next) => {
       if (plan === 'pro') {
         const yearRaw = Number(c.req.query('readingStatsYear'));
         const asOfDay = c.req.query('readingStatsAsOf');
+        const viewerTz = parseReadingTzQuery({
+          readingStatsTz: c.req.query('readingStatsTz'),
+          readingStatsTzOffset: c.req.query('readingStatsTzOffset'),
+        });
         return c.json({
           success: true,
           user: projectAccount(row),
@@ -258,10 +263,28 @@ profileRouter.get('/me/profile', async (c, next) => {
           readingStats: proProjection(await loadProStats(row.id, {
             year: Number.isSafeInteger(yearRaw) && yearRaw >= 1 && yearRaw <= 9999 ? yearRaw : undefined,
             asOfDay: asOfDay ?? undefined,
+            tz: viewerTz.tz,
+            tzOffsetMinutes: viewerTz.tzOffsetMinutes,
           })),
         });
       }
-      const freeStats = await loadFreeStatsForUser(row.id);
+      const viewerTz = parseReadingTzQuery({
+        readingStatsTz: c.req.query('readingStatsTz'),
+        readingStatsTzOffset: c.req.query('readingStatsTzOffset'),
+      });
+      const freeAsOf = c.req.query('readingStatsAsOf') ?? undefined;
+      // Free streaks only on explicit opt-in (`readingStatsFreeStreaks=1`).
+      // Without it the response stays byte-for-byte the old 4-key shape for
+      // shipped clients that validate with an exact allowlist.
+      const includeFreeStreaks = parseFreeStreaksQuery({
+        readingStatsFreeStreaks: c.req.query('readingStatsFreeStreaks'),
+      });
+      const freeStats = await loadFreeStatsForUser(row.id, {
+        tz: viewerTz.tz,
+        tzOffsetMinutes: viewerTz.tzOffsetMinutes,
+        includeStreaks: includeFreeStreaks,
+        ...(typeof freeAsOf === 'string' && freeAsOf.length > 0 ? { asOfDay: freeAsOf } : {}),
+      });
       await auditNaturalExpiry(row);
       return c.json({
         success: true,

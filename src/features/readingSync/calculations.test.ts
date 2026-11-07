@@ -89,6 +89,8 @@ const validFreeStats = {
   levelProgress: 0.25,
   totalSecondsRead: 83,
   uniqueInAppCompletedChapters: 1,
+  currentStreakDays: 1,
+  longestStreakDays: 1,
 };
 
 const validProStats = {
@@ -228,6 +230,8 @@ describe('reading sync v2 contracts', () => {
       'levelProgress',
       'totalSecondsRead',
       'uniqueInAppCompletedChapters',
+      'currentStreakDays',
+      'longestStreakDays',
     ]);
     expect(PRO_STATS_KEYS).toEqual([
       'asOfDay',
@@ -489,7 +493,7 @@ describe('reading sync v2 contracts', () => {
       }
     });
 
-    it('projects Free stats to exactly the four allowlisted keys', () => {
+    it('projects Free stats to exactly the allowlisted keys', () => {
       const projection = freeProjection({ ...validProStats, ...validFreeStats });
       expect(projection).toEqual(validFreeStats);
       expectExactKeys(projection, FREE_STATS_KEYS);
@@ -709,12 +713,16 @@ describe('pure reading statistics calculations', () => {
       levelProgress: 0,
       totalSecondsRead: 0,
       uniqueInAppCompletedChapters: 0,
+      currentStreakDays: 0,
+      longestStreakDays: 0,
     });
     expect(Object.keys(stats)).toEqual([
       'level',
       'levelProgress',
       'totalSecondsRead',
       'uniqueInAppCompletedChapters',
+      'currentStreakDays',
+      'longestStreakDays',
     ]);
   });
 
@@ -748,6 +756,8 @@ describe('pure reading statistics calculations', () => {
     expect(calculateFreeStatsFromTotals({
       totalSeconds: 5490,
       uniqueInAppCompletedChapters: 2,
+      currentStreakDays: 0,
+      longestStreakDays: 0,
     })).toEqual(scanned);
     expect(scanned.level).toBe(2);
   });

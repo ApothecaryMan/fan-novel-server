@@ -2,19 +2,34 @@ import { Hono, type Context } from 'hono';
 import { and, eq, gt, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { db, isDbAvailable, noteDbFailure } from '../database/db.js';
-import { users, userAchievementUnlocks, userLibrary, readingSessions, subscriptionEvents } from '../database/schema.js';
+import { users, userAchievementUnlocks, userLibrary, readingNovels, readingSessions, subscriptionEvents } from '../database/schema.js';
 import { verifySubject } from '../middleware/auth.js';
 import { getEnv } from '../config/env.js';
 import {
   effectiveReadingPlan,
   FREE_SESSION_SAFE_DEFAULTS,
+  isLateSession,
+  loadDeletionGate,
   loadFreeStatsForUser,
+  READING_CLOCK_SKEW_MS,
   storeFreeSessions,
   utcDayFromTs,
 } from '../features/readingSync/freeStore.js';
-import { pullProData, storeProPush } from '../features/readingSync/proStore.js';
+import { loadProStats, pullProData, storeProPush } from '../features/readingSync/proStore.js';
 import { buildProPushResponse, parseProV2Pull, parseProV2Push } from '../features/readingSync/proProtocol.js';
 import type { ReadingPlan, ProReadingSyncPush, ProReadingSyncPull } from '../features/readingSync/contracts.js';
+import {
+  calculateFreeStatsFromTotals,
+  calculateProStats,
+} from '../features/readingSync/calculations.js';
+import {
+  freeProjection,
+  proProjection,
+  readingSyncDeleteNovelRequestSchema,
+  readingSyncResetRequestSchema,
+} from '../features/readingSync/contracts.js';
+import { deleteNovelReadingData, resetUserReadingData } from '../features/readingSync/readingDelete.js';
+import { parseFreeStreaksBody, parseFreeStreaksQuery, parseReadingTzBody, parseReadingTzQuery } from '../features/readingSync/readingTzQuery.js';
 import {
   collapseUnlockBatch,
   parseUnlockPull,
@@ -52,7 +67,10 @@ export const syncRouter = new Hono();
 // Explicit development/test mode may provision fixtures without auth email.
 // ==========================================
 
-export const CLIENT_CLOCK_SKEW_MS = 5 * 60 * 1000;
+// Tolerance for a reader's clock running behind the server's when its session
+// ts is compared against a reset/tombstone marker. Single definition lives in
+// freeStore (READING_CLOCK_SKEW_MS); this alias keeps the route-level name.
+export const CLIENT_CLOCK_SKEW_MS = READING_CLOCK_SKEW_MS;
 
 // ---- Input validation (zod). Malformed outbox payloads must fail as 400
 // (client drops the op) — never 500 (client would retry forever).
@@ -110,9 +128,10 @@ const SYNC_USER_COLUMNS = {
   externalId: users.externalId,
   readingStatsPlan: users.readingStatsPlan,
   readingStatsPlanExpiresAt: users.readingStatsPlanExpiresAt,
+  statsResetAt: users.statsResetAt,
 } as const;
 
-type SyncUser = { id: string; externalId: string | null; readingStatsPlan: string | null; readingStatsPlanExpiresAt: number | null };
+type SyncUser = { id: string; externalId: string | null; readingStatsPlan: string | null; readingStatsPlanExpiresAt: number | null; statsResetAt: number | null };
 
 async function provisionUser(externalId: string): Promise<SyncUser | undefined> {
   const [existing] = await db.select(SYNC_USER_COLUMNS).from(users).where(eq(users.externalId, externalId)).limit(1);
@@ -354,11 +373,35 @@ async function pullV2(c: Context, body: unknown, authedSub: string | null) {
   }
 
   try {
+    const queryTz = parseReadingTzQuery({
+      readingStatsTz: c.req.query('readingStatsTz'),
+      readingStatsTzOffset: c.req.query('readingStatsTzOffset'),
+    });
+    const bodyTz = parseReadingTzBody(body);
+    const tz = queryTz.tz ?? bodyTz.tz;
+    const tzOffsetMinutes = queryTz.tzOffsetMinutes ?? bodyTz.tzOffsetMinutes;
+    // Free streak opt-in: explicit `readingStatsFreeStreaks=1` only. Without it
+    // the Free aggregate stays byte-for-byte the old 4-key shape for shipped
+    // clients that validate with an exact allowlist.
+    const includeFreeStreaks = parseFreeStreaksQuery({
+      readingStatsFreeStreaks: c.req.query('readingStatsFreeStreaks'),
+    }) || parseFreeStreaksBody(body);
     if (plan === 'pro' && 'readingStats' in payload) {
-      return c.json(await pullProData(user.id, (payload as ProReadingSyncPull).readingStats));
+      const readingStats = (payload as ProReadingSyncPull).readingStats as {
+        libraryCursor: string | null;
+        sessionCursor: string | null;
+        year: number;
+        readingStatsTz?: string;
+        readingStatsTzOffset?: number;
+      };
+      return c.json(await pullProData(user.id, {
+        ...readingStats,
+        readingStatsTz: tz ?? readingStats.readingStatsTz,
+        readingStatsTzOffset: tzOffsetMinutes ?? readingStats.readingStatsTzOffset,
+      }));
     }
     if (plan === 'pro') return fail(c, syncFailure(400, 'invalid_sync_payload', 'pro pull requires readingStats cursors'));
-    const response = buildFreePullResponse(await loadFreeStatsForUser(user.id));
+    const response = buildFreePullResponse(await loadFreeStatsForUser(user.id, { tz, tzOffsetMinutes, includeStreaks: includeFreeStreaks }));
     if (plan === 'free') await logExpiredObservation(user);
     return c.json(response);
   } catch {
@@ -476,10 +519,25 @@ syncRouter.post('/push', async (c) => {
   // Derived above: a Free-derived caller stores FREE_SESSION_SAFE_DEFAULTS
   // for the Pro dimensions (words, minuteOfDay, readDay), matching what
   // features/readingSync/freeStore.ts writes on the v2 Free channel.
+  // Late uploads (ts + skew < stats_reset_at or novel tombstone) are dropped,
+  // not stored, so a pre-reset outbox cannot resurrect deleted history. The
+  // dropped rows still count in `applied.sessions`: the legacy channel has no
+  // acceptedSessionIds outbox drain, so a 0 here would make old clients retry
+  // (and re-drop) forever. Response shape unchanged.
+  const legacyGate = await loadDeletionGate(
+    user.id,
+    [...new Set((legacyBody.sessions ?? []).map((e) => String((e as { novelId?: unknown }).novelId ?? '')).filter((id) => id.length > 0))],
+  );
   let appliedSessions = 0;
   for (const e of legacyBody.sessions ?? []) {
     const key = typeof e.clientSessionId === 'string' ? e.clientSessionId : '';
     if (!key) continue;
+    const eTs = num(e.ts, now);
+    const eNovelId = String(e.novelId ?? '');
+    if (isLateSession({ ts: eTs, novelId: eNovelId }, legacyGate)) {
+      appliedSessions++;
+      continue;
+    }
     const r = await db
       .insert(readingSessions)
       .values({
@@ -576,6 +634,92 @@ syncRouter.post('/pull', async (c) => {
       ts: r.ts
     }))
   });
+});
+
+// POST /api/v1/sync/reading/reset — delete ALL reading sessions + derived rows,
+// clear unlocks, record stats_reset_at. Idempotent. Responds with the fresh
+// plan-scoped aggregate (same shape the client parses on pull/profile) plus
+// resetAt, so the client can apply it immediately.
+syncRouter.post('/reading/reset', async (c) => {
+  if (!isDbAvailable()) return c.json({ error: 'sync database not configured' }, 503);
+  const body = await c.req.json().catch(() => null);
+  const authedSub = await authedSubject(c);
+  if (!getEnv().syncOpen && !authedSub) {
+    return fail(c, unauthorizedResponse('unauthorized: valid Bearer token required'));
+  }
+  let payload;
+  try {
+    payload = readingSyncResetRequestSchema.parse(body);
+  } catch {
+    return fail(c, syncFailure(400, 'invalid_sync_payload', 'invalid sync payload'));
+  }
+  const externalId = payload.user.externalId;
+  if (authedSub && authedSub !== externalId) return fail(c, ownerMismatchResponse());
+  const user = await v2SyncUser(c, externalId);
+  if (user instanceof Response) return user;
+  const plan = effectiveReadingPlan(user, Date.now());
+  try {
+    const resetAt = await resetUserReadingData(user.id, Date.now());
+    if (plan === 'pro') {
+      // The table is now empty by construction, so the aggregate is the
+      // zeroed projection — no point re-scanning it (Workers CPU).
+      const stats = proProjection(calculateProStats({ sessions: [], novels: [] }));
+      return c.json({ success: true, plan, stats, resetAt, serverNow: resetAt });
+    }
+    // Free streaks only on explicit opt-in (`readingStatsFreeStreaks` body
+    // field); without it the stats stay the old 4-key shape.
+    const includeStreaks = parseFreeStreaksBody(body);
+    const stats = freeProjection(calculateFreeStatsFromTotals(
+      includeStreaks
+        ? { totalSeconds: 0, uniqueInAppCompletedChapters: 0, currentStreakDays: 0, longestStreakDays: 0 }
+        : { totalSeconds: 0, uniqueInAppCompletedChapters: 0 },
+    ));
+    if (plan === 'free') await logExpiredObservation(user);
+    return c.json({ success: true, plan, stats, resetAt, serverNow: resetAt });
+  } catch {
+    noteDbFailure();
+    return fail(c, storageUnavailableResponse());
+  }
+});
+
+// POST /api/v1/sync/reading/delete-novel — delete sessions + derived rows for
+// one novel, record a per-user novel tombstone. Unlocks untouched (novel delete
+// is partial, not deliberate forget). Idempotent. Responds with the fresh
+// aggregate plus deletedAt/novelId.
+syncRouter.post('/reading/delete-novel', async (c) => {
+  if (!isDbAvailable()) return c.json({ error: 'sync database not configured' }, 503);
+  const body = await c.req.json().catch(() => null);
+  const authedSub = await authedSubject(c);
+  if (!getEnv().syncOpen && !authedSub) {
+    return fail(c, unauthorizedResponse('unauthorized: valid Bearer token required'));
+  }
+  let payload;
+  try {
+    payload = readingSyncDeleteNovelRequestSchema.parse(body);
+  } catch {
+    return fail(c, syncFailure(400, 'invalid_sync_payload', 'invalid sync payload'));
+  }
+  const externalId = payload.user.externalId;
+  if (authedSub && authedSub !== externalId) return fail(c, ownerMismatchResponse());
+  const user = await v2SyncUser(c, externalId);
+  if (user instanceof Response) return user;
+  const plan = effectiveReadingPlan(user, Date.now());
+  try {
+    const novelId = String(payload.novelId);
+    const deletedAt = await deleteNovelReadingData(user.id, novelId, Date.now());
+    if (plan === 'pro') {
+      const stats = proProjection(await loadProStats(user.id));
+      return c.json({ success: true, plan, stats, deletedAt, novelId, serverNow: deletedAt });
+    }
+    // Free streaks only on explicit opt-in (see reset above).
+    const includeStreaks = parseFreeStreaksBody(body);
+    const stats = freeProjection(await loadFreeStatsForUser(user.id, { includeStreaks }));
+    if (plan === 'free') await logExpiredObservation(user);
+    return c.json({ success: true, plan, stats, deletedAt, novelId, serverNow: deletedAt });
+  } catch {
+    noteDbFailure();
+    return fail(c, storageUnavailableResponse());
+  }
 });
 
 // POST /api/v1/sync/unlocks/push — idempotent unlock deltas.

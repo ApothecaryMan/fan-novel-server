@@ -17,6 +17,10 @@ import {
   type ReadingSyncLibraryItem,
   type ReadingSyncNovelMetadata,
 } from './contracts.js';
+import {
+  loadDeletionGate,
+  partitionLateSessions,
+} from './freeStore.js';
 
 const PROGRESS_EPSILON = 1e-4;
 
@@ -65,18 +69,27 @@ export async function storeProSessions(
   userId: string,
   sessions: readonly ProSession[],
 ): Promise<ProSessionWriteResult> {
+  // Gate partition FIRST so reporting stays stable (see storeFreeSessions):
+  // late ids are acknowledged even when the rest of the batch is rejected.
+  const earlyGate = await loadDeletionGate(
+    userId,
+    [...new Set(sessions.map((s) => String(s.novelId ?? '')))].filter((id) => id.length > 0),
+  );
+  const early = partitionLateSessions(sessions, earlyGate);
+  const droppedIds: string[] = [...early.droppedIds];
+  const keptSessions = early.kept;
   const first = new Map<string, ProSession>();
   const inconsistent = new Set<string>();
-  for (const session of sessions) {
+  for (const session of keptSessions) {
     const previous = first.get(session.clientSessionId);
     if (!previous) first.set(session.clientSessionId, session);
     else if (!sameProSession(previous, session)) inconsistent.add(session.clientSessionId);
   }
   if (inconsistent.size > 0) {
-    return { applied: 0, acceptedSessionIds: [], conflictingSessionIds: [...inconsistent] };
+    return { applied: 0, acceptedSessionIds: droppedIds, conflictingSessionIds: [...inconsistent] };
   }
   const unique = [...first.values()];
-  if (unique.length === 0) return { applied: 0, acceptedSessionIds: [], conflictingSessionIds: [] };
+  if (unique.length === 0) return { applied: 0, acceptedSessionIds: droppedIds, conflictingSessionIds: [] };
 
   const stored = await storedProSessions(userId, unique.map((s) => s.clientSessionId));
   const storedById = new Map(stored.map((row) => [row.clientSessionId, row]));
@@ -97,8 +110,8 @@ export async function storeProSessions(
       && Number(row.ts) === session.ts;
     (same ? accepted : conflicts).push(session.clientSessionId);
   }
-  if (conflicts.length > 0) return { applied: 0, acceptedSessionIds: [], conflictingSessionIds: conflicts };
-  if (pending.length === 0) return { applied: 0, acceptedSessionIds: accepted, conflictingSessionIds: [] };
+  if (conflicts.length > 0) return { applied: 0, acceptedSessionIds: droppedIds, conflictingSessionIds: conflicts };
+  if (pending.length === 0) return { applied: 0, acceptedSessionIds: [...accepted, ...droppedIds], conflictingSessionIds: [] };
 
   const inserted = await db
     .insert(readingSessions)
@@ -143,11 +156,11 @@ export async function storeProSessions(
     }
   }
   if (conflicts.length > 0) {
-    return { applied: insertedIds.size, acceptedSessionIds: accepted, conflictingSessionIds: conflicts };
+    return { applied: insertedIds.size, acceptedSessionIds: [...accepted, ...droppedIds], conflictingSessionIds: conflicts };
   }
   return {
     applied: insertedIds.size,
-    acceptedSessionIds: [...accepted, ...insertedIds],
+    acceptedSessionIds: [...accepted, ...insertedIds, ...droppedIds],
     conflictingSessionIds: [],
   };
 }
@@ -272,7 +285,7 @@ export async function storeProPush(
 
 export async function loadProStats(
   userId: string,
-  options?: { asOfDay?: string; year?: number },
+  options?: { asOfDay?: string; year?: number; tz?: string | null; tzOffsetMinutes?: number | null },
 ): Promise<ProStats> {
   const [sessionRows, novelRows] = await Promise.all([
     db.select().from(readingSessions).where(eq(readingSessions.userId, userId)),
@@ -301,6 +314,8 @@ export async function loadProStats(
     })),
     asOfDay: options?.asOfDay,
     year: options?.year,
+    tz: options?.tz ?? null,
+    tzOffsetMinutes: options?.tzOffsetMinutes ?? null,
   });
 }
 
@@ -319,7 +334,7 @@ function decodeCursor(value: string | null): Cursor | null {
 
 export async function pullProData(
   userId: string,
-  query: { libraryCursor: string | null; sessionCursor: string | null; year: number },
+  query: { libraryCursor: string | null; sessionCursor: string | null; year: number; readingStatsTz?: string; readingStatsTzOffset?: number },
   asOfDay?: string,
 ): Promise<ProReadingSyncPullResponse> {
   const limit = MAX_COLLECTION_ROWS;
@@ -374,6 +389,11 @@ export async function pullProData(
       })),
       nextCursor: encodeCursor(last(sessionRows, (row) => Number(row.ts))),
     },
-    stats: await loadProStats(userId, { asOfDay, year: query.year }),
+    stats: await loadProStats(userId, {
+      asOfDay,
+      year: query.year,
+      tz: (query as { readingStatsTz?: string }).readingStatsTz ?? null,
+      tzOffsetMinutes: (query as { readingStatsTzOffset?: number }).readingStatsTzOffset ?? null,
+    }),
   };
 }

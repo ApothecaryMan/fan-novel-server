@@ -182,6 +182,8 @@ const freeStatsShape = {
   levelProgress: levelProgress(),
   totalSecondsRead: nonNegativeInteger(),
   uniqueInAppCompletedChapters: nonNegativeInteger(),
+  currentStreakDays: nonNegativeInteger().optional(),
+  longestStreakDays: nonNegativeInteger().optional(),
 };
 
 const proStatsShape = {
@@ -265,6 +267,29 @@ export const syncUserSchema = strictObject({
 export const deviceIdSchema = z.string().trim().min(1).max(100).optional();
 export const clientSessionIdSchema = z.string().regex(CLIENT_SESSION_ID_PATTERN);
 export const progressPercentSchema = percentage();
+
+/**
+ * Explicit opt-in for the two Free streak fields (`currentStreakDays`,
+ * `longestStreakDays`). Shipped clients validate the Free aggregate with an
+ * exact 4-key allowlist, so a Free response that always carried the streaks
+ * would make every old client reject it. Without this flag a Free response is
+ * byte-for-byte the old 4-key shape; with it (numeric or string `"1"`,
+ * boolean `true`) the response carries all six keys.
+ */
+const freeStreaksFlagSchema = z.union([
+  z.literal(1),
+  z.literal(0),
+  z.literal('1'),
+  z.literal('0'),
+  z.literal(true),
+  z.literal(false),
+  z.literal('true'),
+  z.literal('false'),
+]).optional();
+
+export function isFreeStreaksOptIn(value: unknown): boolean {
+  return value === 1 || value === '1' || value === true || value === 'true';
+}
 
 const freeSessionShape = {
   clientSessionId: clientSessionIdSchema,
@@ -401,6 +426,9 @@ const freeReadingSyncPullShape = {
   syncVersion: syncVersionSchema,
   user: syncUserSchema,
   deviceId: deviceIdSchema,
+  readingStatsTz: z.string().trim().min(1).max(100).optional(),
+  readingStatsTzOffset: z.number().finite().int().min(-720).max(840).optional(),
+  readingStatsFreeStreaks: freeStreaksFlagSchema,
 };
 export const freeReadingSyncPullSchema = strictObject(freeReadingSyncPullShape, {
   forbiddenKeys: FREE_ENVELOPE_FORBIDDEN_KEYS,
@@ -411,12 +439,19 @@ export const readingStatsQuerySchema = strictObject({
   libraryCursor: cursorSchema,
   sessionCursor: cursorSchema,
   year: z.number().finite().int().min(1).max(9999),
+  readingStatsTz: z.string().trim().min(1).max(100).optional(),
+  readingStatsTzOffset: z.number().finite().int().min(-720).max(840).optional(),
+  // Accepted and ignored on the Pro channel (Pro streaks are always present);
+  // a plan-agnostic client can send one envelope shape for both plans.
+  readingStatsFreeStreaks: freeStreaksFlagSchema,
 });
 
 const proReadingSyncPullShape = {
   syncVersion: syncVersionSchema,
   user: syncUserSchema,
   deviceId: deviceIdSchema,
+  // Accepted and ignored (see above); keeps a shared pull envelope valid.
+  readingStatsFreeStreaks: freeStreaksFlagSchema,
   readingStats: readingStatsQuerySchema,
 };
 export const proReadingSyncPullSchema = strictObject(proReadingSyncPullShape);
@@ -500,6 +535,25 @@ export const readingSyncPullResponseSchema = z.union([
   proReadingSyncPullResponseSchema,
 ]);
 
+// Reset and per-novel delete envelopes. Plan-neutral on purpose: both plans
+// share the reading_sessions table, and neither request carries Pro fields.
+// Old clients never call these, so the shapes are new; the fields stay
+// optional/additive so a future client can extend them without breaking this.
+export const readingSyncResetRequestSchema = strictObject({
+  syncVersion: syncVersionSchema.optional(),
+  user: syncUserSchema,
+  deviceId: deviceIdSchema,
+  readingStatsFreeStreaks: freeStreaksFlagSchema,
+});
+
+export const readingSyncDeleteNovelRequestSchema = strictObject({
+  syncVersion: syncVersionSchema.optional(),
+  user: syncUserSchema,
+  deviceId: deviceIdSchema,
+  novelId: novelIdSchema,
+  readingStatsFreeStreaks: freeStreaksFlagSchema,
+});
+
 export const readingSyncUserSchema = syncUserSchema;
 export const freeStatsProjectionSchema = freeStatsSchema;
 export const proStatsProjectionSchema = proStatsSchema;
@@ -551,6 +605,8 @@ export type ReadingSyncSessionPage = z.infer<typeof readingSyncSessionPageSchema
 export type ReadingStatsQuery = z.infer<typeof readingStatsQuerySchema>;
 export type ReadingSyncLibraryItem = z.infer<typeof readingSyncLibraryItemSchema>;
 export type ReadingSyncNovelMetadata = z.infer<typeof readingSyncNovelMetadataSchema>;
+export type ReadingSyncResetRequest = z.infer<typeof readingSyncResetRequestSchema>;
+export type ReadingSyncDeleteNovelRequest = z.infer<typeof readingSyncDeleteNovelRequestSchema>;
 
 export type ReadingSyncErrorCode =
   | 'pro_fields_not_allowed'
@@ -636,14 +692,31 @@ export function parseProReadingSyncPull(input: unknown): ProReadingSyncPull {
   return parseContract(proReadingSyncPullSchema, input);
 }
 
-/** Serialize only the four Free fields, even when given a Pro-shaped value. */
+/**
+ * Serialize the Free fields, preserving whatever the input carries.
+ *
+ * The streak keys are present in the output ONLY when the input carries them:
+ * `loadFreeStatsForUser` includes them solely on explicit opt-in
+ * (`readingStatsFreeStreaks`), so old clients keep receiving byte-for-byte the
+ * old 4-key shape while opted-in clients get all six. Nothing here invents or
+ * drops keys — the opt-in gate lives at the load layer.
+ */
 export function freeProjection(input: FreeStats | ProStats): FreeStats {
-  return {
+  const projected: FreeStats = {
     level: input.level,
     levelProgress: input.levelProgress,
     totalSecondsRead: input.totalSecondsRead,
     uniqueInAppCompletedChapters: input.uniqueInAppCompletedChapters,
   };
+  const current = (input as Partial<ProStats> & Partial<FreeStats>).currentStreakDays;
+  const longest = (input as Partial<ProStats> & Partial<FreeStats>).longestStreakDays;
+  if (typeof current === 'number' && Number.isSafeInteger(current) && current >= 0) {
+    projected.currentStreakDays = current;
+  }
+  if (typeof longest === 'number' && Number.isSafeInteger(longest) && longest >= 0) {
+    projected.longestStreakDays = longest;
+  }
+  return projected;
 }
 
 export const projectFreeStats = freeProjection;

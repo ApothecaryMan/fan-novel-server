@@ -551,7 +551,7 @@ describe.skipIf(!url)('Free reading plan sync (isolated PostgreSQL)', () => {
       stats: { level: 1, levelProgress: 0, totalSecondsRead: 0, uniqueInAppCompletedChapters: 0 } });
   });
 
-  it('returns the authoritative plan and exactly the Free stats keys', async () => {
+  it('returns the authoritative plan and exactly the old 4-key Free stats', async () => {
     const { externalId, token } = await createUser();
     await freePush(externalId, [session()], token);
     const res = await app.request('/users/me/profile?readingStatsVersion=2', {
@@ -561,7 +561,12 @@ describe.skipIf(!url)('Free reading plan sync (isolated PostgreSQL)', () => {
     const body: any = await res.json();
     expect(body.plan).toBe('free');
     expect(body.readingStatsVersion).toBe(2);
-    expect(Object.keys(body.readingStats).sort()).toEqual([...FREE_STATS_KEYS].sort());
+    expect(Object.keys(body.readingStats).sort()).toEqual([
+      'level',
+      'levelProgress',
+      'totalSecondsRead',
+      'uniqueInAppCompletedChapters',
+    ]);
     expect(body.readingStats).toEqual({
       level: 1,
       // floor(83s / 60) = 1 active minute against a 60-minute first threshold.
@@ -572,6 +577,23 @@ describe.skipIf(!url)('Free reading plan sync (isolated PostgreSQL)', () => {
     for (const key of PRO_ONLY_STATS_KEYS) {
       expect(body.readingStats).not.toHaveProperty(key);
     }
+  });
+
+  it('includes Free streaks on profile only with the explicit opt-in flag', async () => {
+    const { externalId, token } = await createUser();
+    await freePush(externalId, [session()], token);
+    const res = await app.request('/users/me/profile?readingStatsVersion=2&readingStatsFreeStreaks=1', {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    expect(res.status).toBe(200);
+    const body: any = await res.json();
+    expect(Object.keys(body.readingStats).sort()).toEqual([...FREE_STATS_KEYS].sort());
+    expect(body.readingStats).toMatchObject({
+      totalSecondsRead: 83,
+      uniqueInAppCompletedChapters: 1,
+      currentStreakDays: expect.any(Number),
+      longestStreakDays: expect.any(Number),
+    });
   });
 
   // The versioned body is plan-scoped, not "legacy + extra keys": only the
@@ -605,10 +627,13 @@ describe.skipIf(!url)('Free reading plan sync (isolated PostgreSQL)', () => {
       expect(versionedText.includes(`"${key}":`)).toBe(false);
     }
     // The four shared Free keys live inside readingStats only, never at the top.
-    for (const key of FREE_STATS_KEYS) {
+    // (No streak opt-in here, so exactly the old 4-key shape.)
+    for (const key of ['level', 'levelProgress', 'totalSecondsRead', 'uniqueInAppCompletedChapters']) {
       expect(versionedBody).not.toHaveProperty(key);
       expect(versionedBody.readingStats).toHaveProperty(key);
     }
+    expect(versionedBody.readingStats).not.toHaveProperty('currentStreakDays');
+    expect(versionedBody.readingStats).not.toHaveProperty('longestStreakDays');
     expect(versionedBody).not.toHaveProperty('stats');
     // ...and the legacy payload keeps its own shape untouched.
     expect(legacyBody).not.toHaveProperty('readingStats');
@@ -635,9 +660,15 @@ describe.skipIf(!url)('Free reading plan sync (isolated PostgreSQL)', () => {
 
     const pullText = await (await request('/sync/pull', { syncVersion: 2, user: { externalId } }, token)).text();
     const pullBody = JSON.parse(pullText);
-    expect(Object.keys(pullBody.stats).sort()).toEqual([...FREE_STATS_KEYS].sort());
+    expect(Object.keys(pullBody.stats).sort()).toEqual([
+      'level',
+      'levelProgress',
+      'totalSecondsRead',
+      'uniqueInAppCompletedChapters',
+    ]);
     for (const key of proOnly) expect(pullBody).not.toHaveProperty(key);
     expect(pullText).not.toMatch(rawRowPattern);
+    expect(pullText).not.toContain('"currentStreakDays"');
 
     // The plan-scoped profile body is checked WHOLE, not only inside
     // readingStats: the legacy payload used to be spread into it, so a leak
@@ -646,12 +677,24 @@ describe.skipIf(!url)('Free reading plan sync (isolated PostgreSQL)', () => {
       headers: { Authorization: `Bearer ${token}` },
     })).text();
     const profile = JSON.parse(profileText);
-    expect(Object.keys(profile.readingStats).sort()).toEqual([...FREE_STATS_KEYS].sort());
+    expect(Object.keys(profile.readingStats).sort()).toEqual([
+      'level',
+      'levelProgress',
+      'totalSecondsRead',
+      'uniqueInAppCompletedChapters',
+    ]);
     for (const key of proOnly) {
       expect(profile).not.toHaveProperty(key);
       expect(profileText).not.toContain(`"${key}":`);
     }
     expect(profileText).not.toMatch(rawRowPattern);
+
+    // With the explicit opt-in the same bodies carry all six keys — and still
+    // nothing outside the Free allowlist.
+    const flaggedPull: any = await (await request(
+      '/sync/pull', { syncVersion: 2, user: { externalId }, readingStatsFreeStreaks: 1 }, token,
+    )).json();
+    expect(Object.keys(flaggedPull.stats).sort()).toEqual([...FREE_STATS_KEYS].sort());
   });
 
   it('answers malformed payloads with 400 and leaves storage untouched', async () => {
@@ -765,11 +808,24 @@ describe.skipIf(!url)('Free reading plan sync (isolated PostgreSQL)', () => {
     expect(scanned.uniqueInAppCompletedChapters).toBe(1);
     expect(scanned.level).toBe(2);
 
-    const pulled = await request('/sync/pull', { syncVersion: 2, user: { externalId } }, token);
+    const pulled = await request('/sync/pull', { syncVersion: 2, user: { externalId }, readingStatsFreeStreaks: 1 }, token);
     expect(pulled.status).toBe(200);
     const body: any = await pulled.json();
     // The aggregated projection is byte-identical to the full scan it replaces.
     expect(body.stats).toEqual(scanned);
+    // Without the opt-in flag the same request returns exactly the old 4-key
+    // shape (same totals, no streak keys).
+    const legacy: any = await (await request('/sync/pull', { syncVersion: 2, user: { externalId } }, token)).json();
+    expect(Object.keys(legacy.stats).sort()).toEqual([
+      'level',
+      'levelProgress',
+      'totalSecondsRead',
+      'uniqueInAppCompletedChapters',
+    ]);
+    expect(legacy.stats).toMatchObject({
+      totalSecondsRead: scanned.totalSecondsRead,
+      uniqueInAppCompletedChapters: scanned.uniqueInAppCompletedChapters,
+    });
   });
 
   it('accepts Pro sessions and all Pro collections, then serves the full projection', async () => {

@@ -19,6 +19,7 @@ import {
 const holder = vi.hoisted(() => ({ fake: null as ReturnType<typeof identityDb> | null }));
 vi.mock('../database/db.js', () => ({
   db: new Proxy({}, { get: (_target, key) => (holder.fake!.db as any)[key] }),
+  dbDriver: () => 'none',
   isDbAvailable: () => holder.fake!.isDbAvailable(), noteDbFailure: () => holder.fake!.noteDbFailure(),
 }));
 
@@ -348,7 +349,48 @@ describe('plan matrix', () => {
     const body: any = await res.json();
     expect(Object.keys(body).sort()).toEqual(['plan', 'stats', 'success']);
     expect(body.plan).toBe('free');
-    expect(Object.keys(body.stats).sort()).toEqual([...FREE_STATS_KEYS].sort());
+    // No streak flag: byte-for-byte the old 4-key shape for shipped clients
+    // that validate with an exact allowlist.
+    expect(Object.keys(body.stats).sort()).toEqual([
+      'level',
+      'levelProgress',
+      'totalSecondsRead',
+      'uniqueInAppCompletedChapters',
+    ]);
+    expect(body.stats).not.toHaveProperty('currentStreakDays');
+    expect(body.stats).not.toHaveProperty('longestStreakDays');
+  });
+
+  it('includes Free streaks only with the explicit readingStatsFreeStreaks opt-in', async () => {
+    await seedUser(SUBJECT, { readingStatsPlan: 'free' });
+    for (const flagged of [
+      { syncVersion: 2, user: { externalId: SUBJECT }, readingStatsFreeStreaks: 1 },
+      { syncVersion: 2, user: { externalId: SUBJECT }, readingStatsFreeStreaks: '1' },
+      { syncVersion: 2, user: { externalId: SUBJECT }, readingStatsFreeStreaks: true },
+    ]) {
+      const res = await pull(flagged);
+      expect(res.status).toBe(200);
+      const body: any = await res.json();
+      expect(Object.keys(body.stats).sort()).toEqual([...FREE_STATS_KEYS].sort());
+      expect(body.stats).toMatchObject({ currentStreakDays: 0, longestStreakDays: 0 });
+    }
+    const viaQuery = await post('/sync/pull?readingStatsFreeStreaks=1', {
+      syncVersion: 2, user: { externalId: SUBJECT },
+    });
+    expect(viaQuery.status).toBe(200);
+    expect(Object.keys(((await viaQuery.json()) as any).stats).sort()).toEqual([...FREE_STATS_KEYS].sort());
+  });
+
+  it('treats an unrecognized streak flag value as off on query, 400 in body', async () => {
+    await seedUser(SUBJECT, { readingStatsPlan: 'free' });
+    const viaQuery = await post('/sync/pull?readingStatsFreeStreaks=bogus', {
+      syncVersion: 2, user: { externalId: SUBJECT },
+    });
+    expect(viaQuery.status).toBe(200);
+    expect(((await viaQuery.json()) as any).stats).not.toHaveProperty('currentStreakDays');
+    const viaBody = await pull({ syncVersion: 2, user: { externalId: SUBJECT }, readingStatsFreeStreaks: 'yes' });
+    expect(viaBody.status).toBe(400);
+    expectNoWrites();
   });
 
   // The route builds its response from hand-picked fields; parsing it back
@@ -460,12 +502,26 @@ describe('plan matrix', () => {
 });
 
 describe('v2 pull exposes the derived projection only', () => {
-  it('returns exactly the Free stats allowlist', async () => {
+  it('returns exactly the old 4-key Free stats without the streak opt-in', async () => {
     await seedUser();
     const body: any = await (await pull({ syncVersion: 2, user: { externalId: SUBJECT } })).json();
     expect(Object.keys(body).sort()).toEqual(['plan', 'stats', 'success']);
-    expect(Object.keys(body.stats).sort()).toEqual([...FREE_STATS_KEYS].sort());
+    expect(Object.keys(body.stats).sort()).toEqual([
+      'level',
+      'levelProgress',
+      'totalSecondsRead',
+      'uniqueInAppCompletedChapters',
+    ]);
     for (const key of PRO_STATS_KEYS) expect(body).not.toHaveProperty(key);
+  });
+
+  it('returns all six Free keys with the streak opt-in', async () => {
+    await seedUser();
+    const body: any = await (await pull({
+      syncVersion: 2, user: { externalId: SUBJECT }, readingStatsFreeStreaks: 1,
+    })).json();
+    expect(Object.keys(body.stats).sort()).toEqual([...FREE_STATS_KEYS].sort());
+    expect(body.stats).toMatchObject({ currentStreakDays: 0, longestStreakDays: 0 });
   });
 
   it.each(['library', 'history', 'chapterStates', 'novels'])(
@@ -551,7 +607,7 @@ describe('GET /users/me/profile?readingStatsVersion=2', () => {
     }).sort());
   });
 
-  it('adds the authoritative plan and exactly the Free readingStats keys', async () => {
+  it('adds the authoritative plan and exactly the old 4-key Free readingStats', async () => {
     await seedUser(SUBJECT, { readingStatsPlan: 'free' });
     const res = await app.request('/users/me/profile?readingStatsVersion=2', {
       headers: { Authorization: `Bearer ${token}` },
@@ -560,10 +616,15 @@ describe('GET /users/me/profile?readingStatsVersion=2', () => {
     const body: any = await res.json();
     expect(body.readingStatsVersion).toBe(2);
     expect(body.plan).toBe('free');
-    expect(Object.keys(body.readingStats).sort()).toEqual([...FREE_STATS_KEYS].sort());
+    expect(Object.keys(body.readingStats).sort()).toEqual([
+      'level',
+      'levelProgress',
+      'totalSecondsRead',
+      'uniqueInAppCompletedChapters',
+    ]);
     expect(body.readingStats).toEqual({ level: 1, levelProgress: 0, totalSecondsRead: 0, uniqueInAppCompletedChapters: 0 });
     // Plan-scoped means plan-scoped: the identity fields, the plan, the
-    // entitlement clock that governs it, the version and the four Free stats —
+    // entitlement clock that governs it, the version and the Free stats —
     // nothing else at the top level. `planExpiresAt` belongs here because it is
     // the same entitlement, not a legacy aggregate.
     expect(Object.keys(body).sort()).toEqual(['plan', 'planExpiresAt', 'readingStats', 'readingStatsVersion', 'success', 'user']);
@@ -571,6 +632,23 @@ describe('GET /users/me/profile?readingStatsVersion=2', () => {
     expect(body.planExpiresAt).toBeNull();
     expect(body.success).toBe(true);
     expect(body.user).toMatchObject({ id: SUBJECT, externalId: SUBJECT, email: `${SUBJECT}@test.com` });
+  });
+
+  it('includes Free streaks on profile only with the explicit opt-in flag', async () => {
+    await seedUser(SUBJECT, { readingStatsPlan: 'free' });
+    const flagged = await app.request('/users/me/profile?readingStatsVersion=2&readingStatsFreeStreaks=1', {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    expect(flagged.status).toBe(200);
+    const flaggedBody: any = await flagged.json();
+    expect(Object.keys(flaggedBody.readingStats).sort()).toEqual([...FREE_STATS_KEYS].sort());
+    expect(flaggedBody.readingStats).toMatchObject({ currentStreakDays: 0, longestStreakDays: 0 });
+
+    const bogus = await app.request('/users/me/profile?readingStatsVersion=2&readingStatsFreeStreaks=bogus', {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    expect(bogus.status).toBe(200);
+    expect((await bogus.json() as any).readingStats).not.toHaveProperty('currentStreakDays');
   });
 
   // The client uses `planExpiresAt` to retire a lapsed Pro locally, so its whole

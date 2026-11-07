@@ -18,6 +18,7 @@ type InsertHook = (rows: StoredRow[]) => void;
 const holder = vi.hoisted(() => ({ fake: null as FakeDb | null }));
 vi.mock('../../database/db.js', () => ({
   db: new Proxy({}, { get: (_target, key) => (holder.fake!.database as any)[key] }),
+  dbDriver: () => 'none',
 }));
 
 interface StoredRow {
@@ -69,9 +70,27 @@ function createFakeDb(): FakeDb {
   state.database = {
     select: () => ({
       from: (table: unknown) => {
+        const name = getTableName(table as never);
+        // The deletion-gate reads (users.stats_reset_at, tombstones) return
+        // empty on this fake: no reset/tombstone is ever installed here. They
+        // are not counted: the statement counters below pin the session-read
+        // budget only.
+        if (name === 'users' || name === 'reading_novel_tombstones') {
+          // Deletion-gate reads resolve empty (no reset/tombstone installed).
+          // Shaped like the real drizzle builder: awaitable directly and via
+          // .limit(). Not counted: the counters below pin the session-read
+          // budget only.
+          const empty = () => Promise.resolve([]);
+          return {
+            where: (_condition: SQL) => ({
+              limit: (_n: number) => empty(),
+              then: (resolve: (value: never[]) => unknown) => empty().then(resolve as never),
+            }),
+          };
+        }
         // Identity is by table name, not by object reference: the store may hold
         // its own module instance of the schema.
-        expect(getTableName(table as never)).toBe('reading_sessions');
+        expect(name).toBe('reading_sessions');
         const builder: Record<string, unknown> = {
           where: (condition: SQL) => {
             state.selectStatements += 1;

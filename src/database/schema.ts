@@ -40,6 +40,11 @@ export const users = pgTable('users', {
   readingStatsPlanStatus: varchar('reading_stats_plan_status', { length: 20 }).default('free').notNull(),
   readingStatsRenewalCount: integer('reading_stats_renewal_count').default(0).notNull(),
   readingStatsTotalSubscribedMs: bigint('reading_stats_total_subscribed_ms', { mode: 'number' }).default(0).notNull(),
+  // Deliberate full-stats reset marker. Set by POST /sync/reading/reset; a push
+  // whose session ts is earlier than this is acknowledged but not stored, so a
+  // pre-reset outbox cannot resurrect deleted history. Nullable + no DEFAULT
+  // keeps the migration a catalog-only change.
+  statsResetAt: bigint('stats_reset_at', { mode: 'number' }),
   isAuthor: boolean('is_author').default(false).notNull(),
   isTranslator: boolean('is_translator').default(false).notNull(),
   createdAt: timestamp('created_at').defaultNow().notNull(),
@@ -193,6 +198,20 @@ export const readingNovels = pgTable('reading_novels', {
   receivedAt: timestamp('received_at').defaultNow().notNull()
 }, (table) => ({
   readingNovelsUserNovelIdx: uniqueIndex('reading_novels_user_novel_idx').on(table.userId, table.novelId)
+}));
+
+// Per-user reading-novel delete markers for POST /sync/reading/delete-novel.
+// A push whose session ts is earlier than the tombstone's deleted_at for that
+// novel is acknowledged but not stored, so a pre-delete outbox cannot resurrect
+// the novel. Reset (stats_reset_at) supersedes these; reset clears them.
+export const readingNovelTombstones = pgTable('reading_novel_tombstones', {
+  userId: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
+  novelId: varchar('novel_id', { length: 100 }).notNull(),
+  deletedAt: bigint('deleted_at', { mode: 'number' }).notNull(),
+  receivedAt: timestamp('received_at').defaultNow().notNull()
+}, (table) => ({
+  readingNovelTombstonesPkey: uniqueIndex('reading_novel_tombstones_pkey').on(table.userId, table.novelId),
+  readingNovelTombstonesUserIdx: index('reading_novel_tombstones_user_idx').on(table.userId)
 }));
 
 // 8. أغلفة الروايات (DEPRECATED: reads/writes removed now covers live in R2;

@@ -235,7 +235,8 @@ export function identityDb() {
     };
     return { returning: execute, then: (resolve: (value: Row[]) => unknown, reject?: (reason: unknown) => unknown) => execute().then(resolve, reject) };
   } }) }));
-  const database = { select: vi.fn((fields?: unknown) => ({ from: (table: unknown) => query(table, undefined, fields) })), insert, update };
+  const selectMock = vi.fn((fields?: unknown) => ({ from: (table: unknown) => query(table, undefined, fields) }));
+  const database = { select: selectMock, selectDistinct: vi.fn((fields?: unknown) => ({ from: (table: unknown) => query(table, undefined, fields) })), insert, update };
   function seedComments(list: FakeCommentSeed[]) {
     for (const item of list) {
       commentRows.push({ userId: item.userId, status: item.status, likesCount: item.likesCount ?? 0 });

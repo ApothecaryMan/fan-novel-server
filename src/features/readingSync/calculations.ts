@@ -5,6 +5,16 @@ import {
   type ProMostReadNovel,
   type ProStats,
 } from './contracts.js';
+import {
+  isValidTimeZone,
+  isValidTzOffsetMinutes,
+  offsetDayLabelFromTs,
+  offsetHourFromTs,
+  todayLabelForOffset,
+  todayLabelInTz,
+  tzDayLabelFromTs,
+  tzHourFromTs,
+} from './timezone.js';
 
 /**
  * Reading-level inputs are deliberately kept separate from the wire session
@@ -67,6 +77,14 @@ export interface ProCalculationNovel {
 export interface ProCalculationOptions {
   asOfDay?: string;
   year?: number;
+  tz?: string | null;
+  tzOffsetMinutes?: number | null;
+}
+
+export interface FreeCalculationOptions {
+  asOfDay?: string;
+  tz?: string | null;
+  tzOffsetMinutes?: number | null;
 }
 
 export interface ProCalculationInput {
@@ -74,6 +92,8 @@ export interface ProCalculationInput {
   novels?: readonly ProCalculationNovel[];
   asOfDay?: string;
   year?: number;
+  tz?: string | null;
+  tzOffsetMinutes?: number | null;
 }
 
 // These aliases make the normalized-input intent explicit for callers without
@@ -374,12 +394,27 @@ function utcTodayLabel(): string {
   return `${year}-${month}-${day}`;
 }
 
+export function dayNumberFromLabel(label: unknown): number | null {
+  return parseDay(label)?.dayNumber ?? null;
+}
+
+export function labelFromDayNumber(dayNumber: number): string {
+  return dayLabel(dayNumber);
+}
+
+export function utcDayNumberFromTs(ts: number): number | null {
+  if (typeof ts !== 'number' || !Number.isSafeInteger(ts) || ts < 0) return null;
+  return Math.floor(ts / DAY_MS);
+}
+
 function asOfDayFrom(
   inputAsOfDay: unknown,
   optionsAsOfDay: unknown,
+  fallbackLabel?: unknown,
 ): ParsedDay {
   return parseDay(optionsAsOfDay)
     ?? parseDay(inputAsOfDay)
+    ?? parseDay(fallbackLabel)
     ?? parseDay(utcTodayLabel())!;
 }
 
@@ -503,7 +538,7 @@ function sumWords(sessions: readonly ProCalculationSession[]): number {
   return sessions.reduce((total, session) => addNonNegative(total, creditedWords(session)), 0);
 }
 
-function calculateStreaks(days: Set<number>, asOfDay: number): {
+export function calculateStreaks(days: Set<number>, asOfDay: number): {
   current: number;
   longest: number;
 } {
@@ -706,43 +741,115 @@ function completedNovels(
 export function calculateFreeStatsFromTotals(input: {
   totalSeconds: number;
   uniqueInAppCompletedChapters: number;
+  currentStreakDays?: number;
+  longestStreakDays?: number;
 }): FreeStats {
   const totalSecondsRead = nonNegativeInteger(input.totalSeconds);
   const level = getLevelFromSeconds(totalSecondsRead);
-  return {
+  const projected: FreeStats = {
     level: level.level,
     levelProgress: level.progress,
     totalSecondsRead,
     uniqueInAppCompletedChapters: nonNegativeInteger(input.uniqueInAppCompletedChapters),
   };
+  // Streak keys are present ONLY when the caller computed them: shipped
+  // clients validate the Free aggregate with an exact 4-key allowlist, so an
+  // unconditional default here would break every old response. The wire layer
+  // (loadFreeStatsForUser) passes streaks only on explicit opt-in.
+  if (typeof input.currentStreakDays === 'number'
+    && Number.isSafeInteger(input.currentStreakDays)
+    && input.currentStreakDays >= 0) {
+    projected.currentStreakDays = input.currentStreakDays;
+  }
+  if (typeof input.longestStreakDays === 'number'
+    && Number.isSafeInteger(input.longestStreakDays)
+    && input.longestStreakDays >= 0) {
+    projected.longestStreakDays = input.longestStreakDays;
+  }
+  return projected;
 }
 
-/** Calculate the four Free fields from normalized accepted session rows. */
+function resolveBucketMode(
+  tz: unknown,
+  tzOffsetMinutes: unknown,
+): { kind: 'tz'; tz: string } | { kind: 'offset'; offsetMinutes: number } | { kind: 'legacy' } {
+  if (typeof tz === 'string' && isValidTimeZone(tz)) return { kind: 'tz', tz: tz.trim() };
+  if (isValidTzOffsetMinutes(tzOffsetMinutes)) {
+    return { kind: 'offset', offsetMinutes: tzOffsetMinutes as number };
+  }
+  return { kind: 'legacy' };
+}
+
+function freeDayNumberForSession(
+  session: FreeCalculationSession,
+  mode: { kind: 'tz'; tz: string } | { kind: 'offset'; offsetMinutes: number } | { kind: 'legacy' },
+): number | null {
+  const ts = typeof session.ts === 'number' && Number.isSafeInteger(session.ts) && session.ts >= 0
+    ? session.ts
+    : null;
+  if (ts === null) return null;
+  if (mode.kind === 'tz') {
+    const label = tzDayLabelFromTs(ts, mode.tz);
+    return label === null ? null : (parseDay(label)?.dayNumber ?? null);
+  }
+  if (mode.kind === 'offset') {
+    const label = offsetDayLabelFromTs(ts, mode.offsetMinutes);
+    return label === null ? null : (parseDay(label)?.dayNumber ?? null);
+  }
+  return Math.floor(ts / DAY_MS);
+}
+
+function freeAsOfDayNumber(options: FreeCalculationOptions | undefined): number {
+  const explicit = typeof options?.asOfDay === 'string' ? parseDay(options.asOfDay) : null;
+  if (explicit) return explicit.dayNumber;
+  const mode = resolveBucketMode(options?.tz, options?.tzOffsetMinutes);
+  if (mode.kind === 'tz') {
+    return parseDay(todayLabelInTz(mode.tz))?.dayNumber ?? parseDay(utcTodayLabel())!.dayNumber;
+  }
+  if (mode.kind === 'offset') {
+    return parseDay(todayLabelForOffset(mode.offsetMinutes))?.dayNumber ?? parseDay(utcTodayLabel())!.dayNumber;
+  }
+  return parseDay(utcTodayLabel())!.dayNumber;
+}
+
+/** Calculate the Free fields from normalized accepted session rows, with streaks. */
 export function calculateFreeStats(
   sessions: readonly FreeCalculationSession[],
+  options?: FreeCalculationOptions | string,
 ): FreeStats {
+  const optionObject = typeof options === 'string' ? { asOfDay: options } : options;
   const totalSecondsRead = sumSeconds(sessions);
   const completedPairs = new Set<string>();
+  const mode = resolveBucketMode(optionObject?.tz, optionObject?.tzOffsetMinutes);
+  const dayNumbers = new Set<number>();
 
   for (const session of sessions) {
-    if (!isInAppCompletion(session)) continue;
-    const novelId = normalizeNovelId(session.novelId);
-    const chapterId = normalizeChapterId(session.chapterId);
-    if (novelId !== null && chapterId !== null) {
-      completedPairs.add(pairKey(novelId, chapterId));
+    if (isInAppCompletion(session)) {
+      const novelId = normalizeNovelId(session.novelId);
+      const chapterId = normalizeChapterId(session.chapterId);
+      if (novelId !== null && chapterId !== null) {
+        completedPairs.add(pairKey(novelId, chapterId));
+      }
     }
+    const dayNumber = freeDayNumberForSession(session, mode);
+    if (dayNumber !== null) dayNumbers.add(dayNumber);
   }
+
+  const streak = calculateStreaks(dayNumbers, freeAsOfDayNumber(optionObject));
 
   return calculateFreeStatsFromTotals({
     totalSeconds: totalSecondsRead,
     uniqueInAppCompletedChapters: completedPairs.size,
+    currentStreakDays: streak.current,
+    longestStreakDays: streak.longest,
   });
 }
 
 export function calculateFreeReadingStats(
   sessions: readonly FreeCalculationSession[],
+  options?: FreeCalculationOptions | string,
 ): FreeStats {
-  return calculateFreeStats(sessions);
+  return calculateFreeStats(sessions, options);
 }
 
 /** Calculate the complete Pro projection without returning any source rows. */
@@ -755,8 +862,22 @@ export function calculateProStats(
   assertValidProSessions(sessions);
   const novels = input.novels ?? [];
   const optionObject = typeof options === 'string' ? { asOfDay: options } : options;
-  const asOfDay = asOfDayFrom(input.asOfDay, optionObject?.asOfDay);
+  const tzRaw = (input as ProCalculationInput).tz ?? optionObject?.tz ?? null;
+  const tzOffsetRaw = (input as ProCalculationInput).tzOffsetMinutes ?? optionObject?.tzOffsetMinutes ?? null;
+  const bucketMode = resolveBucketMode(tzRaw, tzOffsetRaw);
+  const useViewerTz = bucketMode.kind !== 'legacy';
+  const fallbackTodayLabel = bucketMode.kind === 'tz'
+    ? todayLabelInTz(bucketMode.tz)
+    : bucketMode.kind === 'offset'
+      ? todayLabelForOffset(bucketMode.offsetMinutes)
+      : utcTodayLabel();
+  const asOfDay = useViewerTz
+    ? (asOfDayFrom(input.asOfDay, optionObject?.asOfDay, fallbackTodayLabel))
+    : asOfDayFrom(input.asOfDay, optionObject?.asOfDay);
   const year = requestedYear(input.year, optionObject?.year ?? legacyYear, asOfDay);
+  // Hoisted out of the per-session loop below: the prefix is identical for
+  // every row in this request.
+  const prefix = yearPrefix(year);
 
   const totalSecondsRead = sumSeconds(sessions);
   const totalWords = sumWords(sessions);
@@ -778,13 +899,45 @@ export function calculateProStats(
       addPair(inAppPairs, inAppByNovel, novelId, chapterId);
     }
 
+    if (useViewerTz) {
+      const ts = typeof session.ts === 'number' && Number.isSafeInteger(session.ts) && session.ts >= 0
+        ? session.ts
+        : null;
+      if (ts !== null) {
+        let bucketDay: ParsedDay | null = null;
+        let bucketHour: number | null = null;
+        if (bucketMode.kind === 'tz') {
+          const label = tzDayLabelFromTs(ts, bucketMode.tz);
+          bucketDay = label === null ? null : parseDay(label);
+          bucketHour = tzHourFromTs(ts, bucketMode.tz);
+        } else if (bucketMode.kind === 'offset') {
+          const label = offsetDayLabelFromTs(ts, bucketMode.offsetMinutes);
+          bucketDay = label === null ? null : parseDay(label);
+          bucketHour = offsetHourFromTs(ts, bucketMode.offsetMinutes);
+        }
+        if (bucketDay !== null) {
+          readDayNumbers.add(bucketDay.dayNumber);
+          const previous = activeDaySeconds.get(bucketDay.dayNumber) ?? 0;
+          activeDaySeconds.set(bucketDay.dayNumber, addNonNegative(previous, seconds));
+          if (bucketDay.label.startsWith(prefix)) {
+            const previousYear = activeYearSeconds.get(bucketDay.dayNumber) ?? 0;
+            activeYearSeconds.set(bucketDay.dayNumber, addNonNegative(previousYear, seconds));
+          }
+        }
+        if (bucketHour !== null) {
+          hourlyDistribution[bucketHour] = addNonNegative(hourlyDistribution[bucketHour], seconds);
+        }
+      }
+      continue;
+    }
+
     const proDimensions = hasAcceptedProDimensions(session);
     const readDay = proDimensions ? parseDay(session.readDay) : null;
     if (readDay !== null) {
       readDayNumbers.add(readDay.dayNumber);
       const previous = activeDaySeconds.get(readDay.dayNumber) ?? 0;
       activeDaySeconds.set(readDay.dayNumber, addNonNegative(previous, seconds));
-      if (readDay.label.startsWith(yearPrefix(year))) {
+      if (readDay.label.startsWith(prefix)) {
         const previousYear = activeYearSeconds.get(readDay.dayNumber) ?? 0;
         activeYearSeconds.set(readDay.dayNumber, addNonNegative(previousYear, seconds));
       }
