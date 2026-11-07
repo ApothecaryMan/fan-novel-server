@@ -308,7 +308,7 @@ describe('economy store routes (Postgres, fail-loud)', () => {
     expect(kept).toBeTruthy();
     expect(kept.email).toBeNull();
     expect(kept.googleSubject).toBeNull();
-    expect(kept.displayName).toBe('Deleted user');
+    expect(kept.displayName).toBe('مستخدم محذوف');
     const legs = await database.select().from(schema.pointTransactions).where(eq(schema.pointTransactions.userId, row.id));
     expect(legs.length).toBeGreaterThan(0);
     const relogin = await app.request('/auth/me', { method: 'GET', headers: auth });

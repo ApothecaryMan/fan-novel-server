@@ -18,6 +18,7 @@ import { authorRouter } from './routes/author.js';
 import { adminRouter } from './routes/admin.js';
 import { storeRouter, storeAdminRouter } from './routes/store.js';
 import { iapRouter } from './routes/iap.js';
+import { legalRouter } from './routes/legal.js';
 import { appUpdateRouter } from './routes/appUpdate.js';
 import { appConfigRouter } from './routes/appConfig.js';
 import { statsRouter } from './routes/stats.js';
@@ -121,18 +122,10 @@ export function createApp() {
     return c.text('google-site-verification: googleb9eb2d8f3b8ff1cb.html');
   });
 
-  const legalPage = (title: string, body: string) =>
-    `<!doctype html><html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>${title} — Fan Novel</title></head><body style="font-family:system-ui;max-width:720px;margin:40px auto;padding:0 16px;line-height:1.6"><h1>${title}</h1>${body}</body></html>`;
-
   app.get('/', (c) => {
-    return c.html(legalPage('Fan Novel', '<p>Fan Novel reader API and legal pages.</p><ul><li><a href="/privacy">Privacy Policy</a></li><li><a href="/terms">Terms of Service</a></li></ul>'));
+    return c.html(`<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Fan Novel</title></head><body style="font-family:system-ui;max-width:720px;margin:40px auto;padding:0 16px;line-height:1.7"><h1>Fan Novel</h1><ul><li><a href="/privacy">سياسة الخصوصية — Privacy Policy</a></li><li><a href="/terms">شروط الاستخدام — Terms of Use</a></li><li><a href="/account-deletion">حذف الحساب — Account Deletion</a></li></ul></body></html>`);
   });
-  app.get('/privacy', (c) => {
-    return c.html(legalPage('Privacy Policy', '<p>Fan Novel signs users in with Google (openid, email) and optional Google Drive app-data backup (<code>drive.appdata</code>) for library sync. Account data (email, name, avatar) is used only for sign-in and sync. Contact: mohamedrezk.ph@gmail.com. Data deletion: sign out and request deletion via the same contact.</p>'));
-  });
-  app.get('/terms', (c) => {
-    return c.html(legalPage('Terms of Service', '<p>Fan Novel is a novel reader. Unofficial fan content belongs to its authors; report abuse to mohamedrezk.ph@gmail.com.</p>'));
-  });
+  app.route('/', legalRouter);
 
   app.route('/api/v1/auth', authRouter);
   app.route('/api/v1/users', profileRouter);

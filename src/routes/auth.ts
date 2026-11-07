@@ -56,7 +56,7 @@ authRouter.delete('/me', requireAuth, async (c) => {
       upd AS (
         UPDATE users SET external_id = ${stubExternalId},
           google_subject = NULL, email = NULL, username = ${stub},
-          display_name = 'Deleted user', avatar_url = NULL, banner_url = NULL,
+          display_name = 'مستخدم محذوف', avatar_url = NULL, banner_url = NULL,
           bio = NULL, profile_decorations = NULL, password_hash = NULL,
           role = 'reader', is_author = false, is_translator = false,
           weekly_reading_goal_hours = NULL,
