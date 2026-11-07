@@ -1,17 +1,10 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
-import { and, count, desc, eq, ilike, inArray, or, sql } from 'drizzle-orm';
+import { and, count, desc, eq, ilike, or, sql } from 'drizzle-orm';
 import { db, isDbAvailable, noteDbFailure } from '../database/db.js';
-import { novels, roleRequests, subscriptionEvents, users } from '../database/schema.js';
+import { novels, roleRequests, users } from '../database/schema.js';
 import { requireAuth } from '../middleware/auth.js';
 import { getCaller, requireAdminCaller } from '../middleware/ownership.js';
-import { dbDriver } from '../database/db.js';
-
-function isHttpDriver(): boolean {
-  // Test mocks replace database/db.ts without the driver probe; they run on
-  // the Node driver, where transactions are available.
-  return typeof dbDriver === 'function' && dbDriver() === 'neon-http';
-}
 import { effectiveReadingPlan } from '../features/readingSync/freeStore.js';
 import { parseAdminUserRoles } from './adminUserFilters.js';
 import { escapeLikePattern } from './adminUserSearch.js';
@@ -293,9 +286,13 @@ const readingPlanGrantSchema = z.object({
 });
 
 // POST /api/v1/admin/users/:id/reading-plan — manual grant/revoke (no billing).
-// Row-locked: SELECT FOR UPDATE inside the tx serializes concurrent grants so
-// the second reads the first grant's expiry as its base (max(now, expiry)).
+// Atomic: each branch is ONE SQL statement with a data-modifying CTE, so the
+// users row and its subscription_events audit row commit together or not at
+// all. The CTE's `SELECT ... FOR UPDATE` row-locks implicitly, serializing
+// concurrent grants so the second reads the first grant's expiry as its base
+// (max(now, expiry)). A crash between the UPDATE and the INSERT is impossible.
 // Retries are additive by contract in v1: each grant intent extends again.
+// Works on both drivers (pg and neon-http): one statement, no transaction.
 adminRouter.post('/users/:id/reading-plan', async (c) => {
   if (!isDbAvailable()) return c.json({ error: 'database not configured' }, 503);
   const parsed = readingPlanGrantSchema.safeParse(await c.req.json().catch(() => null));
@@ -304,88 +301,132 @@ adminRouter.post('/users/:id/reading-plan', async (c) => {
   if (!isUuid(id)) return c.json({ error: 'invalid user id' }, 400);
   const caller = c.get('caller') as { row?: { id?: string } | null } | undefined;
   const actorId: string | null = caller?.row?.id ?? null;
-  const now = Date.now();
   const durationDays = parsed.data.durationDays ?? 30;
   const durationMs = durationDays * 86_400_000;
   const reason = parsed.data.reason;
   try {
-    const runPlan = async (tx: any) => {
-      const locked = await tx.select().from(users).where(eq(users.id, id)).limit(1);
-      const target = locked[0] as typeof users.$inferSelect | undefined;
-      if (!target) return null;
-      if (parsed.data.plan === 'free') {
-        const [updated] = await tx.update(users).set({
-          readingStatsPlan: 'free',
-          readingStatsPlanExpiresAt: null,
-          readingStatsGraceUntil: null,
-          readingStatsPlanStatus: 'cancelled',
-          updatedAt: new Date(),
-        }).where(eq(users.id, id)).returning();
-        await tx.insert(subscriptionEvents).values({
-          userId: id,
-          type: 'revoke',
-          actorId,
-          previousExpiresAt: target.readingStatsPlanExpiresAt ?? null,
-          newExpiresAt: null,
-          durationDays: null,
-          reason,
-          occurredAt: now,
-        });
-        return { updated, eventType: 'revoke' as const, expiresAt: null as number | null };
-      }
-      // Coerce corrupt expiry fail-closed: only a safe integer in the future
-      // counts as a live window; anything else renews from now.
-      const prev = target.readingStatsPlanExpiresAt;
-      const livePrev = typeof prev === 'number' && Number.isSafeInteger(prev) && prev > now ? prev : null;
-      const base = livePrev ?? now;
-      const startedAt = livePrev !== null && typeof target.readingStatsPlanStartedAt === 'number'
-        && Number.isSafeInteger(target.readingStatsPlanStartedAt)
-        ? target.readingStatsPlanStartedAt
-        : now;
-      const expiresAt = base + durationMs;
-      const hasHistory = (target.readingStatsRenewalCount ?? 0) > 0
-        || (await tx.select({ id: subscriptionEvents.id }).from(subscriptionEvents)
-          .where(and(eq(subscriptionEvents.userId, id), inArray(subscriptionEvents.type, ['grant', 'renew']))).limit(1)).length > 0;
-      const eventType = hasHistory ? 'renew' : 'grant';
-      const [updated] = await tx.update(users).set({
-        readingStatsPlan: 'pro',
-        readingStatsPlanStartedAt: startedAt,
-        readingStatsPlanExpiresAt: expiresAt,
-        readingStatsLastRenewedAt: now,
-        readingStatsPlanDurationDays: durationDays,
-        readingStatsPlanStatus: 'active',
-        readingStatsRenewalCount: (target.readingStatsRenewalCount ?? 0) + 1,
-        readingStatsTotalSubscribedMs: Number(target.readingStatsTotalSubscribedMs ?? 0) + durationMs,
-        updatedAt: new Date(),
-      }).where(eq(users.id, id)).returning();
-      await tx.insert(subscriptionEvents).values({
-        userId: id,
-        type: eventType,
-        actorId,
-        previousExpiresAt: target.readingStatsPlanExpiresAt ?? null,
-        newExpiresAt: expiresAt,
-        durationDays,
-        reason,
-        occurredAt: now,
-      });
-      return { updated, eventType, expiresAt };
+    const rowsOf = (result: unknown): Record<string, unknown>[] => {
+      if (Array.isArray(result)) return result as Record<string, unknown>[];
+      const rows = (result as { rows?: unknown })?.rows;
+      return Array.isArray(rows) ? (rows as Record<string, unknown>[]) : [];
     };
-    const result = isHttpDriver() ? await runPlan(db) : await db.transaction(runPlan);
-    if (!result) return c.json({ error: 'المستخدم غير موجود' }, 404);
-    const effectivePlan = effectiveReadingPlan(result.updated, Date.now());
+    if (parsed.data.plan === 'free') {
+      const result = await db.execute(sql`
+        WITH target AS (
+          SELECT u.id, u.reading_stats_plan_expires_at AS prev_expires,
+                 (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::bigint AS now_ms
+            FROM users u WHERE u.id = ${id}::uuid FOR UPDATE
+        ),
+        upd AS (
+          UPDATE users u SET reading_stats_plan = 'free',
+            reading_stats_plan_expires_at = NULL,
+            reading_stats_grace_until = NULL,
+            reading_stats_plan_status = 'cancelled',
+            updated_at = now()
+          FROM target b WHERE u.id = b.id
+          RETURNING u.id, u.reading_stats_plan AS plan,
+            u.reading_stats_plan_status AS status, b.prev_expires, b.now_ms
+        ),
+        ev AS (
+          INSERT INTO subscription_events
+            (user_id, type, actor_id, previous_expires_at, new_expires_at, duration_days, reason, occurred_at)
+          SELECT id, 'revoke', ${actorId}::uuid, prev_expires, NULL, NULL, ${reason}, now_ms FROM upd
+          RETURNING id
+        )
+        SELECT id, plan, status, prev_expires, now_ms,
+          (SELECT count(*)::int FROM ev) AS events FROM upd
+      `);
+      const rows = rowsOf(result);
+      const row = rows[0];
+      if (!row) return c.json({ error: 'المستخدم غير موجود' }, 404);
+      const effectivePlan = effectiveReadingPlan(
+        { readingStatsPlan: row.plan, readingStatsPlanExpiresAt: null }, Date.now());
+      console.log(JSON.stringify({
+        event: 'reading_plan.revoke',
+        userId: id,
+        plan: parsed.data.plan,
+        durationDays: undefined,
+        expiresAt: null,
+        actor: actorId,
+      }));
+      return c.json({
+        success: true,
+        effectivePlan,
+        planExpiresAt: null,
+        planStatus: row.status,
+      });
+    }
+    const result = await db.execute(sql`
+      WITH target AS (
+        SELECT u.id,
+               u.reading_stats_plan_expires_at AS prev_expires,
+               u.reading_stats_plan_started_at AS started,
+               COALESCE(u.reading_stats_renewal_count, 0) AS renewals,
+               EXISTS (SELECT 1 FROM subscription_events se
+                        WHERE se.user_id = u.id AND se.type IN ('grant', 'renew')) AS has_history
+          FROM users u WHERE u.id = ${id}::uuid FOR UPDATE
+      ),
+      calc AS (
+        SELECT *, (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::bigint AS now_ms FROM target
+      ),
+      base AS (
+        SELECT *,
+          CASE WHEN prev_expires IS NOT NULL AND prev_expires > now_ms
+                    AND prev_expires <= 9007199254740991
+               THEN prev_expires ELSE now_ms END AS base_ms,
+          CASE WHEN prev_expires IS NOT NULL AND prev_expires > now_ms
+                    AND prev_expires <= 9007199254740991
+                    AND started IS NOT NULL AND started <= 9007199254740991
+               THEN started ELSE now_ms END AS started_ms
+        FROM calc
+      ),
+      upd AS (
+        UPDATE users u SET
+          reading_stats_plan = 'pro',
+          reading_stats_plan_started_at = b.started_ms,
+          reading_stats_plan_expires_at = b.base_ms + ${durationMs},
+          reading_stats_last_renewed_at = b.now_ms,
+          reading_stats_plan_duration_days = ${durationDays},
+          reading_stats_plan_status = 'active',
+          reading_stats_renewal_count = COALESCE(u.reading_stats_renewal_count, 0) + 1,
+          reading_stats_total_subscribed_ms = COALESCE(u.reading_stats_total_subscribed_ms, 0) + ${durationMs},
+          updated_at = now()
+        FROM base b WHERE u.id = b.id
+        RETURNING u.id, u.reading_stats_plan AS plan,
+          u.reading_stats_plan_expires_at AS expires_at,
+          u.reading_stats_plan_status AS status,
+          b.prev_expires, b.now_ms, (b.has_history OR b.renewals > 0) AS had_history
+      ),
+      ev AS (
+        INSERT INTO subscription_events
+          (user_id, type, actor_id, previous_expires_at, new_expires_at, duration_days, reason, occurred_at)
+        SELECT id, CASE WHEN had_history THEN 'renew' ELSE 'grant' END,
+          ${actorId}::uuid, prev_expires, expires_at, ${durationDays}, ${reason}, now_ms FROM upd
+        RETURNING id
+      )
+      SELECT id, plan, expires_at, status, prev_expires, now_ms, had_history,
+        (SELECT count(*)::int FROM ev) AS events FROM upd
+    `);
+    const rows = rowsOf(result);
+    const row = rows[0];
+    if (!row) return c.json({ error: 'المستخدم غير موجود' }, 404);
+    const expiresAt = row.expires_at === null || row.expires_at === undefined ? null : Number(row.expires_at);
+    const eventType = row.had_history === true ? 'renew' : 'grant';
+    const effectivePlan = effectiveReadingPlan(
+      { readingStatsPlan: row.plan, readingStatsPlanExpiresAt: expiresAt }, Date.now());
     console.log(JSON.stringify({
-      event: result.eventType === 'revoke' ? 'reading_plan.revoke' : 'reading_plan.grant',
+      event: 'reading_plan.grant',
       userId: id,
       plan: parsed.data.plan,
-      durationDays: parsed.data.plan === 'pro' ? durationDays : undefined,
-      expiresAt: result.expiresAt,
+      durationDays,
+      expiresAt,
       actor: actorId,
     }));
     return c.json({
       success: true,
       effectivePlan,
-      planExpiresAt: result.expiresAt,
-      planStatus: (result.updated as typeof users.$inferSelect).readingStatsPlanStatus,
+      planExpiresAt: expiresAt,
+      planStatus: row.status,
     });
   } catch (err) {
     console.error('[admin] reading-plan failed', err); noteDbFailure();

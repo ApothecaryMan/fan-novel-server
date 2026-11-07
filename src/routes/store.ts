@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
-import { eq } from 'drizzle-orm';
+import { and, eq, inArray } from 'drizzle-orm';
 import { db, isDbAvailable, noteDbFailure } from '../database/db.js';
 import { storeItems, userEquipped, userInventory, users } from '../database/schema.js';
 import { requireAuth } from '../middleware/auth.js';
@@ -8,7 +8,7 @@ import { getCaller } from '../middleware/ownership.js';
 import { effectiveReadingPlan } from '../features/readingSync/freeStore.js';
 import { ADMIN_GRANT_MAX, PRO_MONTHLY_GRANT } from '../features/economy/config.js';
 import { validateItemMetadata } from '../features/economy/itemTypes.js';
-import { PurchaseError, equipItem, getBalances, grantPoints, purchaseItem } from '../features/economy/service.js';
+import { PurchaseError, equipItem, getBalances, grantPoints, hasProAccess, purchaseItem, writeMergedCache } from '../features/economy/service.js';
 
 export const storeRouter = new Hono();
 
@@ -51,18 +51,35 @@ storeRouter.get('/sync', requireAuth, async (c) => {
     }
     const balances = await getBalances(db, caller.row.id);
     const owned = await db.select({ itemId: userInventory.itemId }).from(userInventory).where(eq(userInventory.userId, caller.row.id));
-    const equipped = await db.select({ slot: userEquipped.slot, itemId: userEquipped.itemId }).from(userEquipped).where(eq(userEquipped.userId, caller.row.id));
+    const equippedWithMeta = await db.select({ slot: userEquipped.slot, itemId: userEquipped.itemId, metadata: storeItems.metadata })
+      .from(userEquipped).innerJoin(storeItems, eq(storeItems.id, userEquipped.itemId))
+      .where(eq(userEquipped.userId, caller.row.id));
     let [fresh] = await db.select().from(users).where(eq(users.id, caller.row.id)).limit(1);
-    const { parseProfileDecorations, stripGatedCustoms } = await import('../domain/profileDecorations.js');
-    // Gated customs end with the subscription: an expired Pro loses them from
-    // the cache on the next sync (old values included), so every surface goes
-    // plain and the mobile pull resets the local editors.
-    if (!isPro && fresh && ((fresh.profileDecorations as any)?.nameStyle !== undefined
-      || (fresh.profileDecorations as any)?.bannerGradient !== undefined)) {
-      const stripped = stripGatedCustoms(parseProfileDecorations(fresh.profileDecorations), false);
-      const [rewritten] = await db.update(users).set({ profileDecorations: stripped as any, updatedAt: new Date() }).where(eq(users.id, caller.row.id)).returning();
-      if (rewritten) fresh = rewritten;
+    const { parseProfileDecorations } = await import('../domain/profileDecorations.js');
+    // Pro-exclusive equipped items and gated customs end with the subscription:
+    // when the effective plan is not Pro and no live grace covers the reader,
+    // delete user_equipped rows whose catalog metadata has proExclusive=true
+    // (ownership in user_inventory is kept so re-subscribing re-equips), then
+    // rebuild the merged decorations cache. Both the item removal and the
+    // customs strip land in the single users.profile_decorations write that
+    // writeMergedCache performs, so every surface goes plain on the next read.
+    if (!hasProAccess((fresh ?? caller.row) as never, nowMs) && fresh) {
+      const proItemIds = equippedWithMeta
+        .filter((r) => (r.metadata as { proExclusive?: boolean } | null)?.proExclusive === true)
+        .map((r) => r.itemId);
+      if (proItemIds.length > 0) {
+        await db.delete(userEquipped).where(and(eq(userEquipped.userId, caller.row.id), inArray(userEquipped.itemId, proItemIds)));
+      }
+      const needsCustomStrip = (fresh.profileDecorations as { nameStyle?: unknown; bannerGradient?: unknown } | null)?.nameStyle !== undefined
+        || (fresh.profileDecorations as { nameStyle?: unknown; bannerGradient?: unknown } | null)?.bannerGradient !== undefined;
+      if (proItemIds.length > 0 || needsCustomStrip) {
+        await writeMergedCache(db, caller.row.id, { clearNameStyle: true, clearBanner: true } as never);
+        [fresh] = await db.select().from(users).where(eq(users.id, caller.row.id)).limit(1);
+      }
     }
+    const equipped = hasProAccess((fresh ?? caller.row) as never, nowMs)
+      ? equippedWithMeta.map((r) => ({ slot: r.slot, itemId: r.itemId }))
+      : (await db.select({ slot: userEquipped.slot, itemId: userEquipped.itemId }).from(userEquipped).where(eq(userEquipped.userId, caller.row.id)));
     return c.json({ balances, ownedItemIds: owned.map((o) => o.itemId), equipped, decorations: parseProfileDecorations(fresh?.profileDecorations), serverNow: new Date(nowMs).toISOString() });
   } catch {
     noteDbFailure();

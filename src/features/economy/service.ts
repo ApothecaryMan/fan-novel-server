@@ -8,6 +8,17 @@ function currentDriver(): string {
 }
 import { iapPurchases, pointTransactions, storeItems, userCoinBalances, userEquipped, userInventory, users } from '../../database/schema.js';
 import { DAILY_REWARD_CAP, PRO_DISCOUNT_PERCENT, isCappedSource } from './config.js';
+import { effectiveReadingPlan } from '../readingSync/freeStore.js';
+
+export function hasProAccess(
+  row: { readingStatsPlan?: unknown; readingStatsPlanExpiresAt?: unknown; readingStatsGraceUntil?: unknown } | null | undefined,
+  nowMs: number,
+): boolean {
+  if (!row) return false;
+  if (effectiveReadingPlan(row as { readingStatsPlan?: unknown; readingStatsPlanExpiresAt?: unknown }, nowMs) === 'pro') return true;
+  const g = (row as { readingStatsGraceUntil?: unknown }).readingStatsGraceUntil;
+  return typeof g === 'number' && Number.isSafeInteger(g) && nowMs < g;
+}
 
 export class PurchaseError extends Error {
   code: string;
@@ -227,7 +238,7 @@ async function currentCustoms(tx: any, userId: string): Promise<Customs> {
   return customs;
 }
 
-async function writeMergedCache(tx: any, userId: string, customsOverride?: Customs & { clearNameStyle?: boolean; clearBanner?: boolean }) {
+export async function writeMergedCache(tx: any, userId: string, customsOverride?: Customs & { clearNameStyle?: boolean; clearBanner?: boolean }) {
   const rows = await tx.select({ slot: userEquipped.slot, metadata: storeItems.metadata })
     .from(userEquipped).innerJoin(storeItems, eq(storeItems.id, userEquipped.itemId))
     .where(eq(userEquipped.userId, userId));
@@ -278,8 +289,15 @@ export async function equipItem(db: any, opts: { userId: string; slot: string; i
       if (!owned.length) throw new PurchaseError('not_owned', 403);
       const meta = (item.metadata ?? {}) as { proExclusive?: boolean };
       const nowMs = opts.nowMs ?? Date.now();
-      const inGrace = opts.graceUntilMs !== null && nowMs < opts.graceUntilMs;
-      if (meta.proExclusive && !opts.isPro && !inGrace) throw new PurchaseError('not_owned', 403);
+      const access = hasProAccess(
+        {
+          readingStatsPlan: opts.isPro ? 'pro' : 'free',
+          readingStatsPlanExpiresAt: opts.isPro ? nowMs + 1 : null,
+          readingStatsGraceUntil: opts.graceUntilMs,
+        },
+        nowMs,
+      );
+      if (meta.proExclusive && !access) throw new PurchaseError('not_owned', 403);
       await tx.insert(userEquipped).values({ userId: opts.userId, slot: opts.slot, itemId: item.id })
         .onConflictDoUpdate({ target: [userEquipped.userId, userEquipped.slot], set: { itemId: item.id, equippedAt: new Date() } });
     }

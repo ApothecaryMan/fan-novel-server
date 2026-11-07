@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { HTTPException } from 'hono/http-exception';
 import { verifyGoogleIdToken } from './googleIdentity.js';
 import { cleanBio, cleanMediaUrl, hasAnyAdmin, isUniqueConflict, resolveGoogleAccount } from './googleAccount.js';
@@ -15,10 +15,17 @@ import { toPublic as projectAccount } from '../domain/accountProjection.js';
 export const authRouter = new Hono();
 
 // DELETE /api/v1/auth/me — anonymize the caller's account. The row id is kept
-// so append-only ledgers (point_transactions and its RESTRICT FKs) stay intact;
-// PII is scrubbed and the Google identity unlinked so the next login provisions
-// a fresh account. There is no hard delete: RESTRICT would reject it for any
-// user with economy rows, and silent cascade loss is worse than a kept stub.
+// so append-only ledgers (point_transactions and its RESTRICT FKs) and
+// comments (set null / stub-attributed) stay intact; PII is scrubbed and the
+// Google identity unlinked so the next login provisions a fresh account.
+// There is no hard delete: RESTRICT would reject it for any user with economy
+// rows, and silent cascade loss is worse than a kept stub.
+// The scrub, the reading-data deletes, the Pro downgrade and the revoke audit
+// row are ONE SQL statement (data-modifying CTE), so they commit together or
+// not at all on both drivers (pg and neon-http have no interactive tx there).
+// Retry-safe and idempotent: the deletes are idempotent, the scrub sets fixed
+// values, and the revoke INSERT only fires when the pre-scrub plan was 'pro',
+// so a replay after success inserts nothing.
 authRouter.delete('/me', requireAuth, async (c) => {
   const payload = c.get('authUser') as { sub?: string };
   const sub = payload.sub ?? '';
@@ -30,20 +37,47 @@ authRouter.delete('/me', requireAuth, async (c) => {
     const stub = `deleted_${row.id.slice(0, 8)}`;
     const prevDelAvatar = row.avatarUrl as string | null | undefined;
     const prevDelBanner = row.bannerUrl as string | null | undefined;
-    const [updated] = await db.update(users).set({
-      externalId: `deleted_${row.id}`,
-      googleSubject: null,
-      email: null,
-      username: stub,
-      displayName: 'Deleted user',
-      avatarUrl: null,
-      bannerUrl: null,
-      bio: null,
-      profileDecorations: null,
-      passwordHash: null,
-      updatedAt: new Date(),
-    }).where(eq(users.id, row.id)).returning();
-    if (!updated) return c.json({ error: 'account not found' }, 401);
+    const stubExternalId = `deleted_${row.id}`;
+    const result = await db.execute(sql`
+      WITH old AS (
+        SELECT id, reading_stats_plan AS old_plan,
+               reading_stats_plan_expires_at AS old_expires
+          FROM users WHERE id = ${row.id}::uuid FOR UPDATE
+      ),
+      del_sessions AS (DELETE FROM reading_sessions WHERE user_id = ${row.id}::uuid),
+      del_library AS (DELETE FROM user_library WHERE user_id = ${row.id}::uuid),
+      del_novels AS (DELETE FROM reading_novels WHERE user_id = ${row.id}::uuid),
+      -- reading_novel_tombstones intentionally not cleared here: uncommitted migration 0022 only.
+      del_unlocks AS (DELETE FROM user_achievement_unlocks WHERE user_id = ${row.id}::uuid),
+      del_cats AS (DELETE FROM user_categories WHERE user_id = ${row.id}::uuid),
+      del_equipped AS (DELETE FROM user_equipped WHERE user_id = ${row.id}::uuid),
+      del_role_reqs AS (DELETE FROM role_requests WHERE user_id = ${row.id}::uuid),
+      revoke_keys AS (UPDATE author_api_keys SET revoked_at = now() WHERE user_id = ${row.id}::uuid AND revoked_at IS NULL),
+      upd AS (
+        UPDATE users SET external_id = ${stubExternalId},
+          google_subject = NULL, email = NULL, username = ${stub},
+          display_name = 'Deleted user', avatar_url = NULL, banner_url = NULL,
+          bio = NULL, profile_decorations = NULL, password_hash = NULL,
+          role = 'reader', is_author = false, is_translator = false,
+          weekly_reading_goal_hours = NULL,
+          reading_stats_plan = 'free', reading_stats_plan_expires_at = NULL,
+          reading_stats_grace_until = NULL, reading_stats_plan_status = 'cancelled',
+          updated_at = now()
+        FROM old WHERE users.id = old.id
+        RETURNING users.id AS id
+      ),
+      ev AS (
+        INSERT INTO subscription_events
+          (user_id, type, actor_id, previous_expires_at, new_expires_at, duration_days, reason, occurred_at)
+        SELECT ${row.id}::uuid, 'revoke', NULL, old_expires, NULL, NULL,
+          'system: account deleted', (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::bigint
+        FROM old WHERE old_plan = 'pro'
+        RETURNING id
+      )
+      SELECT upd.id, (SELECT count(*)::int FROM ev) AS events FROM upd
+    `);
+    const rows = Array.isArray(result) ? result : ((result as { rows?: unknown }).rows as unknown[] ?? []);
+    if (rows.length === 0) return c.json({ error: 'account not found' }, 401);
     for (const key of [...staleUploadKeys(prevDelAvatar, null), ...staleUploadKeys(prevDelBanner, null)]) {
       await deleteUploadKey(key);
     }
