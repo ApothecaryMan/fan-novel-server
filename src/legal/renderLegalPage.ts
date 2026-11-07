@@ -1,4 +1,4 @@
-export const CONTACT_EMAIL = 'mohamed1232003@gmail.com';
+export const CONTACT_EMAIL = 'mohamedrezk.ph@gmail.com';
 export const EFFECTIVE_DATE = '7 November 2026';
 export const APP_NAME = 'Fan Novel';
 export const ANDROID_PACKAGE = 'com.webnovel.reader';

@@ -15,7 +15,7 @@ describe('public legal pages', () => {
       const html = await res.text();
       expect(html).toContain('<html lang="ar" dir="rtl">');
       expect(html).toContain('<section lang="en" dir="ltr">');
-      expect(html).toContain('mohamed1232003@gmail.com');
+      expect(html).toContain('mohamedrezk.ph@gmail.com');
       expect(html).toContain('7 November 2026');
     });
   }
