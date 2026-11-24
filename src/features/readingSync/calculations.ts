@@ -316,6 +316,8 @@ export function activityTierWindow(): { startDay: string; endDay: string } {
   };
 }
 
+const MAX_COMPLETED_NOVELS = 100;
+
 const DAY_MS = 86_400_000;
 const MIN_YEAR = 1;
 const MAX_YEAR = 9999;
@@ -724,6 +726,9 @@ function completedNovels(
     const row: ProCompletedNovel = { novelId: novel.novelId };
     if (novel.title !== undefined) row.title = novel.title;
     rows.push(row);
+    // Contract bound: the wire schema rejects a longer list, and no shipped
+    // client derives a count from it (completion counts have their own field).
+    if (rows.length === MAX_COMPLETED_NOVELS) break;
   }
   return rows;
 }

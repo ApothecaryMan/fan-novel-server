@@ -124,6 +124,18 @@ describe.skipIf(!url)('loadLeaderboard (isolated PostgreSQL)', () => {
     expect(rows.map((r) => r.trend)).toEqual([0, 0, 0]);
   });
 
+  it('ignores rows outside the bounded window (future day, empty label)', async () => {
+    const d = await createUser('Reader D');
+    await database.insert(readingSessions).values([
+      sessionRow(d.id, { chapterId: 1, readDay: daysAgo(-1) }),
+      sessionRow(d.id, { chapterId: 2, readDay: '' }),
+    ]);
+    const week = await loadLeaderboard('week', 10);
+    expect(week.some((r) => r.user.id === d.externalId)).toBe(false);
+    const all = await loadLeaderboard('all', 10);
+    expect(all.some((r) => r.user.id === d.externalId)).toBe(false);
+  });
+
   it('never leaks email into the public rows', async () => {
     const rows = await loadLeaderboard('week', 10);
     for (const r of rows) expect(r.user).not.toHaveProperty('email');

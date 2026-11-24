@@ -131,7 +131,7 @@ export function unsupportedSyncVersionResponse(): SyncFailure {
   return syncFailure(
     400,
     'unsupported_sync_version',
-    `unsupported sync version; expected ${LEGACY_SYNC_VERSION} or ${READING_SYNC_VERSION}`,
+    `unsupported sync version; expected ${READING_SYNC_VERSION}`,
   );
 }
 

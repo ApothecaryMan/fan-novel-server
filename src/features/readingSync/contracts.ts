@@ -202,7 +202,7 @@ const proStatsShape = {
   hourlyDistribution: z.array(nonNegativeInteger()).length(24),
   mostReadNovels: z.array(mostReadNovelSchema).max(100),
   mostReadNovelsTruncated: z.boolean(),
-  completedNovels: z.array(completedNovelSchema),
+  completedNovels: z.array(completedNovelSchema).max(100),
 };
 
 export const FREE_STATS_KEYS = keysOfShape(freeStatsShape);
@@ -444,6 +444,11 @@ export const readingStatsQuerySchema = strictObject({
   // Accepted and ignored on the Pro channel (Pro streaks are always present);
   // a plan-agnostic client can send one envelope shape for both plans.
   readingStatsFreeStreaks: freeStreaksFlagSchema,
+  // Optional opt-in used by newer clients: on a cursor page (sessionCursor
+  // non-null) skip the full-history stats recomputation and omit `stats` from
+  // the response. Shipped clients never send it and still receive `stats` on
+  // every page, because their strict reader requires the field.
+  omitStats: z.boolean().optional(),
 });
 
 const proReadingSyncPullShape = {

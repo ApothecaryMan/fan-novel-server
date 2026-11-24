@@ -113,21 +113,23 @@ beforeEach(async () => {
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe('reading sync version routing', () => {
-  it('keeps v1 payloads (with or without syncVersion 1) on the legacy channel', async () => {
+  it('retires v1 payloads (with or without syncVersion 1) with 410 before any write', async () => {
     await seedUser();
     for (const body of [
       { user: { externalId: SUBJECT }, sessions: [] },
       { syncVersion: 1, user: { externalId: SUBJECT }, sessions: [] },
     ]) {
       const res = await push(body);
-      expect(res.status).toBe(200);
-      const payload: any = await res.json();
-      // Legacy response is unchanged: no plan, no stats projection.
-      expect(payload).toMatchObject({ success: true, applied: { library: 0, sessions: 0 } });
-      expect(payload).not.toHaveProperty('plan');
-      expect(payload).not.toHaveProperty('stats');
-      expect(payload).not.toHaveProperty('readingStatsVersion');
+      expect(res.status).toBe(410);
+      expect(await res.json()).toEqual({
+        error: 'sync_version_unsupported',
+        message: 'Update the app to keep syncing.',
+      });
     }
+    const pullRes = await pull({ user: { externalId: SUBJECT } });
+    expect(pullRes.status).toBe(410);
+    expect(await pullRes.json()).toMatchObject({ error: 'sync_version_unsupported' });
+    expectNoWrites();
   });
 
   // A spoofed/loose version must not fall through onto the permissive legacy
@@ -236,36 +238,16 @@ describe('Free v2 push rejects malformed core payloads with 400', () => {
     expectNoWrites();
   });
 
-  it('treats an unparseable body as a malformed payload, not a crash', async () => {
+  it('treats an unparseable body as v1 and retires it, not a crash', async () => {
     await seedUser();
     const res = await app.request('/sync/push', { method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: '{not json' });
-    expect(res.status).toBe(400);
-    expect((await res.json()).error).toBe('invalid push payload');
+    // No readable syncVersion: the legacy channel, which is retired.
+    expect(res.status).toBe(410);
+    expect((await res.json()).message).toBe('Update the app to keep syncing.');
     expectNoWrites();
   });
 
-  // The legacy channel has no declared version to key on, so it keeps its own
-  // historical body — but its issue list is capped with the same budget, or a
-  // 5000-row outbox flush chooses the size of its own 400.
-  it('caps the legacy v1 issue list and flags the truncation', async () => {
-    await seedUser();
-    const small: any = await (await push({ user: { externalId: SUBJECT }, library: [{ novelId: '42', lastReadChapterId: 'seven' }] })).json();
-    expect(small.error).toBe('invalid push payload');
-    expect(small.issues.length).toBeLessThanOrEqual(20);
-    expect(small).not.toHaveProperty('issuesTruncated');
-
-    const res = await push({
-      user: { externalId: SUBJECT },
-      library: Array.from({ length: 5000 }, (_v, i) => ({ novelId: '42', lastReadChapterId: -1, progressPercent: 500, addedAt: i })),
-    });
-    expect(res.status).toBe(400);
-    const body: any = await res.json();
-    expect(body.error).toBe('invalid push payload');
-    expect(body.issues.length).toBeLessThanOrEqual(20);
-    expect(body.issuesTruncated).toBe(true);
-    expectNoWrites();
-  });
 });
 
 describe('Free v2 channel keeps the existing token and owner rules', () => {

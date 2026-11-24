@@ -71,6 +71,11 @@ export async function loadLeaderboard(
       seconds: sql<number>`COALESCE(SUM(GREATEST(${readingSessions.seconds}, 0)) FILTER (WHERE ${dayBounds(window.from, window.to)}), 0)`.as('seconds'),
     })
     .from(readingSessions)
+    // Restrict the scan to the union of the current and previous windows so
+    // leaderboard_read_day_idx can range-scan instead of reading every row.
+    // Every aggregate below is itself gated by a FILTER on the same or a
+    // narrower window, so rows outside this union contributed nothing.
+    .where(dayBounds(window.prevFrom, window.to))
     .groupBy(readingSessions.userId)
     .as('agg');
   const rows = await db

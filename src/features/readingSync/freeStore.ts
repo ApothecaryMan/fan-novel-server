@@ -1,4 +1,4 @@
-import { and, eq, inArray, sql } from 'drizzle-orm';
+import { and, eq, inArray, lte, sql } from 'drizzle-orm';
 import { db } from '../../database/db.js';
 import { readingNovelTombstones, readingSessions, users } from '../../database/schema.js';
 import {
@@ -274,6 +274,33 @@ export interface DeletionGate {
  */
 export const READING_CLOCK_SKEW_MS = 5 * 60 * 1000;
 
+/**
+ * Retire a lapsed Pro window at most once.
+ *
+ * Every read path derives `free` from an expired row but leaves the columns
+ * untouched, so a lapsed account used to write an audit event on EVERY request
+ * and keep presenting a stale `pro` row to the plan probe. This guarded update
+ * is the single transition: it only fires while the row is still `pro` with an
+ * expiry at or before `now`, and its caller writes the audit event only when a
+ * row actually changed. `effectiveReadingPlan` semantics are untouched — this
+ * makes the stored row agree with the already fail-closed derivation.
+ */
+export async function expireLapsedProPlan(
+  userId: string,
+  now: number,
+): Promise<boolean> {
+  const updated = await db
+    .update(users)
+    .set({ readingStatsPlan: 'free', readingStatsPlanExpiresAt: null })
+    .where(and(
+      eq(users.id, userId),
+      eq(users.readingStatsPlan, 'pro'),
+      lte(users.readingStatsPlanExpiresAt, now),
+    ))
+    .returning();
+  return updated.length > 0;
+}
+
 export function normalizeResetAt(value: unknown): number | null {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
 }
@@ -531,28 +558,38 @@ export async function loadFreeStatsForUser(
     ?? (tz !== null ? todayLabelInTz(tz) : offset !== null ? todayLabelForOffset(offset) : new Date().toISOString().slice(0, 10));
   const asOfDayNumber = dayNumberFromLabel(asOfLabel) ?? utcDayNumberFromTs(Date.now()) ?? 0;
 
+  // A streak day must carry real reading time. The client derives its streak
+  // set from rows with seconds > 0 (statsEngine.fromSessions), so a
+  // completion-only event (seconds = 0) must not extend the server streak
+  // either. SUM(seconds) > 0 keeps a day whose rows only add up with several
+  // zero-second rows out, matching the client exactly.
+  const activeSeconds = sql`SUM(GREATEST(${readingSessions.seconds}, 0)) > 0`;
   let dayLabels: string[] = [];
   if (!useTz) {
     const days = await db
-      .selectDistinct({ day: readingSessions.readDay })
+      .select({ day: readingSessions.readDay })
       .from(readingSessions)
-      .where(and(eq(readingSessions.userId, userId), sql`${readingSessions.readDay} <> ''`));
+      .where(and(eq(readingSessions.userId, userId), sql`${readingSessions.readDay} <> ''`))
+      .groupBy(readingSessions.readDay)
+      .having(activeSeconds);
     dayLabels = days.map((r) => String((r as { day?: unknown }).day ?? '')).filter((d) => d.length > 0);
   } else if (tz !== null) {
+    const dayExpression = sql<string>`to_char((to_timestamp(${readingSessions.ts} / 1000.0) AT TIME ZONE ${tz}), 'YYYY-MM-DD')`;
     const days = await db
-      .selectDistinct({
-        day: sql<string>`to_char((to_timestamp(${readingSessions.ts} / 1000.0) AT TIME ZONE ${tz}), 'YYYY-MM-DD')`,
-      })
+      .select({ day: dayExpression })
       .from(readingSessions)
-      .where(eq(readingSessions.userId, userId));
+      .where(eq(readingSessions.userId, userId))
+      .groupBy(dayExpression)
+      .having(activeSeconds);
     dayLabels = days.map((r) => String((r as { day?: unknown }).day ?? '')).filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d));
   } else if (offset !== null) {
+    const dayExpression = sql<string>`to_char(((to_timestamp(${readingSessions.ts} / 1000.0) AT TIME ZONE 'UTC') + ${offset} * interval '1 minute'), 'YYYY-MM-DD')`;
     const days = await db
-      .selectDistinct({
-        day: sql<string>`to_char(((to_timestamp(${readingSessions.ts} / 1000.0) AT TIME ZONE 'UTC') + ${offset} * interval '1 minute'), 'YYYY-MM-DD')`,
-      })
+      .select({ day: dayExpression })
       .from(readingSessions)
-      .where(eq(readingSessions.userId, userId));
+      .where(eq(readingSessions.userId, userId))
+      .groupBy(dayExpression)
+      .having(activeSeconds);
     dayLabels = days.map((r) => String((r as { day?: unknown }).day ?? '')).filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d));
   }
 

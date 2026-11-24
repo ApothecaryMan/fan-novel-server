@@ -334,46 +334,50 @@ function decodeCursor(value: string | null): Cursor | null {
 
 export async function pullProData(
   userId: string,
-  query: { libraryCursor: string | null; sessionCursor: string | null; year: number; readingStatsTz?: string; readingStatsTzOffset?: number },
+  query: {
+    libraryCursor: string | null;
+    sessionCursor: string | null;
+    year: number;
+    readingStatsTz?: string;
+    readingStatsTzOffset?: number;
+    omitStats?: boolean;
+  },
   asOfDay?: string,
 ): Promise<ProReadingSyncPullResponse> {
   const limit = MAX_COLLECTION_ROWS;
-  const libraryCursor = decodeCursor(query.libraryCursor);
   const sessionCursor = decodeCursor(query.sessionCursor);
-  const [libraryRows, sessionRows] = await Promise.all([
-    db.select().from(userLibrary).where(and(
-      eq(userLibrary.userId, userId),
-      libraryCursor ? or(gt(userLibrary.updatedAt, libraryCursor.ts), sql`${userLibrary.updatedAt} = ${libraryCursor.ts} AND ${userLibrary.id} > ${libraryCursor.id}`) : undefined,
-    )).orderBy(asc(userLibrary.updatedAt), asc(userLibrary.id)).limit(limit),
-    db.select().from(readingSessions).where(and(
-      eq(readingSessions.userId, userId),
-      sessionCursor ? or(gt(readingSessions.ts, sessionCursor.ts), sql`${readingSessions.ts} = ${sessionCursor.ts} AND ${readingSessions.id} > ${sessionCursor.id}`) : undefined,
-    )).orderBy(asc(readingSessions.ts), asc(readingSessions.id)).limit(limit),
-  ]);
+  const sessionRows = await db.select().from(readingSessions).where(and(
+    eq(readingSessions.userId, userId),
+    sessionCursor ? or(gt(readingSessions.ts, sessionCursor.ts), sql`${readingSessions.ts} = ${sessionCursor.ts} AND ${readingSessions.id} > ${sessionCursor.id}`) : undefined,
+  )).orderBy(asc(readingSessions.ts), asc(readingSessions.id)).limit(limit);
   const last = <T extends { id: number }>(rows: T[], clock: (row: T) => number) => {
     if (rows.length < limit) return null;
     const row = rows[rows.length - 1];
     return { ts: clock(row), id: Number(row.id) };
   };
+  // Library rows were returned but the shipped client discards them: it only
+  // advances its library cursor (see src/features/sync/restore.ts in the app).
+  // An empty page is tolerant there (safePage -> rows, nextCursor), so the
+  // server stops scanning the collection entirely.
+  //
+  // Stats cost a full scan of the user's history. The shipped client requires
+  // `stats` on EVERY page (its Pro pull reader has an exact key allowlist), so
+  // an old client keeps getting it. A newer client can send the optional
+  // `omitStats` flag; on cursor pages (sessionCursor non-null) the field is
+  // then omitted and the recomputation skipped. The first page always keeps it.
+  const includeStats = query.omitStats !== true || sessionCursor === null;
+  const stats = includeStats
+    ? await loadProStats(userId, {
+      asOfDay,
+      year: query.year,
+      tz: query.readingStatsTz ?? null,
+      tzOffsetMinutes: query.readingStatsTzOffset ?? null,
+    })
+    : null;
   return {
     success: true,
     plan: 'pro',
-    library: {
-      rows: libraryRows.map((row) => ({
-        novelId: row.novelId,
-        sourceId: row.sourceId,
-        categoryIds: row.categoryIds,
-        lastReadChapterId: row.lastReadChapterId,
-        lastReadChapterNumber: row.lastReadChapterNumber,
-        lastReadChapterTitle: row.lastReadChapterTitle,
-        progressPercent: row.progressPercent,
-        lastReadAt: row.lastReadAt?.toISOString() ?? null,
-        addedAt: row.addedAt?.toISOString() ?? null,
-        updatedAt: Number(row.updatedAt),
-        deletedAt: row.deletedAt == null ? null : Number(row.deletedAt),
-      })),
-      nextCursor: encodeCursor(last(libraryRows, (row) => Number(row.updatedAt))),
-    },
+    library: { rows: [], nextCursor: null },
     sessions: {
       rows: sessionRows.map((row) => ({
         clientSessionId: row.clientSessionId,
@@ -389,11 +393,6 @@ export async function pullProData(
       })),
       nextCursor: encodeCursor(last(sessionRows, (row) => Number(row.ts))),
     },
-    stats: await loadProStats(userId, {
-      asOfDay,
-      year: query.year,
-      tz: (query as { readingStatsTz?: string }).readingStatsTz ?? null,
-      tzOffsetMinutes: (query as { readingStatsTzOffset?: number }).readingStatsTzOffset ?? null,
-    }),
-  };
+    ...(stats !== null ? { stats } : {}),
+  } as ProReadingSyncPullResponse;
 }

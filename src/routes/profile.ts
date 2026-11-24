@@ -9,7 +9,7 @@ import { findMemoryUser } from './auth.js';
 import { buildAuthorLookup, encodeCursor, decodeCursor, toApi, type RootsCursor, type ApiAuthor } from './comments.js';
 import { parseProfileDecorations, stripGatedCustoms, isEmptyDecorations } from '../domain/profileDecorations.js';
 import { getCaller } from '../middleware/ownership.js';
-import { effectivePlanExpiry, effectiveReadingPlan, loadFreeStatsForUser } from '../features/readingSync/freeStore.js';
+import { effectivePlanExpiry, effectiveReadingPlan, expireLapsedProPlan, loadFreeStatsForUser } from '../features/readingSync/freeStore.js';
 import { freeProjection } from '../features/readingSync/freeProtocol.js';
 import { COMPLETION_THRESHOLD, proProjection } from '../features/readingSync/contracts.js';
 import { leaderboardWindow } from '../features/readingSync/leaderboardStore.js';
@@ -175,6 +175,9 @@ async function auditNaturalExpiry(row: {
   if (typeof expiresAt !== 'number' || !Number.isSafeInteger(expiresAt)) return;
   if (Date.now() < expiresAt) return;
   try {
+    // Same guarded transition as the sync path: the audit row is written only
+    // by the observer whose UPDATE changed the stored plan.
+    if (!(await expireLapsedProPlan(row.id, Date.now()))) return;
     await db.insert(subscriptionEvents).values({
       userId: row.id,
       type: 'expired',

@@ -1,19 +1,16 @@
 import { Hono, type Context } from 'hono';
-import { and, eq, gt, sql } from 'drizzle-orm';
-import { z } from 'zod';
+import { and, eq, sql } from 'drizzle-orm';
 import { db, isDbAvailable, noteDbFailure } from '../database/db.js';
-import { users, userAchievementUnlocks, userLibrary, readingNovels, readingSessions, subscriptionEvents } from '../database/schema.js';
+import { users, userAchievementUnlocks, userLibrary, readingSessions, subscriptionEvents } from '../database/schema.js';
 import { verifySubject } from '../middleware/auth.js';
 import { getEnv } from '../config/env.js';
 import {
   effectiveReadingPlan,
-  FREE_SESSION_SAFE_DEFAULTS,
-  isLateSession,
-  loadDeletionGate,
+  expireLapsedProPlan,
   loadFreeStatsForUser,
+  normalizeResetAt,
   READING_CLOCK_SKEW_MS,
   storeFreeSessions,
-  utcDayFromTs,
 } from '../features/readingSync/freeStore.js';
 import { loadProStats, pullProData, storeProPush } from '../features/readingSync/proStore.js';
 import { buildProPushResponse, parseProV2Pull, parseProV2Push } from '../features/readingSync/proProtocol.js';
@@ -39,7 +36,6 @@ import {
   accountNotFoundResponse,
   buildFreePullResponse,
   buildFreePushResponse,
-  capReportedIssues,
   claimedExternalId,
   classifySyncRequest,
   contractFailureResponse,
@@ -72,54 +68,8 @@ export const syncRouter = new Hono();
 // freeStore (READING_CLOCK_SKEW_MS); this alias keeps the route-level name.
 export const CLIENT_CLOCK_SKEW_MS = READING_CLOCK_SKEW_MS;
 
-// ---- Input validation (zod). Malformed outbox payloads must fail as 400
-// (client drops the op) — never 500 (client would retry forever).
-const userSchema = z.object({
-  externalId: z.string().min(1).max(255),
-  email: z.string().max(255).optional(),
-  name: z.string().max(100).optional()
-});
-const libraryRowSchema = z.object({
-  novelId: z.union([z.string(), z.number()]),
-  sourceId: z.string().max(100).nullable().optional(),
-  categoryIds: z.array(z.string()).optional(),
-  lastReadChapterId: z.number().nullable().optional(),
-  lastReadChapterNumber: z.number().nullable().optional(),
-  lastReadChapterTitle: z.string().max(255).nullable().optional(),
-  progressPercent: z.number().optional(),
-  lastReadAt: z.string().nullable().optional(),
-  addedAt: z.string().nullable().optional(),
-  updatedAt: z.number().optional(),
-  deletedAt: z.number().nullable().optional()
-});
-const sessionRowSchema = z.object({
-  clientSessionId: z.string().min(1).max(64),
-  novelId: z.union([z.string(), z.number()]).optional(),
-  chapterId: z.number().optional(),
-  seconds: z.number().optional(),
-  words: z.number().optional(),
-  minuteOfDay: z.number().optional(),
-  readDay: z.string().max(10).optional(),
-  ts: z.number().optional()
-});
-const pushSchema = z.object({
-  user: userSchema,
-  deviceId: z.string().max(100).optional(),
-  library: z.array(libraryRowSchema).max(5000).optional(),
-  sessions: z.array(sessionRowSchema).max(5000).optional()
-});
-const pullSchema = z.object({
-  user: userSchema,
-  since: z.number().optional()
-});
-
 const clampTs = (ts: number, now: number): number =>
   ts > now + CLIENT_CLOCK_SKEW_MS ? now : ts;
-
-const unionStrings = (a: string[], b: string[]): string[] => {
-  const seen = new Set<string>();
-  return [...a, ...b].map(String).filter((x) => (seen.has(x) ? false : (seen.add(x), true)));
-};
 
 /** The only user columns any sync path needs. Sync never reads the auth
  *  anchors (password hash, google subject) or the write-side profile fields. */
@@ -168,8 +118,8 @@ async function resolveSyncUser(externalId: string): Promise<SyncUserResolution> 
 }
 
 /**
- * Legacy v1 keeps its original bodies for account-resolution failures, so the
- * resolution result is rendered per channel rather than normalized here.
+ * Account-resolution failures for the remaining non-v2 sync surfaces (unlocks,
+ * stats) keep their original `{ error }` bodies.
  */
 async function resolveLegacySyncUser(c: Context, externalId: string) {
   const resolved = await resolveSyncUser(externalId);
@@ -182,31 +132,6 @@ async function resolveLegacySyncUser(c: Context, externalId: string) {
 /** v2 renders the same two outcomes through the typed failure helper. */
 function v2UserFailure(reason: 'not_found' | 'unavailable'): SyncFailure {
   return reason === 'not_found' ? accountNotFoundResponse() : storageUnavailableResponse();
-}
-
-const num = (v: unknown, fallback = 0): number =>
-  typeof v === 'number' && Number.isFinite(v) ? v : fallback;
-
-const str = (v: unknown): string | null => (typeof v === 'string' ? v : null);
-const strDef = (v: unknown, fallback = ''): string => (typeof v === 'string' ? v : fallback);
-const dateOrNull = (v: unknown): Date | null => {
-  if (typeof v === 'string' && v) {
-    const d = new Date(v);
-    return Number.isNaN(d.getTime()) ? null : d;
-  }
-  return null;
-};
-
-/**
- * Legacy v1 400 body: `{ error, issues }` as before, with the issue list
- * capped. A 5000-row outbox flush produces one zod issue per field, so an
- * uncapped list let a client choose the size of its own error response. The cap
- * reuses the v2 budget (MAX_REPORTED_ISSUES) and only adds `issuesTruncated`
- * when something was actually dropped, so a small failure stays byte-identical.
- */
-function legacyIssues(c: Context, error: string, issues: readonly unknown[]) {
-  const { issues: capped, issuesTruncated } = capReportedIssues(issues);
-  return c.json({ error, issues: capped, ...(issuesTruncated ? { issuesTruncated: true } : {}) }, 400);
 }
 
 // ---- Reading statistics v2 (plan-aware). The plan is read from
@@ -275,6 +200,11 @@ async function logExpiredObservation(user: SyncUser): Promise<void> {
   if (typeof prev !== 'number' || !Number.isSafeInteger(prev)) return;
   if (Date.now() < prev) return;
   try {
+    // Guarded transition: only the request that actually flips the stored row
+    // (pro -> free, expiry cleared) writes the audit event. Concurrent
+    // observers of the same lapse write nothing more, so a lapsed account no
+    // longer inserts on every request.
+    if (!(await expireLapsedProPlan(user.id, Date.now()))) return;
     await db.insert(subscriptionEvents).values({
       userId: user.id,
       type: 'expired',
@@ -393,6 +323,7 @@ async function pullV2(c: Context, body: unknown, authedSub: string | null) {
         year: number;
         readingStatsTz?: string;
         readingStatsTzOffset?: number;
+        omitStats?: boolean;
       };
       return c.json(await pullProData(user.id, {
         ...readingStats,
@@ -411,229 +342,54 @@ async function pullV2(c: Context, body: unknown, authedSub: string | null) {
 }
 
 /**
- * Shared prelude for both legacy channels: read the body once, classify the
- * declared protocol, then apply the storage/auth gates.
- *
- * The body is buffered BEFORE the gates purely so the declared channel is known
- * when a gate rejects: a v2 caller must receive the typed v2 failure body while
- * a v1 caller keeps the legacy one. Precedence is unchanged — neither gate runs
- * before the other, and both still precede every storage access and every
- * schema parse. A body too broken to read declares no version, so it is treated
- * as legacy and gets the legacy body, exactly as before.
+ * The legacy v1 channel is retired. 410 (Gone) so an old client stops
+ * retrying a protocol the server will never accept again. The body is the
+ * documented client-facing shape: a code plus a human-readable message.
  */
-async function syncRequestPreamble(c: Context, legacyUnavailable: () => Response, legacyUnauthenticated: () => Response) {
+function retiredSyncResponse(c: Context) {
+  return c.json({
+    error: 'sync_version_unsupported',
+    message: 'Update the app to keep syncing.',
+  }, 410);
+}
+
+/**
+ * Shared prelude for the v2 channel: read the body once, classify the declared
+ * protocol, retire the legacy channel, then apply the storage/auth gates.
+ *
+ * The body is buffered FIRST so a v1 caller is answered 410 before any storage
+ * or auth access. Only v2 (or an unsupported declared version, which the route
+ * rejects next) reaches the gates.
+ */
+async function syncRequestPreamble(c: Context) {
   const body = await c.req.json().catch(() => null);
   const channel = classifySyncRequest(body);
-  if (!isDbAvailable()) {
-    if (channel === 'v2') return fail(c, syncDatabaseUnavailableResponse());
-    return legacyUnavailable();
-  }
+  // Legacy v1 (no syncVersion, or syncVersion: 1) is retired permanently.
+  if (channel === 'legacy') return retiredSyncResponse(c);
+  if (!isDbAvailable()) return fail(c, syncDatabaseUnavailableResponse());
   const authedSub = await authedSubject(c);
   if (!getEnv().syncOpen && !authedSub) {
-    if (channel === 'v2') return fail(c, unauthorizedResponse('unauthorized: valid Bearer token required'));
-    return legacyUnauthenticated();
+    return fail(c, unauthorizedResponse('unauthorized: valid Bearer token required'));
   }
   return { body, channel, authedSub };
 }
 
 // POST /api/v1/sync/push
 syncRouter.post('/push', async (c) => {
-  const preamble = await syncRequestPreamble(
-    c,
-    () => c.json({ error: 'sync database not configured' }, 503),
-    () => c.json({ error: 'unauthorized: valid Bearer token required' }, 401),
-  );
+  const preamble = await syncRequestPreamble(c);
   if (preamble instanceof Response) return preamble;
   const { body, channel, authedSub } = preamble;
   if (channel === 'v2') return pushV2(c, body, authedSub);
-  if (channel === 'unsupported') return fail(c, unsupportedSyncVersionResponse());
-  const parsed = pushSchema.safeParse(body);
-  if (!parsed.success) return legacyIssues(c, 'invalid push payload', parsed.error.issues);
-  // The legacy channel keeps working from the parsed body exactly as before the
-  // v2 branch existed: classification only needs the raw body, the writer only
-  // ever sees validated fields.
-  const legacyBody = parsed.data;
-  const externalId = legacyBody.user.externalId;
-  // Owner policy: an authenticated caller may only sync its own identity.
-  if (authedSub && authedSub !== externalId) {
-    return c.json({ error: 'forbidden: token identity does not match user.externalId' }, 403);
-  }
-  const now = Date.now();
-  const user = await resolveLegacySyncUser(c, externalId);
-  if (user instanceof Response) return user;
-  // Derived-plan gate (§ Legacy v1 gating): owner check ran before resolve;
-  // derivation runs on the freshly resolved row. Free-derived callers store
-  // safe defaults for Pro dimensions instead of client-sent values.
-  const legacyPlan = effectiveReadingPlan(user, now);
-  const legacyFree = legacyPlan !== 'pro';
-
-  let appliedLibrary = 0;
-  for (const e of legacyBody.library ?? []) {
-    const novelId = String(e.novelId ?? '');
-    if (!novelId) continue;
-    const updatedAt = clampTs(num(e.updatedAt, now), now);
-    const deletedAt = e.deletedAt == null ? null : clampTs(num(e.deletedAt), now);
-    const existing = await db
-      .select()
-      .from(userLibrary)
-      .where(and(eq(userLibrary.userId, user.id), eq(userLibrary.novelId, novelId)))
-      .then((r) => r[0]);
-    const values = {
-      userId: user.id,
-      novelId,
-      sourceId: str(e.sourceId),
-      categoryIds: Array.isArray(e.categoryIds) ? e.categoryIds.map(String) : [],
-      lastReadChapterId: e.lastReadChapterId == null ? null : num(e.lastReadChapterId),
-      lastReadChapterNumber: e.lastReadChapterNumber == null ? null : num(e.lastReadChapterNumber),
-      lastReadChapterTitle: str(e.lastReadChapterTitle),
-      progressPercent: num(e.progressPercent),
-      lastReadAt: dateOrNull(e.lastReadAt),
-      addedAt: dateOrNull(e.addedAt) ?? new Date(),
-      updatedAt,
-      deletedAt
-    };
-    if (!existing) {
-      await db.insert(userLibrary).values(values);
-      appliedLibrary++;
-      continue;
-    }
-    const oldTomb = existing.deletedAt != null;
-    const newTomb = deletedAt != null;
-    if (oldTomb !== newTomb) {
-      if (!newTomb) continue; // tombstone wins: live incoming loses to stored delete
-      await db.update(userLibrary).set(values).where(eq(userLibrary.id, existing.id));
-      appliedLibrary++;
-    } else if (updatedAt > (existing.updatedAt ?? 0)) {
-      await db.update(userLibrary).set(values).where(eq(userLibrary.id, existing.id));
-      appliedLibrary++;
-    } else if (updatedAt === (existing.updatedAt ?? 0) && !newTomb) {
-      const merged = unionStrings(existing.categoryIds ?? [], values.categoryIds);
-      if (merged.length !== (existing.categoryIds ?? []).length) {
-        await db.update(userLibrary).set({ categoryIds: merged }).where(eq(userLibrary.id, existing.id));
-        appliedLibrary++;
-      }
-    }
-  }
-
-  // ---- PLAN GATE (legacy v1 sessions) -------------------------------------
-  // Derived above: a Free-derived caller stores FREE_SESSION_SAFE_DEFAULTS
-  // for the Pro dimensions (words, minuteOfDay, readDay), matching what
-  // features/readingSync/freeStore.ts writes on the v2 Free channel.
-  // Late uploads (ts + skew < stats_reset_at or novel tombstone) are dropped,
-  // not stored, so a pre-reset outbox cannot resurrect deleted history. The
-  // dropped rows still count in `applied.sessions`: the legacy channel has no
-  // acceptedSessionIds outbox drain, so a 0 here would make old clients retry
-  // (and re-drop) forever. Response shape unchanged.
-  const legacyGate = await loadDeletionGate(
-    user.id,
-    [...new Set((legacyBody.sessions ?? []).map((e) => String((e as { novelId?: unknown }).novelId ?? '')).filter((id) => id.length > 0))],
-  );
-  let appliedSessions = 0;
-  for (const e of legacyBody.sessions ?? []) {
-    const key = typeof e.clientSessionId === 'string' ? e.clientSessionId : '';
-    if (!key) continue;
-    const eTs = num(e.ts, now);
-    const eNovelId = String(e.novelId ?? '');
-    if (isLateSession({ ts: eTs, novelId: eNovelId }, legacyGate)) {
-      appliedSessions++;
-      continue;
-    }
-    const r = await db
-      .insert(readingSessions)
-      .values({
-        userId: user.id,
-        clientSessionId: key,
-        novelId: String(e.novelId ?? ''),
-        chapterId: num(e.chapterId),
-        seconds: num(e.seconds),
-        ...(legacyFree ? { ...FREE_SESSION_SAFE_DEFAULTS, readDay: utcDayFromTs(num(e.ts, now)) } : {
-          words: num(e.words),
-          minuteOfDay: num(e.minuteOfDay),
-          readDay: strDef(e.readDay),
-        }),
-        ts: num(e.ts, now)
-      })
-      .onConflictDoNothing({ target: [readingSessions.userId, readingSessions.clientSessionId] })
-      .returning();
-    if ((r as unknown[]).length > 0) appliedSessions++;
-  }
-
-  if (legacyFree) await logExpiredObservation(user);
-  return c.json({ success: true, applied: { library: appliedLibrary, sessions: appliedSessions }, serverNow: now });
+  return fail(c, unsupportedSyncVersionResponse());
 });
 
 // POST /api/v1/sync/pull
 syncRouter.post('/pull', async (c) => {
-  const preamble = await syncRequestPreamble(
-    c,
-    () => c.json({ error: 'sync database not configured' }, 503),
-    () => c.json({ error: 'unauthorized: valid Bearer token required' }, 401),
-  );
+  const preamble = await syncRequestPreamble(c);
   if (preamble instanceof Response) return preamble;
   const { body, channel, authedSub } = preamble;
   if (channel === 'v2') return pullV2(c, body, authedSub);
-  if (channel === 'unsupported') return fail(c, unsupportedSyncVersionResponse());
-  const parsed = pullSchema.safeParse(body);
-  if (!parsed.success) return legacyIssues(c, 'invalid pull payload', parsed.error.issues);
-  const legacyBody = parsed.data;
-  const externalId = legacyBody.user.externalId;
-  // Owner policy: an authenticated caller may only sync its own identity.
-  if (authedSub && authedSub !== externalId) {
-    return c.json({ error: 'forbidden: token identity does not match user.externalId' }, 403);
-  }
-  const since = num(legacyBody.since, 0);
-  const user = await resolveLegacySyncUser(c, externalId);
-  if (user instanceof Response) return user;
-  // Derived-plan gate (§ Legacy v1 gating): values gated, shapes unchanged.
-  const pullFree = effectiveReadingPlan(user, Date.now()) !== 'pro';
-
-  // ---- PLAN GATE (v1 pull projection) ---------------------------------------
-  // Session/history rows stay stored as-is; only the Pro-dimension values in
-  // this projection are gated for Free-derived callers.
-  const library = await db
-    .select()
-    .from(userLibrary)
-    .where(and(eq(userLibrary.userId, user.id), gt(userLibrary.updatedAt, since)))
-    .orderBy(userLibrary.updatedAt)
-    .limit(5000);
-  const sessions = await db
-    .select()
-    .from(readingSessions)
-    .where(and(eq(readingSessions.userId, user.id), gt(readingSessions.ts, since)))
-    .orderBy(readingSessions.ts)
-    .limit(5000);
-
-  if (pullFree) await logExpiredObservation(user);
-
-  return c.json({
-    success: true,
-    serverNow: Date.now(),
-    library: library.map((r) => ({
-      novelId: r.novelId,
-      sourceId: r.sourceId,
-      categoryIds: r.categoryIds,
-      lastReadChapterId: r.lastReadChapterId,
-      lastReadChapterNumber: r.lastReadChapterNumber,
-      lastReadChapterTitle: r.lastReadChapterTitle,
-      progressPercent: r.progressPercent,
-      lastReadAt: r.lastReadAt?.toISOString() ?? null,
-      addedAt: r.addedAt?.toISOString() ?? null,
-      updatedAt: r.updatedAt,
-      deletedAt: r.deletedAt
-    })),
-    sessions: sessions.map((r) => ({
-      clientSessionId: r.clientSessionId,
-      novelId: r.novelId,
-      chapterId: r.chapterId,
-      seconds: r.seconds,
-      ...(pullFree ? FREE_SESSION_SAFE_DEFAULTS : {
-        words: r.words,
-        minuteOfDay: r.minuteOfDay,
-        readDay: r.readDay,
-      }),
-      ts: r.ts
-    }))
-  });
+  return fail(c, unsupportedSyncVersionResponse());
 });
 
 // POST /api/v1/sync/reading/reset — delete ALL reading sessions + derived rows,
@@ -744,7 +500,14 @@ syncRouter.post('/unlocks/push', async (c) => {
   const user = await resolveLegacySyncUser(c, externalId);
   if (user instanceof Response) return user;
   const now = Date.now();
-  const deltas = collapseUnlockBatch(payload.unlocks);
+  const collapsed = collapseUnlockBatch(payload.unlocks);
+  // A stats reset deliberately forgets achievements too (readingDelete clears
+  // user_achievement_unlocks). An outbox flush that survived the reset must not
+  // resurrect them: same clock-skew tolerance as the session deletion gate.
+  const resetAt = normalizeResetAt(user.statsResetAt);
+  const deltas = resetAt === null
+    ? collapsed
+    : collapsed.filter((d) => d.firstSeenAt + READING_CLOCK_SKEW_MS >= resetAt);
   if (deltas.length > 0) {
     try {
       await db
@@ -800,6 +563,9 @@ syncRouter.post('/unlocks/pull', async (c) => {
     return c.json({
       success: true,
       serverNow: Date.now(),
+      // Additive: the shipped client ignores unknown keys. Lets a newer client
+      // drop local unlocks from before a deliberate stats reset.
+      resetAt: normalizeResetAt(user.statsResetAt),
       unlocks: rows.map((r) => ({
         achievementId: r.achievementId,
         level: Number(r.level),
@@ -823,9 +589,21 @@ syncRouter.post('/stats', async (c) => {  if (!isDbAvailable()) return c.json({ 
   if (authedSub && authedSub !== externalId) return c.json({ error: 'forbidden' }, 403);
   const user = await resolveLegacySyncUser(c, externalId);
   if (user instanceof Response) return user;
-  const lib = await db.select({ id: userLibrary.id }).from(userLibrary).where(eq(userLibrary.userId, user.id));
-  const sess = await db.select({ id: readingSessions.id }).from(readingSessions).where(eq(readingSessions.userId, user.id));
-  return c.json({ success: true, library: lib.length, sessions: sess.length, serverNow: Date.now() });
+  // COUNT(*) instead of materializing every id just to read its length.
+  const [libraryCount] = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(userLibrary)
+    .where(eq(userLibrary.userId, user.id));
+  const [sessionCount] = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(readingSessions)
+    .where(eq(readingSessions.userId, user.id));
+  return c.json({
+    success: true,
+    library: Number(libraryCount?.count ?? 0),
+    sessions: Number(sessionCount?.count ?? 0),
+    serverNow: Date.now(),
+  });
 });
 
 // Subject of the caller's token when one is presented (null = anonymous).

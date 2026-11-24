@@ -1,5 +1,6 @@
 import type { MiddlewareHandler } from 'hono';
 import { getWorkerBinding } from '../config/env.js';
+import { verifySubject } from './auth.js';
 
 /** Cloudflare's Workers rate-limiting binding, when one is configured. */
 interface RateLimitBinding {
@@ -28,10 +29,38 @@ function prune(now: number): void {
   }
 }
 
+/**
+ * Best-effort caller address for the limiter key.
+ *
+ * `cf-connecting-ip` is written by Cloudflare and cannot be spoofed by the
+ * client, so it wins. Behind another proxy the LAST `x-forwarded-for` hop is
+ * the one our edge appended; the first hop is whatever the caller claimed and
+ * was trivially spoofable for a fresh key (and therefore a fresh budget).
+ */
+function clientAddress(c: { req: { header: (name: string) => string | undefined } }): string {
+  const cf = c.req.header('cf-connecting-ip')?.trim();
+  if (cf) return cf;
+  const forwarded = c.req.header('x-forwarded-for');
+  if (forwarded) {
+    const hops = forwarded.split(',').map((hop) => hop.trim()).filter(Boolean);
+    if (hops.length > 0) return hops[hops.length - 1];
+  }
+  return 'local';
+}
+
 export function rateLimit(max = 60, windowMs = 60_000, keyFn?: (c: any) => string): MiddlewareHandler {
   return async (c, next) => {
-    const ip = c.req.header('x-forwarded-for')?.split(',')[0]?.trim() || 'local';
-    const sub = (c.get as any)?.('authUser')?.sub;
+    const ip = clientAddress(c);
+    // Sync routes do their own auth and never populate `authUser`, so their
+    // keys used to collapse to the caller-supplied IP alone. Verify the Bearer
+    // token here (the same helper authedSubject uses) and key a signed-in
+    // caller by its verified subject. Verification is one JWT decode, already
+    // spent on this request; an invalid/absent token falls back to IP.
+    let sub = (c.get as any)?.('authUser')?.sub;
+    if (typeof sub !== 'string' && c.req.path.startsWith('/api/v1/sync')) {
+      const verified = await verifySubject(c.req.header('Authorization'));
+      if (verified) sub = verified;
+    }
     const base = typeof keyFn === 'function' ? keyFn(c) : (typeof sub === 'string' && sub ? `user:${sub}` : `ip:${ip}`);
     const key = `${base}:${c.req.path}`;
 

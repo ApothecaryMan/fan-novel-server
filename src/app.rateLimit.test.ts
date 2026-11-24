@@ -21,7 +21,7 @@ describe('rate limiting of the sync surface', () => {
     server.request(path, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ user: { externalId: 'rl_subject' } }),
+      body: JSON.stringify({ syncVersion: 2, user: { externalId: 'rl_subject' }, sessions: [] }),
     });
 
   it('lets a 60-request burst through and answers the 61st with a coded 429', async () => {

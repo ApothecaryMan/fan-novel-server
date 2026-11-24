@@ -12,10 +12,14 @@ vi.mock('../database/db.js', () => ({
 let app: Hono;
 let token: string;
 const fake = () => holder.fake!;
-async function sync(path: string, externalId = 'google_subject-1', email = 'ADMIN@test.com', bearer: string | null = token) {
+async function sync(path: string, externalId = 'google_subject-1', _email = 'ADMIN@test.com', bearer: string | null = token) {
   return app.request(`/sync/${path}`, { method: 'POST', headers: {
     'Content-Type': 'application/json', ...(bearer ? { Authorization: `Bearer ${bearer}` } : {}),
-  }, body: JSON.stringify({ user: { externalId, email, name: 'Untrusted' } }) });
+  }, body: JSON.stringify(
+    path === 'pull'
+      ? { syncVersion: 2, user: { externalId } }
+      : { syncVersion: 2, user: { externalId }, sessions: [] },
+  ) });
 }
 beforeEach(async () => {
   holder.fake = identityDb(); vi.stubGlobal('__WORKER_ENV__', undefined); setWorkerEnv(productionBindings);

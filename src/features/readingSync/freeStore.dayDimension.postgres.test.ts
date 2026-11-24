@@ -6,7 +6,7 @@ import { migrate } from 'drizzle-orm/node-postgres/migrator';
 import * as schema from '../../database/schema.js';
 import { readingSessions, users } from '../../database/schema.js';
 import { closeDb, initDb } from '../../database/db.js';
-import { storeFreeSessions } from './freeStore.js';
+import { loadFreeStatsForUser, storeFreeSessions } from './freeStore.js';
 import { loadLeaderboard } from './leaderboardStore.js';
 
 const DATABASE_NAME = 'free_day_test';
@@ -92,5 +92,22 @@ describe.skipIf(!url)('Free day dimension (isolated PostgreSQL)', () => {
     const rows = await loadLeaderboard('week', 10);
     const mine = rows.find((r) => r.user.id === `freeday-${process.pid.toString(36)}`);
     expect(mine).toMatchObject({ chapters: 1, trend: 1 });
+  });
+
+  it('excludes a zero-second day from the Free streak set (client parity)', async () => {
+    // Same zero seconds the client ignores: a completion-only event yesterday
+    // must not extend today's streak past one day.
+    await storeFreeSessions(userId, [{
+      clientSessionId: 'free-zero-yesterday',
+      novelId: '7',
+      chapterId: 2,
+      seconds: 0,
+      progressPercent: 100,
+      completed: true,
+      ts: Date.now() - 86_400_000,
+    }]);
+    const stats = await loadFreeStatsForUser(userId, { includeStreaks: true });
+    expect(stats.currentStreakDays).toBe(1);
+    expect(stats.longestStreakDays).toBe(1);
   });
 });

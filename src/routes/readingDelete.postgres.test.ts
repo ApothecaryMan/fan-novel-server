@@ -282,28 +282,28 @@ describe.skipIf(!url)('Reading delete + late-upload gates (isolated PostgreSQL)'
     expect((await otherNovel.json()).applied).toEqual({ sessions: 1 });
   });
 
-  it('legacy v1 counts dropped late rows as applied so old clients stop retrying', async () => {
-    const { row, externalId, token } = await createUser('free');
-    const legacyPush = (sessions: unknown[]) =>
-      request('/sync/push', { user: { externalId }, sessions }, token);
+  it('drops pre-reset achievement deltas and publishes resetAt on unlock pull', async () => {
+    const { externalId, token } = await createUser('free');
     const resetRes: any = await (await request('/sync/reading/reset', { syncVersion: 2, user: { externalId } }, token)).json();
     const resetAt: number = resetRes.resetAt;
     expect(typeof resetAt).toBe('number');
 
-    const res = await legacyPush([
-      // Dropped as late, but still counted: no acceptedSessionIds drain exists here.
-      { clientSessionId: 'legacy-late-1', novelId: '10', chapterId: 1, seconds: 60, ts: resetAt - READING_CLOCK_SKEW_MS - 10_000 },
-      // Exactly on the skew boundary: concurrent, stored and counted.
-      { clientSessionId: 'legacy-edge-1', novelId: '10', chapterId: 2, seconds: 60, ts: resetAt - READING_CLOCK_SKEW_MS },
-      { clientSessionId: 'legacy-fresh-1', novelId: '10', chapterId: 3, seconds: 60, ts: resetAt + 10_000 },
-    ]);
-    expect(res.status).toBe(200);
-    const body: any = await res.json();
-    // Response shape unchanged: a bare applied count, no new keys.
-    expect(Object.keys(body.applied).sort()).toEqual(['library', 'sessions']);
-    expect(body.applied).toEqual({ library: 0, sessions: 3 });
-    const stored = await storedSessions(row.id);
-    expect(stored.map((r) => r.clientSessionId).sort()).toEqual(['legacy-edge-1', 'legacy-fresh-1']);
+    const push = await request('/sync/unlocks/push', {
+      user: { externalId },
+      unlocks: [
+        // Strictly before the reset (beyond the skew): forgotten, not stored.
+        { achievementId: 'old', level: 2, firstSeenAt: resetAt - READING_CLOCK_SKEW_MS - 1, catalogVersion: 1 },
+        // Exactly on the skew boundary: concurrent, kept.
+        { achievementId: 'edge', level: 2, firstSeenAt: resetAt - READING_CLOCK_SKEW_MS, catalogVersion: 1 },
+        { achievementId: 'fresh', level: 2, firstSeenAt: resetAt + 10_000, catalogVersion: 1 },
+      ],
+    }, token);
+    expect(push.status).toBe(200);
+    expect((await push.json()).applied).toBe(2);
+
+    const pulls: any = await (await request('/sync/unlocks/pull', { user: { externalId } }, token)).json();
+    expect(pulls.resetAt).toBe(resetAt);
+    expect(pulls.unlocks.map((u: any) => u.achievementId).sort()).toEqual(['edge', 'fresh']);
   });
 
   it('reset and novel delete are idempotent', async () => {

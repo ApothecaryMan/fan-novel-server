@@ -40,7 +40,10 @@ export function identityDb() {
   let nextInsertError: unknown = null;
   const dialect = new PgDialect();
   const USER_COL_KEYS = { google_subject: 'googleSubject', external_id: 'externalId', id: 'id',
-    username: 'username', email: 'email', role: 'role' } as Record<string, keyof Row>;
+    username: 'username', email: 'email', role: 'role',
+    reading_stats_plan: 'readingStatsPlan',
+    reading_stats_plan_expires_at: 'readingStatsPlanExpiresAt',
+    stats_reset_at: 'statsResetAt' } as Record<string, keyof Row>;
   function matches(row: Row, condition?: SQL) {
     if (!condition) return true;
     const query = dialect.sqlToQuery(condition);
@@ -182,6 +185,11 @@ export function identityDb() {
       // unbounded read wherever a route relies on `.limit(1)`.
       limit: (n: number) => execute().then((r: any[]) => r.slice(0, n)),
       orderBy: (_value: unknown) => builder,
+      // Streak queries group by a day expression and HAVING-filter it. The
+      // fake has no day fixtures, so the result is legitimately empty either
+      // way; the chain must exist or the route would 503 on a TypeError.
+      groupBy: (_value: unknown) => builder,
+      having: (_value: unknown) => builder,
       then: (resolve: (value: any[]) => unknown, reject?: (reason: unknown) => unknown) => execute().then(resolve, reject),
     };
     return builder;

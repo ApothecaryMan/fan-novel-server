@@ -69,6 +69,13 @@ iapRouter.post('/webhook', async (c) => {
     const res = await refundPurchase(db, { purchaseToken: token });
     return c.json({ success: true, ...res });
   } catch (e) {
+    // A duplicate delivery racing another refund is an idempotent replay, not
+    // an outage: the losing insert hits the ledger's unique key. Treat it like
+    // the verify path does, and never trip the breaker for it.
+    if (String((e as { cause?: { code?: string }; code?: string })?.cause?.code
+      ?? (e as { code?: string })?.code) === '23505') {
+      return c.json({ success: true, replayed: true });
+    }
     if (e instanceof PurchaseError) return c.json({ error: e.code }, e.status);
     noteDbFailure();
     return c.json({ error: 'store unavailable' }, 503);

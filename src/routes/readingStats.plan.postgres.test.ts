@@ -428,18 +428,25 @@ describe.skipIf(!url)('Free reading plan sync (isolated PostgreSQL)', () => {
     expect(pulled.stats).toMatchObject({ totalSecondsRead: 120, uniqueInAppCompletedChapters: 0 });
   });
 
-  it('treats a legacy v1 session as time only, never as completion evidence', async () => {
+  it('treats a stored legacy session as time only, never as completion evidence', async () => {
     const { row, externalId, token } = await createUser();
-    const legacy = await request('/sync/push', {
-      user: { externalId },
-      sessions: [{ clientSessionId: 'legacy-1', novelId: '42', chapterId: 7, seconds: 600, words: 500, readDay: '2026-09-20', genre: 'Fantasy', ts: 1782000000000 }],
-    }, token);
-    expect(legacy.status).toBe(200);
-    // Legacy response shape is untouched: no plan, no stats projection.
-    const legacyBody: any = await legacy.json();
-    expect(legacyBody).toMatchObject({ success: true, applied: { sessions: 1 } });
-    expect(legacyBody).not.toHaveProperty('plan');
-    expect(legacyBody).not.toHaveProperty('stats');
+    // A pre-v2 row already in storage: v1 writes are retired, but the
+    // calculation must still treat such legacy evidence as time only.
+    await database.insert(readingSessions).values({
+      userId: row.id,
+      clientSessionId: 'legacy-1',
+      novelId: '42',
+      chapterId: 7,
+      seconds: 600,
+      words: 500,
+      minuteOfDay: 0,
+      readDay: '2026-09-20',
+      progressPercent: 0,
+      completed: false,
+      completionSignalPresent: false,
+      proFieldsPresent: false,
+      ts: 1782000000000,
+    });
 
     const [stored] = await storedRows(row.id);
     expect(stored.completionSignalPresent).toBe(false);
@@ -510,45 +517,28 @@ describe.skipIf(!url)('Free reading plan sync (isolated PostgreSQL)', () => {
     expect(await storedRows(free.row.id)).toHaveLength(0);
   });
 
-  // The legacy channel keeps wire shapes but gates Pro values per § Legacy v1
-  // gating. Library merge rules are untouched. Reading history is device-local
-  // now: the permissive legacy schema still ACCEPTS a `history` block and
-  // simply drops it, which is what the push below proves.
-  it('keeps the legacy v1 library writes unchanged', async () => {
-    const { row, externalId, token } = await createUser();
-    const legacyPush = () => request('/sync/push', {
-      user: { externalId },
-      library: [{ novelId: '42', sourceId: 'novel-42', categoryIds: ['a'], lastReadChapterId: 7,
-        lastReadChapterNumber: 7, progressPercent: 40, addedAt: '2026-09-20T10:00:00.000Z', updatedAt: 1782000000000 }],
-      history: [{ novelId: '42', novelTitle: 'A Novel', chapterId: 7, readAt: 1782000000000, updatedAt: 1782000000000 }],
-    }, token);
+  it('retires a lapsed Pro row once and writes exactly one expiry audit event', async () => {
+    const { row, token } = await createUser('free');
+    await database.update(users)
+      .set({ readingStatsPlan: 'pro', readingStatsPlanExpiresAt: Date.now() - 86_400_000 })
+      .where(eq(users.id, row.id));
 
-    const first = await legacyPush();
+    const planRead = () => app.request('/users/me/profile?readingStatsVersion=2&readingStatsScope=plan', {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    const first = await planRead();
     expect(first.status).toBe(200);
-    expect(await first.json()).toMatchObject({ success: true, applied: { library: 1 } });
+    expect((await first.json()).plan).toBe('free');
 
-    const [library] = await database.select().from(schema.userLibrary).where(eq(schema.userLibrary.userId, row.id));
-    expect(library).toMatchObject({ novelId: '42', sourceId: 'novel-42', categoryIds: ['a'],
-      lastReadChapterId: 7, lastReadChapterNumber: 7, progressPercent: 40 });
-    // The merge rules are untouched: an identical replay writes nothing.
-    const replay = await legacyPush();
-    expect(replay.status).toBe(200);
-    expect(await replay.json()).toMatchObject({ applied: { library: 0 } });
-    expect(await database.select().from(schema.userLibrary).where(eq(schema.userLibrary.userId, row.id))).toHaveLength(1);
+    const [stored] = await database.select().from(users).where(eq(users.id, row.id));
+    expect(stored.readingStatsPlan).toBe('free');
+    expect(stored.readingStatsPlanExpiresAt).toBeNull();
 
-    // A newer client clock does win, as before.
-    const newer = await request('/sync/push', {
-      user: { externalId },
-      library: [{ novelId: '42', progressPercent: 55, updatedAt: 1782000000001 }],
-    }, token);
-    expect(newer.status).toBe(200);
-    expect(await newer.json()).toMatchObject({ applied: { library: 1 } });
-    const [updatedLibrary] = await database.select().from(schema.userLibrary).where(eq(schema.userLibrary.userId, row.id));
-    expect(updatedLibrary.progressPercent).toBe(55);
-    // Collections are Pro scope, so they stay invisible to the Free projection.
-    const pulled: any = await (await request('/sync/pull', { syncVersion: 2, user: { externalId } }, token)).json();
-    expect(pulled).toEqual({ success: true, plan: 'free',
-      stats: { level: 1, levelProgress: 0, totalSecondsRead: 0, uniqueInAppCompletedChapters: 0 } });
+    // Every later observation sees a free row and writes nothing more.
+    expect((await planRead()).status).toBe(200);
+    const events = await database.select().from(schema.subscriptionEvents)
+      .where(eq(schema.subscriptionEvents.userId, row.id));
+    expect(events.filter((event) => event.type === 'expired')).toHaveLength(1);
   });
 
   it('returns the authoritative plan and exactly the old 4-key Free stats', async () => {
@@ -752,9 +742,10 @@ describe.skipIf(!url)('Free reading plan sync (isolated PostgreSQL)', () => {
       expect(res.status).toBe(400);
       expect((await res.json()).code).toBe('unsupported_sync_version');
     }
-    // v1 stays compatible on its own permissive channel.
+    // v1 is retired: 410 before any storage work, never a permissive write.
     const legacy = await request('/sync/push', { syncVersion: 1, user: { externalId }, sessions: [] }, token);
-    expect(legacy.status).toBe(200);
+    expect(legacy.status).toBe(410);
+    expect((await legacy.json()).error).toBe('sync_version_unsupported');
     expect(await storedRows(row.id)).toHaveLength(0);
   });
 
@@ -857,7 +848,9 @@ describe.skipIf(!url)('Free reading plan sync (isolated PostgreSQL)', () => {
     const pulled: any = await pull.json();
     expect(pulled.plan).toBe('pro');
     expect(pulled.sessions.rows).toHaveLength(1);
-    expect(pulled.library.rows).toHaveLength(1);
+    // Library pages are deliberately empty on pull: the shipped client
+    // discards the rows and only advances its library cursor.
+    expect(pulled.library.rows).toHaveLength(0);
     expect(pulled.stats).toMatchObject({
       totalSecondsRead: 600,
       totalWords: 1000,
